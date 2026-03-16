@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# デフォルト権限を最小化
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Build (Node.js ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+
+    # PRコメントのためにpull-requestsへの書き込みを付与
+    permissions:
+      contents: read
+      pull-requests: write
+
+    strategy:
+      matrix:
+        node-version: ["20.x", "22.x"]
+
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/setup-node v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run compile
+
+      - name: Test
+        run: npm test -- --json --outputFile=test-report.json
+
+      # actions/upload-artifact v4
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: test-report-node${{ matrix.node-version }}
+          path: test-report.json
+          retention-days: 30
+
+      # actions/github-script v7
+      - name: Post test summary to PR
+        if: github.event_name == 'pull_request' && matrix.node-version == '20.x'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('test-report.json', 'utf8'));
+
+            const total = report.numTotalTests;
+            const passed = report.numPassedTests;
+            const failed = report.numFailedTests;
+            const skipped = report.numPendingTests;
+            const status = failed === 0 ? '✅ All tests passed' : `❌ ${failed} test(s) failed`;
+
+            let body = `## Test Results\n\n${status}\n\n`;
+            body += `| | Count |\n|---|---|\n`;
+            body += `| Total | ${total} |\n`;
+            body += `| Passed | ${passed} |\n`;
+            body += `| Failed | ${failed} |\n`;
+            body += `| Skipped | ${skipped} |\n\n`;
+
+            if (failed > 0) {
+              body += `### Failed Tests\n\n`;
+              report.testResults.forEach(suite => {
+                suite.assertionResults
+                  .filter(t => t.status === 'failed')
+                  .forEach(t => {
+                    const name = t.ancestorTitles.concat(t.title).join(' > ');
+                    body += `- \`${name}\`\n`;
+                    if (t.failureMessages.length > 0) {
+                      body += `\`\`\`\n${t.failureMessages[0].slice(0, 300)}\n\`\`\`\n`;
+                    }
+                  });
+              });
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' && c.body.startsWith('## Test Results')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

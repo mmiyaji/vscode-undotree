@@ -1,0 +1,350 @@
+import { UndoTreeManager } from '../undoTreeManager';
+
+jest.mock('vscode');
+jest.useFakeTimers();
+
+// テスト用ヘルパー
+function makeUri(path = 'file:///test.md') {
+    return { toString: () => path } as any;
+}
+
+function makeDocument(content: string, uriStr = 'file:///test.md') {
+    return {
+        getText: () => content,
+        uri: makeUri(uriStr),
+        isUntitled: false,
+    } as any;
+}
+
+function makeChangeEvent(doc: any, changes: Array<{ offset: number; removeLength: number; text: string }>) {
+    return {
+        document: doc,
+        contentChanges: changes.map((c) => ({
+            rangeOffset: c.offset,
+            rangeLength: c.removeLength,
+            text: c.text,
+        })),
+    } as any;
+}
+
+// -----------------------------------------------
+// 基本動作
+// -----------------------------------------------
+describe('初期状態', () => {
+    it('初回getTreeでrootノードが作られる', () => {
+        const manager = new UndoTreeManager();
+        const tree = manager.getTree(makeUri());
+        expect(tree.nodes.size).toBe(1);
+        expect(tree.currentId).toBe(0);
+        expect(tree.nodes.get(0)!.storage.kind).toBe('full');
+    });
+});
+
+describe('保存時のノード追加', () => {
+    it('初回保存でノードが追加される', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        const tree = manager.getTree(doc.uri);
+        expect(tree.nodes.size).toBe(2);
+        expect(tree.currentId).toBe(1);
+    });
+
+    it('内容が変わらなければノードは追加されない', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        manager.onDidSaveTextDocument(doc); // 同じ内容で再保存
+        const tree = manager.getTree(doc.uri);
+        expect(tree.nodes.size).toBe(2); // rootと1ノードのまま
+    });
+
+    it('内容が変われば新しいノードが追加される', () => {
+        const manager = new UndoTreeManager();
+        const doc1 = makeDocument('Hello');
+        const doc2 = makeDocument('Hello World');
+        manager.onDidSaveTextDocument(doc1);
+        manager.onDidSaveTextDocument(doc2);
+        const tree = manager.getTree(makeUri());
+        expect(tree.nodes.size).toBe(3);
+    });
+});
+
+// -----------------------------------------------
+// ストレージ種別の判定
+// -----------------------------------------------
+describe('ストレージ種別の判定', () => {
+    it('差分バッファが空なら全量保存', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        const tree = manager.getTree(doc.uri);
+        const node = tree.nodes.get(1)!;
+        expect(node.storage.kind).toBe('full');
+    });
+
+    it('変更量が30%未満なら差分保存', () => {
+        const manager = new UndoTreeManager();
+        // 100文字のベースコンテンツ
+        const base = 'a'.repeat(100);
+        const doc1 = makeDocument(base);
+        manager.onDidSaveTextDocument(doc1);
+
+        // 5文字追加（5/105 ≈ 4.8% < 30%）
+        const changed = base + 'bbbbb';
+        const doc2 = makeDocument(changed);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc2, [{ offset: 100, removeLength: 0, text: 'bbbbb' }])
+        );
+        manager.onDidSaveTextDocument(doc2);
+
+        const tree = manager.getTree(makeUri());
+        const node = tree.nodes.get(2)!;
+        expect(node.storage.kind).toBe('delta');
+    });
+
+    it('変更量が30%以上なら全量保存', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(10);
+        const doc1 = makeDocument(base);
+        manager.onDidSaveTextDocument(doc1);
+
+        // 8文字追加（8/18 ≈ 44% > 30%）
+        const changed = base + 'b'.repeat(8);
+        const doc2 = makeDocument(changed);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc2, [{ offset: 10, removeLength: 0, text: 'b'.repeat(8) }])
+        );
+        manager.onDidSaveTextDocument(doc2);
+
+        const tree = manager.getTree(makeUri());
+        const node = tree.nodes.get(2)!;
+        expect(node.storage.kind).toBe('full');
+    });
+});
+
+// -----------------------------------------------
+// 分岐点の全量昇格
+// -----------------------------------------------
+describe('分岐点の全量昇格', () => {
+    it('2つ目の子を持つノードはfullに昇格する', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        const doc1 = makeDocument(base);
+        manager.onDidSaveTextDocument(doc1);
+
+        // 小さい変更で node2 作成（deltaのはず）
+        const content2 = base + 'b';
+        const doc2 = makeDocument(content2);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc2, [{ offset: 100, removeLength: 0, text: 'b' }])
+        );
+        manager.onDidSaveTextDocument(doc2);
+
+        const tree = manager.getTree(makeUri());
+        const node1 = tree.nodes.get(1)!;
+        expect(node1.storage.kind).toBe('full'); // まだ子が1つなのでfull（初回保存はfull）
+
+        // currentIdをnode1に戻して別の内容を保存（分岐）
+        tree.currentId = 1;
+        const content3 = base + 'c';
+        const doc3 = makeDocument(content3);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc3, [{ offset: 100, removeLength: 0, text: 'c' }])
+        );
+        manager.onDidSaveTextDocument(doc3);
+
+        // node1は2つの子を持つ → 全量に昇格済みであること
+        expect(node1.storage.kind).toBe('full');
+        expect(node1.children.length).toBe(2);
+    });
+});
+
+// -----------------------------------------------
+// DAG収束（同じhashへのリンク）
+// -----------------------------------------------
+describe('DAG収束', () => {
+    it('同じ内容に戻ったとき既存ノードにリンクする', () => {
+        const manager = new UndoTreeManager();
+        const doc1 = makeDocument('Hello');
+        const doc2 = makeDocument('Hello World');
+        const doc3 = makeDocument('Hello'); // doc1と同じ内容
+
+        manager.onDidSaveTextDocument(doc1);
+        manager.onDidSaveTextDocument(doc2);
+        manager.onDidSaveTextDocument(doc3);
+
+        const tree = manager.getTree(makeUri());
+        // 新規ノードは作られず node1 にリンク
+        expect(tree.nodes.size).toBe(3); // root + node1 + node2
+        expect(tree.currentId).toBe(1);  // node1(Hello)に収束
+    });
+});
+
+// -----------------------------------------------
+// reconstructContent
+// -----------------------------------------------
+describe('reconstructContent', () => {
+    it('fullノードの内容を直接返す', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        const tree = manager.getTree(makeUri());
+        const content = manager.reconstructContent(tree, 1);
+        expect(content).toBe('Hello');
+    });
+
+    it('deltaノードにdiffを適用して正しく復元する', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        const doc1 = makeDocument(base);
+        manager.onDidSaveTextDocument(doc1);
+
+        const changed = base + 'bbbbb';
+        const doc2 = makeDocument(changed);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc2, [{ offset: 100, removeLength: 0, text: 'bbbbb' }])
+        );
+        manager.onDidSaveTextDocument(doc2);
+
+        const tree = manager.getTree(makeUri());
+        const node2 = tree.nodes.get(2)!;
+        expect(node2.storage.kind).toBe('delta');
+
+        const content = manager.reconstructContent(tree, 2);
+        expect(content).toBe(changed);
+    });
+
+    it('複数のdeltaノードを連鎖して復元する', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        const step1 = base + 'b';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(step1), [{ offset: 100, removeLength: 0, text: 'b' }])
+        );
+        manager.onDidSaveTextDocument(makeDocument(step1));
+
+        const step2 = step1 + 'c';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(step2), [{ offset: 101, removeLength: 0, text: 'c' }])
+        );
+        manager.onDidSaveTextDocument(makeDocument(step2));
+
+        const tree = manager.getTree(makeUri());
+        const content = manager.reconstructContent(tree, 3);
+        expect(content).toBe(step2);
+    });
+});
+
+// -----------------------------------------------
+// オートセーブ
+// -----------------------------------------------
+describe('オートセーブ', () => {
+    it('30秒後にアクティブエディタの内容でノードが追加される', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+
+        const doc = makeDocument('Auto saved content');
+        vscode.window.activeTextEditor = { document: doc };
+
+        jest.advanceTimersByTime(30_000);
+
+        const tree = manager.getTree(doc.uri);
+        expect(tree.nodes.size).toBe(2);
+    });
+
+    it('内容が変わっていなければオートセーブでノードは追加されない', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+
+        const doc = makeDocument('No change');
+        vscode.window.activeTextEditor = { document: doc };
+
+        jest.advanceTimersByTime(30_000); // 1回目: node追加
+        jest.advanceTimersByTime(30_000); // 2回目: 同じ内容 → スキップ
+
+        const tree = manager.getTree(doc.uri);
+        expect(tree.nodes.size).toBe(2); // root + 1ノードのまま
+    });
+});
+
+// -----------------------------------------------
+// DAG循環防止
+// -----------------------------------------------
+describe('DAG循環防止', () => {
+    it('同じ内容に複数回戻っても循環リンクが発生しない', () => {
+        const manager = new UndoTreeManager();
+        // A → B → A → B → A のように繰り返してもノード数は3以下
+        const docA = makeDocument('content-A');
+        const docB = makeDocument('content-B');
+
+        manager.onDidSaveTextDocument(docA); // node1: A
+        manager.onDidSaveTextDocument(docB); // node2: B
+        manager.onDidSaveTextDocument(docA); // Aに収束 → node1へジャンプ
+        manager.onDidSaveTextDocument(docB); // Bに収束 → node2へジャンプ
+        manager.onDidSaveTextDocument(docA); // Aに収束 → node1へジャンプ
+
+        const tree = manager.getTree(makeUri());
+        // root + nodeA + nodeB の3ノードのみ
+        expect(tree.nodes.size).toBe(3);
+    });
+
+    it('先祖ノードへのリンクはスキップされる（循環グラフにならない）', () => {
+        const manager = new UndoTreeManager();
+        const docA = makeDocument('content-A');
+        const docB = makeDocument('content-B');
+        const docC = makeDocument('content-C');
+
+        manager.onDidSaveTextDocument(docA); // node1: A (currentId=1)
+        manager.onDidSaveTextDocument(docB); // node2: B (currentId=2)
+        manager.onDidSaveTextDocument(docC); // node3: C (currentId=3)
+        manager.onDidSaveTextDocument(docA); // node1はnode3の先祖 → リンクしない
+
+        const tree = manager.getTree(makeUri());
+        const node3 = tree.nodes.get(3)!;
+        // node3の子にnode1は追加されないこと
+        expect(node3.children).not.toContain(1);
+    });
+
+    it('reconstructContentが循環があっても無限ループしない', () => {
+        const manager = new UndoTreeManager();
+        const tree = manager.getTree(makeUri());
+
+        // 強制的に循環を作っても無限ループしないことを確認
+        const nodeA = tree.nodes.get(0)!;
+        const nodeB = {
+            id: 99,
+            parents: [0],
+            children: [] as number[],
+            timestamp: Date.now(),
+            label: 'test',
+            hash: 'testhash',
+            storage: { kind: 'delta' as const, diffs: [] },
+        };
+        tree.nodes.set(99, nodeB);
+        // 循環: node0のparentsにnode99を追加（通常ありえないが防御テスト）
+        nodeA.parents.push(99);
+        nodeB.children.push(0);
+
+        // 無限ループしないことを確認（タイムアウトなしで完了する）
+        expect(() => manager.reconstructContent(tree, 99)).not.toThrow();
+    });
+});
+
+// -----------------------------------------------
+// ファイルを閉じたときのクリーンアップ
+// -----------------------------------------------
+describe('クリーンアップ', () => {
+    it('ファイルを閉じるとツリーが削除される', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        manager.onDidCloseTextDocument(doc);
+        // 再度getTreeすると初期状態に戻る
+        const tree = manager.getTree(doc.uri);
+        expect(tree.nodes.size).toBe(1);
+        expect(tree.currentId).toBe(0);
+    });
+});

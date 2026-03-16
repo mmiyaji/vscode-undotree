@@ -1,0 +1,163 @@
+'use strict';
+
+import * as vscode from 'vscode';
+import { UndoTreeManager } from './undoTreeManager';
+
+export class UndoTreeProvider implements vscode.WebviewViewProvider {
+    private view?: vscode.WebviewView;
+
+    constructor(
+        private readonly context: vscode.ExtensionContext,
+        private readonly manager: UndoTreeManager
+    ) {}
+
+    resolveWebviewView(webviewView: vscode.WebviewView) {
+        this.view = webviewView;
+        webviewView.webview.options = { enableScripts: true };
+        this.render();
+
+        webviewView.webview.onDidReceiveMessage(async (message) => {
+            const editor = vscode.window.activeTextEditor;
+            switch (message.command) {
+                case 'undo':
+                    await this.manager.undo();
+                    break;
+                case 'redo':
+                    await this.manager.redo();
+                    break;
+                case 'jumpToNode':
+                    if (editor && typeof message.nodeId === 'number') {
+                        await this.manager.jumpToNode(message.nodeId, editor);
+                    }
+                    break;
+                case 'togglePause':
+                    await vscode.commands.executeCommand('undotree.togglePause');
+                    break;
+                case 'openSettings':
+                    await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree');
+                    break;
+            }
+        });
+    }
+
+    refresh() {
+        if (this.view) {
+            this.render();
+        }
+    }
+
+    private render() {
+        if (!this.view) {
+            return;
+        }
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused);
+            return;
+        }
+        const tree = this.manager.getTree(editor.document.uri);
+        this.view.webview.html = this.buildHtml(
+            Array.from(tree.nodes.values()),
+            tree.currentId,
+            this.manager.paused
+        );
+    }
+
+    private buildHtml(nodes: ReturnType<typeof Array.from> | null, currentId: number, paused: boolean): string {
+        const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
+        return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; }
+  .node { display: flex; align-items: center; gap: 6px; padding: 3px 4px; cursor: pointer; border-radius: 3px; user-select: none; }
+  .node:hover { background: var(--vscode-list-hoverBackground); }
+  .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-foreground); flex-shrink: 0; }
+  .dot.current { background: var(--vscode-focusBorder); }
+  .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
+  .label { opacity: 0.8; }
+  .time { opacity: 0.5; font-size: 10px; margin-left: auto; }
+  .empty { opacity: 0.5; padding: 8px; }
+  .actions { display: flex; gap: 4px; margin-bottom: 8px; align-items: center; }
+  button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .btn-pause { margin-left: auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .btn-pause:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .btn-settings { background: transparent; color: var(--vscode-foreground); opacity: 0.5; padding: 3px 5px; }
+  .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
+  .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
+</style>
+</head>
+<body>
+<div class="actions">
+  <button id="btn-undo" onclick="send('undo')">↑ Undo</button>
+  <button id="btn-redo" onclick="send('redo')">↓ Redo</button>
+  <button class="btn-pause" onclick="send('togglePause')" title="${paused ? 'Resume tracking' : 'Pause tracking'}">${paused ? '▶ Resume' : '⏸ Pause'}</button>
+  <button class="btn-settings" onclick="send('openSettings')" title="Open Undo Tree settings">⚙</button>
+</div>
+${paused ? '<div class="paused-badge">⏸ Tracking paused — history is frozen</div>' : ''}
+<div id="tree"></div>
+<script>
+  const vscode = acquireVsCodeApi();
+  const nodes = ${nodesJson};
+  const currentId = ${currentId};
+
+  function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
+
+  function formatTime(ts) {
+    const d = new Date(ts);
+    return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0') + ':' + d.getSeconds().toString().padStart(2,'0');
+  }
+
+  function buildTree(nodes, currentId) {
+    if (!nodes) {
+      document.getElementById('tree').innerHTML = '<div class="empty">No active editor</div>';
+      return;
+    }
+    const map = {};
+    nodes.forEach(n => map[n.id] = n);
+    const container = document.getElementById('tree');
+    container.innerHTML = '';
+
+    // undo/redoボタンの有効・無効を更新
+    const cur = map[currentId];
+    document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
+    document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
+
+    const visitedNodes = new Set();
+    function renderNode(id, depth) {
+      if (visitedNodes.has(id)) return;
+      visitedNodes.add(id);
+      const node = map[id];
+      if (!node) return;
+      const isCurrent = node.id === currentId;
+      const storageKind = node.storage?.kind === 'full' ? 'F' : node.storage?.kind === 'delta' ? 'D' : '';
+      const div = document.createElement('div');
+      div.className = 'node' + (isCurrent ? ' current' : '');
+      div.style.paddingLeft = (depth * 14 + 4) + 'px';
+      div.title = 'クリックしてこのノードにジャンプ';
+      div.innerHTML =
+        \`<span class="dot\${isCurrent ? ' current' : ''}"></span>\` +
+        \`<span class="label">\${node.label}</span>\` +
+        (storageKind ? \`<span class="storage">\${storageKind}</span>\` : '') +
+        \`<span class="time">\${formatTime(node.timestamp)}</span>\`;
+      div.addEventListener('click', () => {
+        if (!isCurrent) {
+          send('jumpToNode', { nodeId: node.id });
+        }
+      });
+      container.appendChild(div);
+      node.children.forEach(childId => renderNode(childId, depth + 1));
+    }
+    renderNode(0, 0);
+  }
+
+  buildTree(nodes, currentId);
+</script>
+</body>
+</html>`;
+    }
+}

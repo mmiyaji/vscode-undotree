@@ -1,0 +1,12 @@
+node_modules/**
+src/**
+out/**
+scripts/**
+.github/**
+test-report.json
+test-report.md
+test-report.txt
+.gitignore
+tsconfig.json
+webpack.config.js
+package-lock.json

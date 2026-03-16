@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# デフォルト権限を最小化
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # Releasesの作成に必要
+
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # actions/setup-node v4
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Package extension
+        run: |
+          npm install -g @vscode/vsce
+          vsce package --out vscode-undotree-${{ github.ref_name }}.vsix
+
+      # softprops/action-gh-release v2
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
+        with:
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## vscode-undotree ${{ github.ref_name }}
+
+            ### インストール方法
+            1. `.vsix` ファイルをダウンロード
+            2. VS Code でコマンドパレット → `Extensions: Install from VSIX...`
+            3. ダウンロードした `.vsix` を選択
+          files: vscode-undotree-${{ github.ref_name }}.vsix
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
