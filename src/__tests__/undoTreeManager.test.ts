@@ -215,6 +215,36 @@ describe('reconstructContent', () => {
         expect(content).toBe(changed);
     });
 
+    it('1回の保存前に複数のchangeイベントが発生しても正しく復元する', () => {
+        // 修正前バグ: 複数イベントを降順ソートすると順序が逆転して内容が壊れる
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        // 3つの連続したchangeイベント（それぞれ前のイベント適用後の状態への変更）
+        const step1 = base + 'x';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(step1), [{ offset: 100, removeLength: 0, text: 'x' }])
+        );
+        const step2 = step1 + 'y';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(step2), [{ offset: 101, removeLength: 0, text: 'y' }])
+        );
+        const step3 = step2 + 'z';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(step3), [{ offset: 102, removeLength: 0, text: 'z' }])
+        );
+        // 3イベント分まとめて1ノードに保存
+        manager.onDidSaveTextDocument(makeDocument(step3));
+
+        const tree = manager.getTree(makeUri());
+        const node = tree.nodes.get(2)!;
+        expect(node.storage.kind).toBe('delta');
+
+        const content = manager.reconstructContent(tree, 2);
+        expect(content).toBe(step3); // 'a'.repeat(100) + 'xyz' であること
+    });
+
     it('複数のdeltaノードを連鎖して復元する', () => {
         const manager = new UndoTreeManager();
         const base = 'a'.repeat(100);
