@@ -86,7 +86,10 @@
     "package": "webpack --mode production",
     "vscode:prepublish": "npm run package",
     "test": "jest",
-    "report": "jest --json --outputFile=test-report.json && node scripts/generate-report.js"
+    "report": "jest --json --outputFile=test-report.json && node scripts/generate-report.js",
+    "release:patch": "npm version patch",
+    "release:minor": "npm version minor",
+    "release:major": "npm version major"
   },
   "jest": {
     "preset": "ts-jest",
