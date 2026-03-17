@@ -151,7 +151,7 @@ export function activate(context: vscode.ExtensionContext) {
             const ext = path.extname(editor.document.fileName) || '.txt';
 
             const targetContent = manager.reconstructContent(tree, targetNodeId);
-            const currentContent = manager.reconstructContent(tree, tree.currentId);
+            const currentContent = editor.document.getText();
 
             const targetNode = tree.nodes.get(targetNodeId);
             const currentNode = tree.nodes.get(tree.currentId);
