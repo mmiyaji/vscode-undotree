@@ -161,6 +161,44 @@ describe('分岐点の全量昇格', () => {
 });
 
 // -----------------------------------------------
+// 既存ファイルを開いた場合の初回ノード
+// -----------------------------------------------
+describe('既存ファイルを開いた場合', () => {
+    it('空ルートの直後ノードは変更量が小さくてもfullで保存される', () => {
+        const manager = new UndoTreeManager();
+        const existingContent = 'a'.repeat(100); // 既存ファイルの内容
+
+        // 小さい変更（deltaになりそうな量）をchangeEventで積んでから保存
+        const newContent = existingContent + 'b'; // 1文字追加
+        const doc = makeDocument(newContent);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc, [{ offset: 100, removeLength: 0, text: 'b' }])
+        );
+        manager.onDidSaveTextDocument(doc);
+
+        const tree = manager.getTree(makeUri());
+        const node = tree.nodes.get(1)!;
+        // 空ルートの直後なのでfullで保存されていること
+        expect(node.storage.kind).toBe('full');
+    });
+
+    it('空ルートの直後ノードをreconstructContentで正しく復元できる', () => {
+        const manager = new UndoTreeManager();
+        const existingContent = 'a'.repeat(100);
+        const newContent = existingContent + 'xyz';
+        const doc = makeDocument(newContent);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc, [{ offset: 100, removeLength: 0, text: 'xyz' }])
+        );
+        manager.onDidSaveTextDocument(doc);
+
+        const tree = manager.getTree(makeUri());
+        const content = manager.reconstructContent(tree, 1);
+        expect(content).toBe(newContent);
+    });
+});
+
+// -----------------------------------------------
 // DAG収束（同じhashへのリンク）
 // -----------------------------------------------
 describe('DAG収束', () => {

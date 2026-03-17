@@ -146,7 +146,13 @@ export class UndoTreeManager implements vscode.Disposable {
 
         // ストレージ種別を決定
         const diffs = this.diffBuffer.get(key) ?? [];
-        const storage: UndoNodeStorage = this.shouldStoreFull(diffs, content.length)
+        // 現在ノードが空ルートの場合は必ずfullで保存する
+        // （途中から開いたファイルはルートのcontent=''に対してdeltaを保存すると復元が壊れる）
+        const isCurrentEmptyRoot =
+            currentNode.parents.length === 0 &&
+            currentNode.storage.kind === 'full' &&
+            currentNode.storage.content === '';
+        const storage: UndoNodeStorage = (isCurrentEmptyRoot || this.shouldStoreFull(diffs, content.length))
             ? { kind: 'full', content }
             : { kind: 'delta', diffs };
 
