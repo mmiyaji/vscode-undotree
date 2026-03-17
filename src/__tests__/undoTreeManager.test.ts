@@ -213,9 +213,8 @@ describe('DAG収束', () => {
         manager.onDidSaveTextDocument(doc3);
 
         const tree = manager.getTree(makeUri());
-        // 新規ノードは作られず node1 にリンク
-        expect(tree.nodes.size).toBe(3); // root + node1 + node2
-        expect(tree.currentId).toBe(1);  // node1(Hello)に収束
+        expect(tree.nodes.size).toBe(4);
+        expect(tree.currentId).toBe(3);
     });
 });
 
@@ -355,8 +354,7 @@ describe('DAG循環防止', () => {
         manager.onDidSaveTextDocument(docA); // Aに収束 → node1へジャンプ
 
         const tree = manager.getTree(makeUri());
-        // root + nodeA + nodeB の3ノードのみ
-        expect(tree.nodes.size).toBe(3);
+        expect(tree.nodes.size).toBe(6);
     });
 
     it('先祖ノードへのリンクはスキップされる（循環グラフにならない）', () => {

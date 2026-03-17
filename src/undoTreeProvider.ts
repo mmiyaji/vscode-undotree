@@ -65,7 +65,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode);
             return;
         }
-        const tree = this.manager.getTree(editor.document.uri);
+        const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
         this.view.webview.html = this.buildHtml(
             Array.from(tree.nodes.values()),
             tree.currentId,
@@ -74,7 +74,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         );
     }
 
-    private buildHtml(nodes: ReturnType<typeof Array.from> | null, currentId: number, paused: boolean, mode: 'navigate' | 'diff'): string {
+    private buildHtml(
+        nodes: ReturnType<typeof Array.from> | null,
+        currentId: number,
+        paused: boolean,
+        mode: 'navigate' | 'diff'
+    ): string {
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
 <html>
@@ -85,7 +90,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .graph { font-family: monospace; font-size: 12px; color: var(--vscode-editorLineNumber-foreground); white-space: pre; flex-shrink: 0; }
+  .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
+  .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--vscode-foreground); flex-shrink: 0; }
   .dot.current { background: var(--vscode-focusBorder); box-shadow: 0 0 0 2px var(--vscode-focusBorder); }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
@@ -111,12 +117,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 <div class="actions">
   <button id="btn-undo" onclick="send('undo')">↑ Undo</button>
   <button id="btn-redo" onclick="send('redo')">↓ Redo</button>
-  <button class="btn-pause" onclick="send('togglePause')" title="${paused ? 'Resume tracking' : 'Pause tracking'}">${paused ? '▶ Resume' : '⏸ Pause'}</button>
-  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? 'Switch to Diff mode' : 'Switch to Navigate mode'}">${mode === 'navigate' ? '⎇ Diff' : '⎇ Nav'}</button>
-  <button class="btn-settings" onclick="send('openSettings')" title="Open Undo Tree settings">⚙</button>
+  <button class="btn-pause" onclick="send('togglePause')" title="${paused ? 'Resume tracking' : 'Pause tracking'}">${paused ? 'Resume' : 'Pause'}</button>
+  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? 'Switch to Diff mode' : 'Switch to Navigate mode'}">${mode === 'navigate' ? 'Diff' : 'Nav'}</button>
+  <button class="btn-settings" onclick="send('openSettings')" title="Open Undo Tree settings">S</button>
 </div>
-${paused ? '<div class="paused-badge">⏸ Tracking paused — history is frozen</div>' : ''}
-${mode === 'diff' ? '<div class="diff-badge">⎇ Diff mode — click node to compare with current</div>' : ''}
+${paused ? '<div class="paused-badge">Tracking paused - history is frozen</div>' : ''}
+${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare with current</div>' : ''}
 <div id="tree"></div>
 <script>
   const vscode = acquireVsCodeApi();
@@ -141,47 +147,43 @@ ${mode === 'diff' ? '<div class="diff-badge">⎇ Diff mode — click node to com
     const container = document.getElementById('tree');
     container.innerHTML = '';
 
-    // undo/redoボタンの有効・無効を更新
     const cur = map[currentId];
     document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
     document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
 
-    // currentIdから遡ってメインライン（root→current）を特定
-    function findMainPath() {
-      const path = new Set();
-      let id = currentId;
-      while (id !== undefined && !path.has(id)) {
-        path.add(id);
-        const node = map[id];
-        if (!node || node.parents.length === 0) break;
-        id = node.parents[node.parents.length - 1];
-      }
-      return path;
-    }
-    const mainPath = findMainPath();
     const visitedNodes = new Set();
 
-    // メインライン（root→current）はインデントなしで縦に並ぶ
-    // 分岐は├─/└─でメインラインから右に展開する
-    function renderNode(id, prefix, isLast) {
+    function renderSegment(kind) {
+      switch (kind) {
+        case 'pipe':
+          return '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.75"/></svg>';
+        case 'tee':
+          return '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
+        case 'elbow':
+          return '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 7 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
+        default:
+          return '<svg viewBox="0 0 12 14" aria-hidden="true"></svg>';
+      }
+    }
+
+    function renderNode(id, prefixParts, isLast, parentChildCount) {
       if (visitedNodes.has(id)) return;
       visitedNodes.add(id);
       const node = map[id];
       if (!node) return;
-      const isCurrent = node.id === currentId;
-      const isOnMain = mainPath.has(id);
-      const isRoot = (id === 0);
-      const storageKind = node.storage?.kind === 'full' ? 'F' : node.storage?.kind === 'delta' ? 'D' : '';
 
-      // メインラインは接続文字なし、分岐は├─/└─
-      const connector = (isRoot || isOnMain) ? '' : (isLast ? '└─' : '├─');
-      const graphText = prefix + connector;
+      const isCurrent = node.id === currentId;
+      const isRoot = id === 0;
+      const storageKind = node.storage?.kind === 'full' ? 'F' : node.storage?.kind === 'delta' ? 'D' : '';
+      const isDirectBranchChild = !isRoot && parentChildCount > 1;
+      const graphHtml = prefixParts.map(renderSegment).join('') +
+        (isDirectBranchChild ? renderSegment(isLast ? 'elbow' : 'tee') : '');
 
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
-      div.title = mode === 'diff' ? 'クリックして差分を表示' : 'クリックしてこのノードにジャンプ';
+      div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       div.innerHTML =
-        (graphText ? \`<span class="graph">\${graphText}</span>\` : '') +
+        (graphHtml ? \`<span class="graph">\${graphHtml}</span>\` : '') +
         \`<span class="dot\${isCurrent ? ' current' : ''}"></span>\` +
         \`<span class="label">\${node.label}</span>\` +
         (storageKind ? \`<span class="storage">\${storageKind}</span>\` : '') +
@@ -197,28 +199,16 @@ ${mode === 'diff' ? '<div class="diff-badge">⎇ Diff mode — click node to com
       });
       container.appendChild(div);
 
-      // 子をメインラインと分岐に分ける
-      const mainChild = node.children.find(cid => mainPath.has(cid));
-      const branchChildren = node.children.filter(cid => !mainPath.has(cid));
+      const childPrefix = isDirectBranchChild
+        ? [...prefixParts, isLast ? 'blank' : 'pipe']
+        : prefixParts;
 
-      // メインラインは同じprefixを引き継ぐ（インデント増やさない）
-      // 分岐ノードは継続線を追加してインデント
-      const childBasePrefix = (isRoot || isOnMain)
-        ? prefix
-        : prefix + (isLast ? '   ' : '│  ');
-
-      // 分岐を先にレンダリング（メインラインの続きより前に表示）
-      branchChildren.forEach((cid, i) => {
-        const isLastBranch = (i === branchChildren.length - 1) && !mainChild;
-        renderNode(cid, childBasePrefix, isLastBranch);
+      node.children.forEach((cid, i) => {
+        renderNode(cid, childPrefix, i === node.children.length - 1, node.children.length);
       });
-
-      // メインラインの子（インデントなし）
-      if (mainChild !== undefined) {
-        renderNode(mainChild, childBasePrefix, false);
-      }
     }
-    renderNode(0, '', false);
+
+    renderNode(0, [], false, 0);
   }
 
   buildTree(nodes, currentId);

@@ -11,7 +11,7 @@ type Diff = {
 
 type UndoNodeStorage =
     | { kind: 'full'; content: string }
-    | { kind: 'delta'; diffs: Diff[][] };  // Diff[][]：外側がchangeイベント単位、内側が1イベント内の変更
+    | { kind: 'delta'; diffs: Diff[][] };
 
 export type UndoNode = {
     id: number;
@@ -31,14 +31,14 @@ export type UndoTree = {
 };
 
 const AUTOSAVE_INTERVAL_MS = 30_000;
-const FULL_STORAGE_THRESHOLD = 0.3; // 変更量が全文の30%超で全量保存
+const FULL_STORAGE_THRESHOLD = 0.3;
 
 export class UndoTreeManager implements vscode.Disposable {
     private trees = new Map<string, UndoTree>();
-    private diffBuffer = new Map<string, Diff[][]>(); // URI → 保存前の差分バッファ（イベント単位）
+    private diffBuffer = new Map<string, Diff[][]>();
     private nextId = 1;
     private autosaveTimer: ReturnType<typeof setInterval> | undefined;
-    private restoring = false; // 復元中はchangeEventをバッファしない
+    private restoring = false;
     paused = false;
     onRefresh: (() => void) | undefined;
 
@@ -65,6 +65,12 @@ export class UndoTreeManager implements vscode.Disposable {
                 currentId: 0,
                 rootId: 0,
             });
+        } else if (initialContent !== undefined && initialContent !== '') {
+            const tree = this.trees.get(key)!;
+            const root = tree.nodes.get(tree.rootId);
+            if (root && root.storage.kind === 'full' && root.storage.content === '' && root.children.length === 0) {
+                root.storage.content = initialContent;
+            }
         }
         return this.trees.get(key)!;
     }
@@ -75,7 +81,6 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         const key = e.document.uri.toString();
         const buffer = this.diffBuffer.get(key) ?? [];
-        // 1つのchangeイベントをグループとして保存（イベント内の変更は同一ベース状態への変更）
         const eventDiffs: Diff[] = e.contentChanges.map(c => ({
             offset: c.rangeOffset,
             removeLength: c.rangeLength,
@@ -118,41 +123,21 @@ export class UndoTreeManager implements vscode.Disposable {
         const key = document.uri.toString();
         const currentNode = tree.nodes.get(tree.currentId)!;
 
-        // 内容に変化がなければバッファをクリアして終了
         if (currentNode.hash === hash) {
             this.diffBuffer.delete(key);
             return;
         }
 
-        // 同じハッシュのノードが既存ならリンク（DAG収束）
-        const existingId = tree.hashMap.get(hash);
-        if (existingId !== undefined) {
-            // existingId が currentId の先祖の場合はリンクすると循環するのでスキップ
-            if (!this.isAncestor(tree, existingId, tree.currentId)) {
-                const existingNode = tree.nodes.get(existingId)!;
-                if (!currentNode.children.includes(existingId)) {
-                    currentNode.children.push(existingId);
-                    // 分岐点になったので全量に昇格
-                    this.upgradeToFull(tree, tree.currentId, content);
-                }
-                if (!existingNode.parents.includes(tree.currentId)) {
-                    existingNode.parents.push(tree.currentId);
-                }
-            }
-            tree.currentId = existingId;
-            this.diffBuffer.delete(key);
-            this.onRefresh?.();
-            return;
-        }
-
-        // ストレージ種別を決定
         const diffs = this.diffBuffer.get(key) ?? [];
-        // 現在ノードが空ルートの場合は必ずfullで保存する
-        // （途中から開いたファイルはルートのcontent=''に対してdeltaを保存すると復元が壊れる）
         const isCurrentEmptyRoot =
             currentNode.parents.length === 0 &&
             currentNode.storage.kind === 'full' &&
             currentNode.storage.content === '';
+
+        if (isCurrentEmptyRoot) {
+            currentNode.storage = { kind: 'full', content };
+        }
+
         const storage: UndoNodeStorage = (isCurrentEmptyRoot || this.shouldStoreFull(diffs, content.length))
             ? { kind: 'full', content }
             : { kind: 'delta', diffs };
@@ -169,7 +154,6 @@ export class UndoTreeManager implements vscode.Disposable {
         };
         currentNode.children.push(newId);
 
-        // 現在ノードが分岐点になった（2つ目以降の子）→ 全量に昇格
         if (currentNode.children.length >= 2) {
             const currentContent = this.reconstructContent(tree, tree.currentId);
             this.upgradeToFull(tree, tree.currentId, currentContent);
@@ -183,9 +167,9 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private isAncestor(tree: UndoTree, candidateId: number, nodeId: number): boolean {
-        // candidateId が nodeId の先祖かどうかをBFSで確認（children方向に探索）
         const visited = new Set<number>();
         const queue = [candidateId];
+
         while (queue.length > 0) {
             const current = queue.shift()!;
             if (current === nodeId) {
@@ -196,14 +180,16 @@ export class UndoTreeManager implements vscode.Disposable {
             }
             visited.add(current);
             const node = tree.nodes.get(current);
-            if (node) {
-                for (const childId of node.children) {
-                    if (!visited.has(childId)) {
-                        queue.push(childId);
-                    }
+            if (!node) {
+                continue;
+            }
+            for (const childId of node.children) {
+                if (!visited.has(childId)) {
+                    queue.push(childId);
                 }
             }
         }
+
         return false;
     }
 
@@ -224,7 +210,6 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     reconstructContent(tree: UndoTree, targetId: number): string {
-        // targetIdから上に遡り、最近傍の全量ノードを起点にdeltaを適用
         const path: number[] = [];
         const visited = new Set<number>();
         let id: number | undefined = targetId;
@@ -258,8 +243,6 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private applyDiffs(content: string, diffs: Diff[][]): string {
-        // イベント単位で順方向に適用する（各イベントは前のイベント適用後の状態への変更）
-        // イベント内の複数変更は同一ベースへの変更なのでoffset降順で適用
         let result = content;
         for (const eventDiffs of diffs) {
             const sorted = [...eventDiffs].sort((a, b) => b.offset - a.offset);
@@ -316,6 +299,11 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
         const content = this.reconstructContent(t, nodeId);
+        const previousCurrentId = t.currentId;
+
+        // Move the logical cursor before mutating the editor so any immediate
+        // save/autosave is recorded as a branch from the selected node.
+        t.currentId = nodeId;
 
         this.restoring = true;
         try {
@@ -326,13 +314,14 @@ export class UndoTreeManager implements vscode.Disposable {
                 );
                 eb.replace(fullRange, content);
             });
+        } catch (error) {
+            t.currentId = previousCurrentId;
+            throw error;
         } finally {
             this.restoring = false;
         }
 
-        // 復元後のdiffBufferをクリア（復元による変更を差分として扱わない）
         this.diffBuffer.delete(editor.document.uri.toString());
-        t.currentId = nodeId;
         this.onRefresh?.();
     }
 
@@ -371,8 +360,8 @@ export class UndoTreeManager implements vscode.Disposable {
 
     private isCompressible(tree: UndoTree, node: UndoNode): boolean {
         if (node.id === tree.currentId) { return false; }
-        if (node.parents.length !== 1) { return false; }   // root or multi-parent
-        if (node.children.length !== 1) { return false; }  // branch, leaf, or orphan
+        if (node.parents.length !== 1) { return false; }
+        if (node.children.length !== 1) { return false; }
         const kind = this.classifyNode(node);
         if (kind === 'mixed') { return false; }
         const parent = tree.nodes.get(node.parents[0]);
@@ -387,8 +376,6 @@ export class UndoTreeManager implements vscode.Disposable {
         const parent = tree.nodes.get(parentId)!;
         const child = tree.nodes.get(childId)!;
 
-        // 同種deltaならdiffをマージしてdelta型を維持する（連続圧縮のため）
-        // それ以外はchildを全量化してdeltaチェーンの依存を断ち切る
         if (node.storage.kind === 'delta' && child.storage.kind === 'delta') {
             child.storage = { kind: 'delta', diffs: [...node.storage.diffs, ...child.storage.diffs] };
         } else if (child.storage.kind === 'delta') {

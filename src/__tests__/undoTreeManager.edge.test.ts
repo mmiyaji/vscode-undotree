@@ -163,6 +163,38 @@ describe('undo/redo の境界値', () => {
         expect(() => manager.undo()).not.toThrow();
         expect(() => manager.redo()).not.toThrow();
     });
+
+    it('過去ノードへ移動中に保存されても選択ノードから分岐する', async () => {
+        const manager = new UndoTreeManager();
+        const base = makeDocument('base');
+        const next = makeDocument('next');
+        manager.onDidSaveTextDocument(base);
+        manager.onDidSaveTextDocument(next);
+
+        const tree = manager.getTree(makeUri());
+        const editorDocument = {
+            uri: makeUri(),
+            getText: () => 'branch',
+            positionAt: (offset: number) => ({ offset }),
+        } as any;
+        const editor = {
+            document: editorDocument,
+            edit: async (callback: (eb: { replace: jest.Mock }) => void) => {
+                callback({ replace: jest.fn() });
+                manager.onDidChangeTextDocument(
+                    makeChangeEvent(editorDocument, [{ offset: 4, removeLength: 0, text: '-branch' }])
+                );
+                manager.onDidSaveTextDocument(editorDocument);
+                return true;
+            },
+        } as any;
+
+        await manager.jumpToNode(1, editor, tree);
+
+        expect(tree.currentId).toBe(3);
+        expect(tree.nodes.get(1)?.children).toContain(3);
+        expect(tree.nodes.get(2)?.children).not.toContain(3);
+    });
 });
 
 // -----------------------------------------------
@@ -193,9 +225,9 @@ describe('reconstructContentの境界値', () => {
         // 強制的にdeltaに変換（空diffs）
         (node1 as any).storage = { kind: 'delta', diffs: [] };
 
-        // 空diffsからの復元はrootの内容がそのまま返る
+        // 空diffsからの復元はrootの内容がそのまま返る（rootは最初のsaveで更新されたbase）
         const content = manager.reconstructContent(tree, 1);
-        expect(content).toBe(''); // rootの内容（''）にdiff[]を適用 = ''
+        expect(content).toBe(base); // rootの内容（base）にdiff[]を適用 = base
     });
 });
 
