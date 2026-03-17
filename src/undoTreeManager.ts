@@ -46,9 +46,10 @@ export class UndoTreeManager implements vscode.Disposable {
         this.autosaveTimer = setInterval(() => this.autosave(), AUTOSAVE_INTERVAL_MS);
     }
 
-    getTree(uri: vscode.Uri): UndoTree {
+    getTree(uri: vscode.Uri, initialContent?: string): UndoTree {
         const key = uri.toString();
         if (!this.trees.has(key)) {
+            const content = initialContent ?? '';
             const root: UndoNode = {
                 id: 0,
                 parents: [],
@@ -56,7 +57,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 timestamp: Date.now(),
                 label: 'initial',
                 hash: '',
-                storage: { kind: 'full', content: '' },
+                storage: { kind: 'full', content },
             };
             this.trees.set(key, {
                 nodes: new Map([[0, root]]),

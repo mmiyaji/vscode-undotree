@@ -95,6 +95,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     manager.onRefresh = () => provider.refresh();
 
+    // 既に開いているエディタのツリーを実際のコンテンツで初期化
+    if (vscode.window.activeTextEditor && isTracked(vscode.window.activeTextEditor.document)) {
+        const ed = vscode.window.activeTextEditor;
+        manager.getTree(ed.document.uri, ed.document.getText());
+    }
+
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     updateStatusBar(vscode.window.activeTextEditor);
 
@@ -209,6 +215,9 @@ export function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.window.onDidChangeActiveTextEditor((e) => {
+            if (e && isTracked(e.document)) {
+                manager?.getTree(e.document.uri, e.document.getText());
+            }
             manager?.onDidChangeActiveEditor(e);
             provider.refresh();
             updateStatusBar(e);
