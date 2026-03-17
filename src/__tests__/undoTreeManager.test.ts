@@ -528,15 +528,33 @@ describe('compact', () => {
 // -----------------------------------------------
 // ファイルを閉じたときのクリーンアップ
 // -----------------------------------------------
-describe('クリーンアップ', () => {
-    it('ファイルを閉じるとツリーが削除される', () => {
+describe('cleanup', () => {
+    it('keeps the tree when a file is closed so reopening can restore it', () => {
         const manager = new UndoTreeManager();
         const doc = makeDocument('Hello');
         manager.onDidSaveTextDocument(doc);
         manager.onDidCloseTextDocument(doc);
-        // 再度getTreeすると初期状態に戻る
+
         const tree = manager.getTree(doc.uri);
-        expect(tree.nodes.size).toBe(1);
-        expect(tree.currentId).toBe(0);
+        expect(tree.nodes.size).toBe(2);
+        expect(tree.currentId).toBe(1);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe('Hello');
+    });
+
+    it('clears buffered diffs when a file is closed', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        const changed = `${base}b`;
+
+        manager.onDidSaveTextDocument(makeDocument(base));
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(changed), [{ offset: 100, removeLength: 0, text: 'b' }])
+        );
+        manager.onDidCloseTextDocument(makeDocument(changed));
+        manager.onDidSaveTextDocument(makeDocument(changed));
+
+        const tree = manager.getTree(makeUri());
+        const node = tree.nodes.get(tree.currentId);
+        expect(node?.storage.kind).toBe('full');
     });
 });

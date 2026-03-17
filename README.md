@@ -1,25 +1,29 @@
 # vscode-undotree
 
-Visualize and navigate your undo history as a tree in VS Code.
+Visualize and navigate save-based undo history as a tree in VS Code.
 
-[日本語はこちら](./README_ja.md)
+[Japanese README](./README_ja.md)
 
 ## Overview
 
-Unlike standard linear undo/redo, **vscode-undotree** preserves all editing branches. When you undo and make a new edit, your previous "future" is not lost — it remains as a separate branch you can return to at any time.
+Unlike standard linear undo/redo, **vscode-undotree** preserves editing branches. When you undo, move to an older node, and continue editing, your previous future is kept as another branch you can return to later.
+
+The tree is based on file saves and periodic autosave checkpoints. It does not replace VS Code's native undo stack; it adds a separate history layer for navigating meaningful states.
 
 ![Undo Tree panel](./media/undotree-panel.png)
 
 ## Features
 
-- **Tree-structured undo history** — All branches are preserved, never discarded
-- **Save-triggered checkpoints** — History nodes are created on every save (`Ctrl+S`), giving you intentional, meaningful snapshots
-- **Periodic autosave** — Automatically creates a checkpoint every 30 seconds if the content has changed
-- **DAG deduplication** — If you return to previously saved content, the tree links to the existing node instead of creating a duplicate, with cycle detection to prevent infinite loops
-- **Hybrid storage** — Small changes are stored as lightweight diffs; large changes and branch points are stored as full snapshots
-- **Sidebar panel** — Visualize the full history tree in the Explorer sidebar; click any node to jump to it directly
-- **Selective tracking** — Only tracks configured file extensions (default: `.txt`, `.md`); toggle per-extension from the status bar
-- **Pause / Resume** — Temporarily freeze history recording without losing the existing tree
+- **Tree-structured undo history**: Branches are preserved instead of discarded
+- **Save-triggered checkpoints**: History nodes are created on every save
+- **Periodic autosave**: Creates a checkpoint every 30 seconds when content changed
+- **Hybrid storage**: Small changes are stored as diffs; larger changes and branch points are stored as full snapshots
+- **Sidebar panel**: Visualize the history tree and click nodes to jump
+- **Diff mode**: Compare any node with the current document
+- **Selective tracking**: Track only configured extensions and exclude matching files
+- **Pause / Resume**: Temporarily stop history capture without losing the tree
+- **Persisted history**: Save, restore, and reload tracked trees across sessions
+- **Compaction**: Reduce noise in long linear chains without removing branch points
 
 ## Installation
 
@@ -34,85 +38,143 @@ This extension is distributed as a `.vsix` file via [GitHub Releases](https://gi
 
 | Action | Method |
 |--------|--------|
-| Open Undo Tree panel | Sidebar → Explorer → **Undo Tree** |
+| Open Undo Tree panel | Sidebar -> Explorer -> **Undo Tree** |
 | Focus panel | `Ctrl+Shift+U` |
 | Create checkpoint | Save the file (`Ctrl+S`) |
-| Undo / Redo | Click **↑ Undo** / **↓ Redo** in the panel |
+| Undo / Redo | Click **Undo** / **Redo** in the panel |
 | Jump to any node | Click the node row in the panel |
-| Pause / Resume tracking | Click **⏸ Pause** / **▶ Resume** in the panel |
-| Open settings | Click **⚙** in the panel |
+| Compare with current | Switch to **Diff** mode and click a node |
+| Pause / Resume tracking | Click **Pause** / **Resume** in the panel |
+| Open actions menu | Click the settings button in the panel |
 | Enable / disable current extension | Click the status bar item |
 
 ### Panel layout
 
 ```
-↑ Undo  ↓ Redo  ⏸ Pause  ⚙
+Undo  Redo  Pause  Diff  [menu]
 ────────────────────────────────
 ● initial                 00:00:00
-  ● F  save               00:01:05   ← F = Full snapshot
-    ● D  save             00:02:30   ← D = Delta (diff only)
-    │ ● D  auto           00:03:00
-    ● D  save             00:04:12   ◀ current
+● save   F                00:01:05   ← F = Full snapshot
+└─ ● save   D             00:02:30   ← D = Delta (diff only)
+● auto   D                00:03:00
+● save   D                00:04:12   ◀ current
 ```
 
-- The **ringed dot** (◎) marks the current position.
-- `F` = full content stored; `D` = diff only.
-- A dashed edge (---) in the tree indicates a DAG convergence link.
+- The highlighted row is the current position.
+- `F` means full content is stored.
+- `D` means only diffs are stored.
+- Branch lines are drawn with SVG connectors in the sidebar.
 
 ### Status bar
 
-The status bar item (bottom right) shows the tracking state of the current file:
+The status bar item in the lower right shows the tracking state of the current file:
 
 | Display | Meaning |
 |---------|---------|
 | `$(history) Undo Tree: ON` | Current extension is tracked |
-| `$(circle-slash) Undo Tree: OFF` | Current extension is not tracked — click to enable |
-| `$(debug-pause) Undo Tree: PAUSED` | Tracking is paused globally — click to toggle |
+| `$(circle-slash) Undo Tree: OFF` | Current extension is not tracked; click to enable |
+| `$(debug-pause) Undo Tree: PAUSED` | Tracking is paused globally; click to toggle |
 
-Hover over the item to see the detected extension and the full enabled list.
+Hover over the item to see the detected extension, enabled list, and exclude state.
+
+### Actions menu
+
+The settings menu includes:
+
+- `Open Settings`
+- `Save Persisted State`
+- `Restore Persisted State`
+- `Compact History`
+- `Pause Tracking` / `Resume Tracking`
+- `Toggle Tracking for This Extension`
+
+## Persistence
+
+Persisted history is stored in the extension storage directory, not in your workspace by default.
+
+Saved data is split per tracked file:
+
+- `undo-trees/manifest.json`
+- `undo-trees/<file-hash>.json`
+
+Behavior:
+
+- `Save Persisted State` writes the current tracked trees to disk
+- `Restore Persisted State` reloads the saved tree for the active file
+- Opening a tracked file reloads its saved tree on demand
+- If the file content differs from the saved current node, a new `restore` node is appended
+- Pause state is also persisted
+
+## Compaction
+
+`Compact History` reduces noise in long linear chains by removing compressible middle nodes.
+
+Current behavior:
+
+- Only simple middle nodes in a straight chain are removed
+- Branch points are kept
+- Leaf nodes are kept
+- The current node is kept
+- Mixed-content nodes are kept
+
+Here, `mixed` means a node that is not part of a pure insert-only chain or pure delete-only chain. Full snapshot nodes are treated as `mixed`, and delta nodes that contain both insertion and deletion are also treated as `mixed`, so they are excluded from compaction.
+
+```mermaid
+graph LR
+  subgraph Before
+    A["full"] --> B["delta"] --> C["delta"] --> D["delta"] --> E["current"]
+  end
+
+  subgraph After
+    A2["full"] --> C2["delta"] --> E2["current"]
+  end
+
+  E -.-> A2
+```
 
 ## Configuration
 
-Open settings via the **⚙** button in the panel, or search for `undotree` in VS Code settings.
+Open settings from the actions menu, or search for `undotree` in VS Code settings.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `undotree.enabledExtensions` | `[".txt", ".md"]` | File extensions to automatically track |
 | `undotree.excludePatterns` | `[]` | Filename patterns to exclude (supports `*` wildcard) |
+| `undotree.persistenceMode` | `"manual"` | `manual` saves only when requested; `auto` saves automatically after history changes |
 
 **Examples:**
 
 ```json
-// Track additional extensions
-"undotree.enabledExtensions": [".txt", ".md", ".js", ".ts"]
-
-// Exclude minified files and changelogs
-"undotree.excludePatterns": ["*.min.*", "CHANGELOG*"]
+{
+  "undotree.enabledExtensions": [".txt", ".md", ".js", ".ts"],
+  "undotree.excludePatterns": ["*.min.*", "CHANGELOG*"],
+  "undotree.persistenceMode": "auto"
+}
 ```
 
 ## Design Philosophy
 
 ### Linear undo vs. vscode-undotree
 
-With standard undo, making a new edit after undoing permanently discards your previous "future":
+With standard undo, making a new edit after undoing permanently discards your previous future:
 
 ```mermaid
 graph LR
-  subgraph Standard undo - branch is lost
-    A1[A] --> B1[B] --> C1[C]
-    B1 --> D1[D]
-    C1:::lost
+  subgraph "Standard undo"
+    A1["A"] --> B1["B"] --> C1["C"]
+    B1 --> D1["D"]
     classDef lost fill:#ccc,color:#999,stroke:#ccc
+    C1:::lost
   end
 ```
 
-vscode-undotree preserves all branches:
+vscode-undotree preserves both paths:
 
 ```mermaid
 graph LR
-  subgraph vscode-undotree - all branches preserved
-    A2[A] --> B2[B] --> C2[C]
-    B2 --> D2[D]
+  subgraph "vscode-undotree"
+    A2["A"] --> B2["B"] --> C2["C"]
+    B2 --> D2["D"]
     style C2 fill:#d4edda,stroke:#28a745
     style D2 fill:#d4edda,stroke:#28a745
   end
@@ -120,7 +182,7 @@ graph LR
 
 ### Save as a meaningful checkpoint
 
-Most undo tree implementations track every keystroke. This creates noise and makes the history hard to navigate. vscode-undotree uses **file saves as the unit of history**, the same mental model as git commits.
+Many undo tree tools record every keystroke. That quickly becomes noisy. vscode-undotree uses **file saves as the main unit of history**, which produces a tree closer to how people think about meaningful editing states.
 
 ```mermaid
 sequenceDiagram
@@ -128,58 +190,53 @@ sequenceDiagram
   participant Editor
   participant UndoTree
 
-  User->>Editor: Type (keystrokes)
+  User->>Editor: Type
   Editor->>UndoTree: Buffer changeEvents
-  User->>Editor: Save (Ctrl+S)
+  User->>Editor: Save
   Editor->>UndoTree: Commit node
-  Note over UndoTree: hash → add node
-```
-
-### Content-addressed deduplication (DAG)
-
-Each node is identified by a SHA-1 hash of its content. Reverting to a previously saved state links back to the existing node instead of duplicating it. A cycle check (`isAncestor`) prevents the graph from becoming circular.
-
-```mermaid
-graph TD
-  root[root: ''] --> A["A: 'Hello'\nhash: a1b2c3"]
-  A --> B["B: 'Hello World'\nhash: d4e5f6"]
-  A --> C["C: 'Hello!'\nhash: g7h8i9"]
-  B --> A2["Revert to 'Hello'\nhash: a1b2c3"]
-  A2 -->|"same hash → link"| A
-  style A2 fill:#fff3cd,stroke:#ffc107
 ```
 
 ### Hybrid storage: delta and full snapshots
 
 ```mermaid
 flowchart TD
-  save[Save event] --> hash{Same hash\nas before?}
-  hash -->|Yes| skip[Skip\nno change]
-  hash -->|No| exist{Node with\nsame hash exists?}
-  exist -->|Yes| link[Link to existing node\nDAG convergence]
-  exist -->|No| ratio{Change ≥ 30%\nor branch point?}
-  ratio -->|Yes| full[Full snapshot\nstore entire content]
-  ratio -->|No| delta[Delta\nstore diff only]
+  save["Save event"] --> same{"Same content as current?"}
+  same -->|Yes| skip["Skip"]
+  same -->|No| ratio{"Large change or branch point?"}
+  ratio -->|Yes| full["Store full snapshot"]
+  ratio -->|No| delta["Store delta only"]
 ```
+
+For compaction purposes, nodes are also classified as `insert`, `delete`, or `mixed`:
+
+- `insert`: delta node with insert-only changes
+- `delete`: delta node with delete-only changes
+- `mixed`: full snapshot nodes, or delta nodes that contain both insertion and deletion
+
+Branch points are upgraded to full snapshots so each branch remains reconstructable.
 
 ### Restoring any node
 
 ```mermaid
 graph LR
   subgraph Tree
-    N0["root\n🗂 Full"]
-    N1["node1\n🗂 Full"]
-    N2["node2\n📄 Delta"]
-    N3["node3\n📄 Delta"]
-    N4["node4\n📄 Delta"]
+    N0["root / full"]
+    N1["node1 / full"]
+    N2["node2 / delta"]
+    N3["node3 / delta"]
+    N4["node4 / delta"]
     N0 --> N1 --> N2 --> N3 --> N4
   end
 
-  N4 -->|restore request| step1
-  step1["① Walk up to\nnearest Full ancestor"] --> step2
-  step2["② Load Full content\nof node1"] --> step3
-  step3["③ Apply Delta2 → Delta3 → Delta4\nin sequence"] --> result["✅ node4 restored"]
+  N4 --> step1["Walk up to nearest full node"]
+  step1 --> step2["Load full content"]
+  step2 --> step3["Apply deltas in order"]
+  step3 --> result["Restored content"]
 ```
+
+### Persisted state and restore-on-open
+
+Persisted trees are saved per file. When a tracked file is opened again, its saved tree is loaded on demand. If the on-disk file content differs from the saved current node, the extension appends a `restore` node so the tree stays consistent with the actual document state.
 
 ### No interference with VS Code's native undo
 

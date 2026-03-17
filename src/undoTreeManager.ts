@@ -30,6 +30,28 @@ export type UndoTree = {
     rootId: number;
 };
 
+export type SerializedUndoNode = {
+    id: number;
+    parents: number[];
+    children: number[];
+    timestamp: number;
+    label: string;
+    hash: string;
+    storage: UndoNodeStorage;
+};
+
+export type SerializedUndoTree = {
+    nodes: SerializedUndoNode[];
+    hashMap: Array<[string, number]>;
+    currentId: number;
+    rootId: number;
+};
+
+export type SerializedUndoTreeState = {
+    nextId: number;
+    trees: Record<string, SerializedUndoTree>;
+};
+
 const AUTOSAVE_INTERVAL_MS = 30_000;
 const FULL_STORAGE_THRESHOLD = 0.3;
 
@@ -75,6 +97,10 @@ export class UndoTreeManager implements vscode.Disposable {
         return this.trees.get(key)!;
     }
 
+    hasTree(uri: vscode.Uri): boolean {
+        return this.trees.has(uri.toString());
+    }
+
     onDidChangeTextDocument(e: vscode.TextDocumentChangeEvent) {
         if (e.contentChanges.length === 0 || this.restoring || this.paused) {
             return;
@@ -99,7 +125,6 @@ export class UndoTreeManager implements vscode.Disposable {
 
     onDidCloseTextDocument(document: vscode.TextDocument) {
         const key = document.uri.toString();
-        this.trees.delete(key);
         this.diffBuffer.delete(key);
     }
 
@@ -340,6 +365,140 @@ export class UndoTreeManager implements vscode.Disposable {
             }
         }
         return removed;
+    }
+
+    exportState(): SerializedUndoTreeState {
+        const trees: Record<string, SerializedUndoTree> = {};
+        for (const [key, tree] of this.trees) {
+            trees[key] = {
+                nodes: Array.from(tree.nodes.values()).map((node) => ({
+                    id: node.id,
+                    parents: [...node.parents],
+                    children: [...node.children],
+                    timestamp: node.timestamp,
+                    label: node.label,
+                    hash: node.hash,
+                    storage: node.storage.kind === 'full'
+                        ? { kind: 'full', content: node.storage.content }
+                        : {
+                            kind: 'delta',
+                            diffs: node.storage.diffs.map((eventDiffs) =>
+                                eventDiffs.map((diff) => ({ ...diff }))
+                            ),
+                        },
+                })),
+                hashMap: Array.from(tree.hashMap.entries()),
+                currentId: tree.currentId,
+                rootId: tree.rootId,
+            };
+        }
+        return {
+            nextId: this.nextId,
+            trees,
+        };
+    }
+
+    importState(state: SerializedUndoTreeState) {
+        this.trees.clear();
+        this.diffBuffer.clear();
+
+        for (const [key, tree] of Object.entries(state.trees)) {
+            this.trees.set(key, {
+                nodes: new Map(tree.nodes.map((node) => [node.id, {
+                    id: node.id,
+                    parents: [...node.parents],
+                    children: [...node.children],
+                    timestamp: node.timestamp,
+                    label: node.label,
+                    hash: node.hash,
+                    storage: node.storage.kind === 'full'
+                        ? { kind: 'full', content: node.storage.content }
+                        : {
+                            kind: 'delta',
+                            diffs: node.storage.diffs.map((eventDiffs) =>
+                                eventDiffs.map((diff) => ({ ...diff }))
+                            ),
+                        },
+                }])),
+                hashMap: new Map(tree.hashMap),
+                currentId: tree.currentId,
+                rootId: tree.rootId,
+            });
+        }
+
+        this.nextId = Math.max(
+            state.nextId,
+            ...Array.from(this.trees.values()).flatMap((tree) => Array.from(tree.nodes.keys()).map((id) => id + 1)),
+            1
+        );
+        this.onRefresh?.();
+    }
+
+    importTree(uri: string, tree: SerializedUndoTree, nextId?: number) {
+        this.trees.set(uri, {
+            nodes: new Map(tree.nodes.map((node) => [node.id, {
+                id: node.id,
+                parents: [...node.parents],
+                children: [...node.children],
+                timestamp: node.timestamp,
+                label: node.label,
+                hash: node.hash,
+                storage: node.storage.kind === 'full'
+                    ? { kind: 'full', content: node.storage.content }
+                    : {
+                        kind: 'delta',
+                        diffs: node.storage.diffs.map((eventDiffs) =>
+                            eventDiffs.map((diff) => ({ ...diff }))
+                        ),
+                    },
+            }])),
+            hashMap: new Map(tree.hashMap),
+            currentId: tree.currentId,
+            rootId: tree.rootId,
+        });
+
+        if (typeof nextId === 'number') {
+            this.nextId = Math.max(this.nextId, nextId);
+        } else {
+            this.nextId = Math.max(
+                this.nextId,
+                ...Array.from(this.trees.values()).flatMap((value) => Array.from(value.nodes.keys()).map((id) => id + 1))
+            );
+        }
+        this.onRefresh?.();
+    }
+
+    syncDocumentState(uri: vscode.Uri, content: string, label = 'restore'): UndoTree {
+        const tree = this.getTree(uri, content);
+        const currentContent = this.reconstructContent(tree, tree.currentId);
+        if (currentContent === content) {
+            return tree;
+        }
+
+        const key = uri.toString();
+        const currentNode = tree.nodes.get(tree.currentId)!;
+        const newId = this.nextId++;
+        const node: UndoNode = {
+            id: newId,
+            parents: [tree.currentId],
+            children: [],
+            timestamp: Date.now(),
+            label,
+            hash: this.hashContent(content),
+            storage: { kind: 'full', content },
+        };
+
+        currentNode.children.push(newId);
+        if (currentNode.children.length >= 2) {
+            this.upgradeToFull(tree, tree.currentId, currentContent);
+        }
+
+        tree.nodes.set(newId, node);
+        tree.hashMap.set(node.hash, newId);
+        tree.currentId = newId;
+        this.diffBuffer.delete(key);
+        this.onRefresh?.();
+        return tree;
     }
 
     private classifyNode(node: UndoNode): 'insert' | 'delete' | 'mixed' {

@@ -1,7 +1,9 @@
 'use strict';
 
 import * as vscode from 'vscode';
+import { promises as fs } from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { UndoTreeProvider } from './undoTreeProvider';
 import { UndoTreeManager } from './undoTreeManager';
 
@@ -26,6 +28,171 @@ class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvi
 
 let manager: UndoTreeManager | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+const PERSIST_DEBOUNCE_MS = 1000;
+
+type PersistedManifest = {
+    version: number;
+    savedAt: number;
+    nextId: number;
+    paused: boolean;
+    trees: Array<{ uri: string; file: string }>;
+};
+
+function makeTreeFileName(uri: string): string {
+    return `${crypto.createHash('sha1').update(uri).digest('hex')}.json`;
+}
+
+async function persistStateToDisk(
+    context: vscode.ExtensionContext,
+    state: ReturnType<UndoTreeManager['exportState']>,
+    paused: boolean
+) {
+    const rootDir = context.globalStorageUri.fsPath;
+    const treesDir = path.join(rootDir, 'undo-trees');
+    await fs.mkdir(treesDir, { recursive: true });
+
+    const entries = Object.entries(state.trees);
+    const manifest: PersistedManifest = {
+        version: 1,
+        savedAt: Date.now(),
+        nextId: state.nextId,
+        paused,
+        trees: entries.map(([uri]) => ({
+            uri,
+            file: makeTreeFileName(uri),
+        })),
+    };
+
+    await Promise.all(entries.map(async ([uri, tree]) => {
+        const filePath = path.join(treesDir, makeTreeFileName(uri));
+        await fs.writeFile(
+            filePath,
+            JSON.stringify({ uri, tree }, null, 2),
+            'utf8'
+        );
+    }));
+
+    const expectedFiles = new Set(manifest.trees.map((entry) => entry.file));
+    expectedFiles.add('manifest.json');
+    const existingFiles = await fs.readdir(treesDir, { withFileTypes: true });
+    await Promise.all(existingFiles
+        .filter((entry) => entry.isFile() && !expectedFiles.has(entry.name))
+        .map((entry) => fs.unlink(path.join(treesDir, entry.name))));
+
+    await fs.writeFile(
+        path.join(treesDir, 'manifest.json'),
+        JSON.stringify(manifest, null, 2),
+        'utf8'
+    );
+
+    return {
+        rootDir,
+        treesDir,
+        treeCount: entries.length,
+    };
+}
+
+async function readPersistedManifest(
+    context: vscode.ExtensionContext
+): Promise<{
+    nextId: number;
+    paused: boolean;
+    trees: Array<{ uri: string; file: string }>;
+} | undefined> {
+    const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
+    const manifestPath = path.join(treesDir, 'manifest.json');
+
+    try {
+        const manifestRaw = await fs.readFile(manifestPath, 'utf8');
+        const manifest = JSON.parse(manifestRaw) as Partial<PersistedManifest>;
+        if (!Array.isArray(manifest.trees)) {
+            return undefined;
+        }
+
+        return {
+            nextId: typeof manifest.nextId === 'number' ? manifest.nextId : 1,
+            paused: manifest.paused === true,
+            trees: manifest.trees,
+        };
+    } catch (error: unknown) {
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError?.code === 'ENOENT') {
+            return undefined;
+        }
+        throw error;
+    }
+}
+
+async function loadPersistedTreeFromDisk(
+    context: vscode.ExtensionContext,
+    uri: vscode.Uri
+): Promise<{
+    nextId: number;
+    tree: NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>;
+} | undefined> {
+    const manifest = await readPersistedManifest(context);
+    if (!manifest) {
+        return undefined;
+    }
+
+    const entry = manifest.trees.find((treeEntry) => treeEntry.uri === uri.toString());
+    if (!entry) {
+        return undefined;
+    }
+
+    const treePath = path.join(context.globalStorageUri.fsPath, 'undo-trees', entry.file);
+    try {
+        const raw = await fs.readFile(treePath, 'utf8');
+        const parsed = JSON.parse(raw) as {
+            tree?: ReturnType<UndoTreeManager['exportState']>['trees'][string];
+        };
+        if (!parsed.tree) {
+            return undefined;
+        }
+
+        return {
+            nextId: manifest.nextId,
+            tree: parsed.tree,
+        };
+    } catch (error: unknown) {
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError?.code === 'ENOENT') {
+            return undefined;
+        }
+        throw error;
+    }
+}
+
+async function ensureTreeLoaded(
+    context: vscode.ExtensionContext,
+    treeManager: UndoTreeManager,
+    document: vscode.TextDocument
+) {
+    if (!treeManager.hasTree(document.uri)) {
+        const persisted = await loadPersistedTreeFromDisk(context, document.uri);
+        if (persisted) {
+            treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
+        }
+    }
+
+    treeManager.syncDocumentState(document.uri, document.getText());
+}
+
+async function restoreTreeForDocument(
+    context: vscode.ExtensionContext,
+    treeManager: UndoTreeManager,
+    document: vscode.TextDocument
+): Promise<boolean> {
+    const persisted = await loadPersistedTreeFromDisk(context, document.uri);
+    if (!persisted) {
+        return false;
+    }
+
+    treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
+    treeManager.syncDocumentState(document.uri, document.getText());
+    return true;
+}
 
 function getEnabledExtensions(): string[] {
     const value = vscode.workspace
@@ -39,6 +206,28 @@ function getExcludePatterns(): string[] {
         .getConfiguration('undotree')
         .get<string[]>('excludePatterns');
     return Array.isArray(value) ? value : [];
+}
+
+function getPersistenceMode(): 'manual' | 'auto' {
+    const value = vscode.workspace
+        .getConfiguration('undotree')
+        .get<string>('persistenceMode');
+    return value === 'auto' ? 'auto' : 'manual';
+}
+
+function schedulePersistState(context: vscode.ExtensionContext) {
+    if (!manager || getPersistenceMode() !== 'auto') {
+        return;
+    }
+
+    if (persistTimer) {
+        clearTimeout(persistTimer);
+    }
+
+    persistTimer = setTimeout(() => {
+        void persistStateToDisk(context, manager!.exportState(), manager!.paused);
+        persistTimer = undefined;
+    }, PERSIST_DEBOUNCE_MS);
 }
 
 function matchesGlob(filename: string, pattern: string): boolean {
@@ -88,23 +277,37 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
     statusBarItem.show();
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     manager = new UndoTreeManager();
     const provider = new UndoTreeProvider(context, manager);
     const contentProvider = new UndoTreeDocumentContentProvider();
+    const persistedManifest = await readPersistedManifest(context);
 
-    manager.onRefresh = () => provider.refresh();
+    manager.paused = persistedManifest?.paused === true;
+
+    manager.onRefresh = () => {
+        provider.refresh();
+        schedulePersistState(context);
+    };
+
 
     // 既に開いているエディタのツリーを実際のコンテンツで初期化
     if (vscode.window.activeTextEditor && isTracked(vscode.window.activeTextEditor.document)) {
         const ed = vscode.window.activeTextEditor;
-        manager.getTree(ed.document.uri, ed.document.getText());
+        await ensureTreeLoaded(context, manager, ed.document);
     }
 
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     updateStatusBar(vscode.window.activeTextEditor);
 
     context.subscriptions.push(
+        new vscode.Disposable(() => {
+            if (persistTimer) {
+                clearTimeout(persistTimer);
+                persistTimer = undefined;
+            }
+        }),
+
         statusBarItem,
 
         vscode.workspace.registerTextDocumentContentProvider('undotree', contentProvider),
@@ -121,6 +324,103 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.redo', () => {
             manager?.redo();
+        }),
+
+        vscode.commands.registerCommand('undotree.savePersistedState', async () => {
+            if (!manager) {
+                return;
+            }
+            const state = manager.exportState();
+            const result = await persistStateToDisk(context, state, manager.paused);
+            vscode.window.showInformationMessage(
+                `Undo Tree: saved ${result.treeCount} tree(s) to ${result.treesDir}`
+            );
+        }),
+
+        vscode.commands.registerCommand('undotree.restorePersistedState', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !manager) {
+                return;
+            }
+            if (!isTracked(editor.document)) {
+                vscode.window.showWarningMessage('Undo Tree: current file is not tracked.');
+                return;
+            }
+
+            const restored = await restoreTreeForDocument(context, manager, editor.document);
+            if (!restored) {
+                vscode.window.showInformationMessage('Undo Tree: no persisted state found for the current file.');
+                return;
+            }
+
+            provider.refresh();
+            vscode.window.showInformationMessage('Undo Tree: restored persisted state for the current file.');
+        }),
+
+        vscode.commands.registerCommand('undotree.showMenu', async () => {
+            const editor = vscode.window.activeTextEditor;
+            const isCurrentTracked = !!editor && isTracked(editor.document);
+            const items: Array<{
+                label: string;
+                description?: string;
+                command?: string;
+            }> = [
+                {
+                    label: '$(gear) Open Settings',
+                    description: 'Open Undo Tree extension settings',
+                    command: 'workbench.action.openSettings',
+                },
+                {
+                    label: '$(save) Save Persisted State',
+                    description: 'Write tracked histories to extension storage',
+                    command: 'undotree.savePersistedState',
+                },
+                {
+                    label: getPersistenceMode() === 'auto'
+                        ? '$(sync-ignored) Auto Persist: On'
+                        : '$(sync) Auto Persist: Off',
+                    description: 'Open settings to change persistent save mode',
+                    command: 'workbench.action.openSettings',
+                },
+                {
+                    label: '$(history) Restore Persisted State',
+                    description: 'Reload saved history for the current file',
+                    command: isCurrentTracked ? 'undotree.restorePersistedState' : undefined,
+                },
+                {
+                    label: '$(archive) Compact History',
+                    description: 'Remove compressible intermediate nodes',
+                    command: isCurrentTracked ? 'undotree.compact' : undefined,
+                },
+                {
+                    label: manager?.paused ? '$(debug-start) Resume Tracking' : '$(debug-pause) Pause Tracking',
+                    description: 'Temporarily disable or resume history capture',
+                    command: 'undotree.togglePause',
+                },
+                {
+                    label: '$(symbol-file) Toggle Tracking for This Extension',
+                    description: 'Enable or disable tracking for the current file extension',
+                    command: editor ? 'undotree.toggleTracking' : undefined,
+                },
+            ];
+
+            const picked = await vscode.window.showQuickPick(
+                items.filter((item) => item.command),
+                {
+                    title: 'Undo Tree',
+                    placeHolder: 'Choose an action',
+                }
+            );
+            if (!picked?.command) {
+                return;
+            }
+
+            if (picked.command === 'workbench.action.openSettings') {
+                await vscode.commands.executeCommand(picked.command, 'undotree');
+                return;
+            }
+
+            await vscode.commands.executeCommand(picked.command);
         }),
 
         vscode.commands.registerCommand('undotree.toggleTracking', async () => {
@@ -192,6 +492,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
             manager.paused = !manager.paused;
             provider.refresh();
+            schedulePersistState(context);
             updateStatusBar(vscode.window.activeTextEditor);
             vscode.window.showInformationMessage(
                 manager.paused ? 'Undo Tree: paused' : 'Undo Tree: resumed'
@@ -214,10 +515,20 @@ export function activate(context: vscode.ExtensionContext) {
             manager?.onDidCloseTextDocument(doc);
         }),
 
+        vscode.workspace.onDidOpenTextDocument((doc) => {
+            void (async () => {
+                if (isTracked(doc) && manager) {
+                    await ensureTreeLoaded(context, manager, doc);
+                }
+            })();
+        }),
+
         vscode.window.onDidChangeActiveTextEditor((e) => {
-            if (e && isTracked(e.document)) {
-                manager?.getTree(e.document.uri, e.document.getText());
-            }
+            void (async () => {
+                if (e && isTracked(e.document) && manager) {
+                    await ensureTreeLoaded(context, manager, e.document);
+                }
+            })();
             manager?.onDidChangeActiveEditor(e);
             provider.refresh();
             updateStatusBar(e);
@@ -226,8 +537,12 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (
                 e.affectsConfiguration('undotree.enabledExtensions') ||
-                e.affectsConfiguration('undotree.excludePatterns')
+                e.affectsConfiguration('undotree.excludePatterns') ||
+                e.affectsConfiguration('undotree.persistenceMode')
             ) {
+                if (e.affectsConfiguration('undotree.persistenceMode')) {
+                    schedulePersistState(context);
+                }
                 updateStatusBar(vscode.window.activeTextEditor);
                 provider.refresh();
             }

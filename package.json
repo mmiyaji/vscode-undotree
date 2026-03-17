@@ -2,7 +2,7 @@
   "name": "vscode-undotree",
   "displayName": "Undo Tree",
   "description": "Visualize and navigate undo history as a tree",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "publisher": "mmiyaji",
   "repository": {
     "type": "git",
@@ -44,6 +44,18 @@
       {
         "command": "undotree.compact",
         "title": "Undo Tree: Compact History"
+      },
+      {
+        "command": "undotree.savePersistedState",
+        "title": "Undo Tree: Save Persisted State"
+      },
+      {
+        "command": "undotree.restorePersistedState",
+        "title": "Undo Tree: Restore Persisted State"
+      },
+      {
+        "command": "undotree.showMenu",
+        "title": "Undo Tree: Show Menu"
       }
     ],
     "configuration": {
@@ -67,6 +79,15 @@
           },
           "default": [],
           "markdownDescription": "Filename patterns to exclude from tracking. Supports `*` wildcard. Example: `[\"*.min.*\", \"CHANGELOG*\", \".env*\"]`"
+        },
+        "undotree.persistenceMode": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "auto"
+          ],
+          "default": "manual",
+          "markdownDescription": "Persistent save mode for undo history. `manual` only saves when you run the command. `auto` saves automatically after history changes."
         }
       }
     },

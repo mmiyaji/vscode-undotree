@@ -87,4 +87,29 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).not.toContain('const isLinear');
         expect(html).toContain("renderNode(0, [], false, 0);");
     });
+
+    it('renders the settings gear as a menu trigger', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+
+        expect(html).toContain(`onclick="send('showMenu')"`);
+        expect(html).toContain('title="Open Undo Tree menu"');
+        expect(html).toContain('>⚙</button>');
+    });
+
+    it('creates a restore node when the loaded file content differs', () => {
+        const manager = new UndoTreeManager();
+        manager.onDidSaveTextDocument(makeDocument('old text'));
+        const state = manager.exportState();
+
+        const restored = new UndoTreeManager();
+        restored.importState(state);
+        const tree = restored.syncDocumentState(makeUri(), 'new text');
+
+        expect(tree.currentId).toBe(2);
+        expect(tree.nodes.get(2)?.label).toBe('restore');
+        expect(restored.reconstructContent(tree, tree.currentId)).toBe('new text');
+    });
 });

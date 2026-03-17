@@ -34,8 +34,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 case 'togglePause':
                     await vscode.commands.executeCommand('undotree.togglePause');
                     break;
-                case 'openSettings':
-                    await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree');
+                case 'showMenu':
+                    await vscode.commands.executeCommand('undotree.showMenu');
                     break;
                 case 'toggleMode':
                     this.mode = this.mode === 'navigate' ? 'diff' : 'navigate';
@@ -107,7 +107,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .btn-mode { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .btn-mode:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .btn-mode.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .btn-settings { background: transparent; color: var(--vscode-foreground); opacity: 0.5; padding: 3px 5px; }
+  .btn-settings { background: transparent; color: var(--vscode-foreground); opacity: 0.6; padding: 3px 5px; }
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
   .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
@@ -115,11 +115,11 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
 <div class="actions">
-  <button id="btn-undo" onclick="send('undo')">↑ Undo</button>
-  <button id="btn-redo" onclick="send('redo')">↓ Redo</button>
+  <button id="btn-undo" onclick="send('undo')">Undo</button>
+  <button id="btn-redo" onclick="send('redo')">Redo</button>
   <button class="btn-pause" onclick="send('togglePause')" title="${paused ? 'Resume tracking' : 'Pause tracking'}">${paused ? 'Resume' : 'Pause'}</button>
   <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? 'Switch to Diff mode' : 'Switch to Navigate mode'}">${mode === 'navigate' ? 'Diff' : 'Nav'}</button>
-  <button class="btn-settings" onclick="send('openSettings')" title="Open Undo Tree settings">S</button>
+  <button class="btn-settings" onclick="send('showMenu')" title="Open Undo Tree menu">⚙</button>
 </div>
 ${paused ? '<div class="paused-badge">Tracking paused - history is frozen</div>' : ''}
 ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare with current</div>' : ''}
@@ -134,7 +134,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
 
   function formatTime(ts) {
     const d = new Date(ts);
-    return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0') + ':' + d.getSeconds().toString().padStart(2,'0');
+    return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
   }
 
   function buildTree(nodes, currentId) {
@@ -142,8 +142,9 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       document.getElementById('tree').innerHTML = '<div class="empty">No active editor</div>';
       return;
     }
+
     const map = {};
-    nodes.forEach(n => map[n.id] = n);
+    nodes.forEach((node) => { map[node.id] = node; });
     const container = document.getElementById('tree');
     container.innerHTML = '';
 
@@ -167,14 +168,22 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
     }
 
     function renderNode(id, prefixParts, isLast, parentChildCount) {
-      if (visitedNodes.has(id)) return;
+      if (visitedNodes.has(id)) {
+        return;
+      }
       visitedNodes.add(id);
+
       const node = map[id];
-      if (!node) return;
+      if (!node) {
+        return;
+      }
 
       const isCurrent = node.id === currentId;
       const isRoot = id === 0;
-      const storageKind = node.storage?.kind === 'full' ? 'F' : node.storage?.kind === 'delta' ? 'D' : '';
+      const storageKind =
+        node.storage?.kind === 'full' ? 'F' :
+        node.storage?.kind === 'delta' ? 'D' :
+        '';
       const isDirectBranchChild = !isRoot && parentChildCount > 1;
       const graphHtml = prefixParts.map(renderSegment).join('') +
         (isDirectBranchChild ? renderSegment(isLast ? 'elbow' : 'tee') : '');
@@ -183,11 +192,11 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       div.innerHTML =
-        (graphHtml ? \`<span class="graph">\${graphHtml}</span>\` : '') +
-        \`<span class="dot\${isCurrent ? ' current' : ''}"></span>\` +
-        \`<span class="label">\${node.label}</span>\` +
-        (storageKind ? \`<span class="storage">\${storageKind}</span>\` : '') +
-        \`<span class="time">\${formatTime(node.timestamp)}</span>\`;
+        (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
+        '<span class="dot' + (isCurrent ? ' current' : '') + '"></span>' +
+        '<span class="label">' + node.label + '</span>' +
+        (storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
+        '<span class="time">' + formatTime(node.timestamp) + '</span>';
       div.addEventListener('click', () => {
         if (!isCurrent) {
           if (mode === 'diff') {
