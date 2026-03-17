@@ -1,6 +1,6 @@
 {
   "name": "vscode-undotree",
-  "displayName": "Undo Tree",
+  "displayName": "UndoTree History",
   "description": "Visualize and navigate undo history as a tree",
   "version": "0.2.0",
   "publisher": "mmiyaji",

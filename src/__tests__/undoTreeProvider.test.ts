@@ -85,7 +85,7 @@ describe('UndoTreeProvider initialization', () => {
         const html = (provider as any).buildHtml([], 0, false, 'navigate');
 
         expect(html).not.toContain('const isLinear');
-        expect(html).toContain("renderNode(0, [], false, 0);");
+        expect(html).toContain('renderNode(0, [], false, 0);');
     });
 
     it('renders the settings gear as a menu trigger', () => {
@@ -96,7 +96,20 @@ describe('UndoTreeProvider initialization', () => {
 
         expect(html).toContain(`onclick="send('showMenu')"`);
         expect(html).toContain('title="Open Undo Tree menu"');
-        expect(html).toContain('>⚙</button>');
+        expect(html).toContain('&#9881;</button>');
+    });
+
+    it('initializes collapse state so only the current path is expanded', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+
+        expect(html).toContain('function buildCurrentPath(map, currentId) {');
+        expect(html).toContain('const currentPath = buildCurrentPath(map, currentId);');
+        expect(html).toContain('collapsed[node.id] = !currentPath.has(node.id);');
+        expect(html).toContain('function toggleCollapsed(nodeId) {');
+        expect(html).toContain('if (collapsed[node.id]) {');
     });
 
     it('creates a restore node when the loaded file content differs', () => {
