@@ -5,6 +5,25 @@ import * as path from 'path';
 import { UndoTreeProvider } from './undoTreeProvider';
 import { UndoTreeManager } from './undoTreeManager';
 
+// バーチャルドキュメント（差分表示用）
+class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
+    private contents = new Map<number, string>();
+    private counter = 0;
+
+    prepare(content: string, ext: string): vscode.Uri {
+        const id = this.counter++;
+        this.contents.set(id, content);
+        // 拡張子をURIに含めることでVS Codeが言語を正しく認識する
+        return vscode.Uri.parse(`undotree:///node_${id}${ext}`);
+    }
+
+    provideTextDocumentContent(uri: vscode.Uri): string {
+        const match = uri.path.match(/\/node_(\d+)/);
+        const id = match ? parseInt(match[1]) : -1;
+        return this.contents.get(id) ?? '';
+    }
+}
+
 let manager: UndoTreeManager | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 
@@ -72,6 +91,7 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
 export function activate(context: vscode.ExtensionContext) {
     manager = new UndoTreeManager();
     const provider = new UndoTreeProvider(context, manager);
+    const contentProvider = new UndoTreeDocumentContentProvider();
 
     manager.onRefresh = () => provider.refresh();
 
@@ -80,6 +100,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         statusBarItem,
+
+        vscode.workspace.registerTextDocumentContentProvider('undotree', contentProvider),
 
         vscode.window.registerWebviewViewProvider('undotree.treeView', provider),
 
@@ -118,6 +140,33 @@ export function activate(context: vscode.ExtensionContext) {
             }
             await config.update('enabledExtensions', updated, vscode.ConfigurationTarget.Global);
             updateStatusBar(editor);
+        }),
+
+        vscode.commands.registerCommand('undotree.diffWithNode', async (targetNodeId: number) => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !manager) {
+                return;
+            }
+            const tree = manager.getTree(editor.document.uri);
+            const ext = path.extname(editor.document.fileName) || '.txt';
+
+            const targetContent = manager.reconstructContent(tree, targetNodeId);
+            const currentContent = manager.reconstructContent(tree, tree.currentId);
+
+            const targetNode = tree.nodes.get(targetNodeId);
+            const currentNode = tree.nodes.get(tree.currentId);
+            const targetLabel = targetNode ? `node${targetNodeId} (${targetNode.label})` : `node${targetNodeId}`;
+            const currentLabel = currentNode ? `current (${currentNode.label})` : 'current';
+
+            const targetUri = contentProvider.prepare(targetContent, ext);
+            const currentUri = contentProvider.prepare(currentContent, ext);
+
+            await vscode.commands.executeCommand(
+                'vscode.diff',
+                targetUri,
+                currentUri,
+                `Undo Tree: ${targetLabel} ↔ ${currentLabel}`
+            );
         }),
 
         vscode.commands.registerCommand('undotree.togglePause', () => {

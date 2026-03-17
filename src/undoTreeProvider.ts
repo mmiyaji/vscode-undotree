@@ -5,6 +5,7 @@ import { UndoTreeManager } from './undoTreeManager';
 
 export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
+    private mode: 'navigate' | 'diff' = 'navigate';
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -36,6 +37,15 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 case 'openSettings':
                     await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree');
                     break;
+                case 'toggleMode':
+                    this.mode = this.mode === 'navigate' ? 'diff' : 'navigate';
+                    this.render();
+                    break;
+                case 'diffWithNode':
+                    if (typeof message.nodeId === 'number') {
+                        await vscode.commands.executeCommand('undotree.diffWithNode', message.nodeId);
+                    }
+                    break;
             }
         });
     }
@@ -52,18 +62,19 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         }
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused);
+            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode);
             return;
         }
         const tree = this.manager.getTree(editor.document.uri);
         this.view.webview.html = this.buildHtml(
             Array.from(tree.nodes.values()),
             tree.currentId,
-            this.manager.paused
+            this.manager.paused,
+            this.mode
         );
     }
 
-    private buildHtml(nodes: ReturnType<typeof Array.from> | null, currentId: number, paused: boolean): string {
+    private buildHtml(nodes: ReturnType<typeof Array.from> | null, currentId: number, paused: boolean, mode: 'navigate' | 'diff'): string {
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
 <html>
@@ -87,9 +98,13 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   button:disabled { opacity: 0.4; cursor: default; }
   .btn-pause { margin-left: auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .btn-pause:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .btn-mode { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .btn-mode:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .btn-mode.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .btn-settings { background: transparent; color: var(--vscode-foreground); opacity: 0.5; padding: 3px 5px; }
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
+  .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
 </style>
 </head>
 <body>
@@ -97,14 +112,17 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   <button id="btn-undo" onclick="send('undo')">↑ Undo</button>
   <button id="btn-redo" onclick="send('redo')">↓ Redo</button>
   <button class="btn-pause" onclick="send('togglePause')" title="${paused ? 'Resume tracking' : 'Pause tracking'}">${paused ? '▶ Resume' : '⏸ Pause'}</button>
+  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? 'Switch to Diff mode' : 'Switch to Navigate mode'}">${mode === 'navigate' ? '⎇ Diff' : '⎇ Nav'}</button>
   <button class="btn-settings" onclick="send('openSettings')" title="Open Undo Tree settings">⚙</button>
 </div>
 ${paused ? '<div class="paused-badge">⏸ Tracking paused — history is frozen</div>' : ''}
+${mode === 'diff' ? '<div class="diff-badge">⎇ Diff mode — click node to compare with current</div>' : ''}
 <div id="tree"></div>
 <script>
   const vscode = acquireVsCodeApi();
   const nodes = ${nodesJson};
   const currentId = ${currentId};
+  const mode = ${JSON.stringify(mode)};
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
 
@@ -154,7 +172,13 @@ ${paused ? '<div class="paused-badge">⏸ Tracking paused — history is frozen<
         (storageKind ? \`<span class="storage">\${storageKind}</span>\` : '') +
         \`<span class="time">\${formatTime(node.timestamp)}</span>\`;
       div.addEventListener('click', () => {
-        if (!isCurrent) send('jumpToNode', { nodeId: node.id });
+        if (!isCurrent) {
+          if (mode === 'diff') {
+            send('diffWithNode', { nodeId: node.id });
+          } else {
+            send('jumpToNode', { nodeId: node.id });
+          }
+        }
       });
       container.appendChild(div);
 
