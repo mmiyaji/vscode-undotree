@@ -334,6 +334,132 @@ describe('DAG循環防止', () => {
 });
 
 // -----------------------------------------------
+// compact（履歴圧縮）
+// -----------------------------------------------
+describe('compact', () => {
+    // root(full) → n1(full,base) → n2(delta,insert) → ... → nK(delta,insert) の直列チェーンを作る
+    function makeInsertChain(deltaCount: number) {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        let content = base;
+        for (let i = 0; i < deltaCount; i++) {
+            content += 'b';
+            const doc = makeDocument(content);
+            manager.onDidChangeTextDocument(
+                makeChangeEvent(doc, [{ offset: content.length - 1, removeLength: 0, text: 'b' }])
+            );
+            manager.onDidSaveTextDocument(doc);
+        }
+        const tree = manager.getTree(makeUri());
+        return { manager, tree, finalContent: content };
+    }
+
+    it('直列insertチェーンを圧縮する', () => {
+        // root → n1(full) → n2(delta) → n3(delta) → n4(delta) → n5(delta, leaf, current)
+        // n2: parent=n1(full=mixed) → 非圧縮
+        // n3: parent=n2(insert), child=n4(insert) → 圧縮可
+        // n4: 圧縮後parent=n2(insert), child=n5(insert) → 圧縮可
+        // n5: leaf → 非圧縮
+        // → 2件削除: root, n1, n2, n5 の4ノードが残る
+        const { manager, tree, finalContent } = makeInsertChain(4);
+        expect(tree.nodes.size).toBe(6);
+
+        const removed = manager.compact(tree);
+
+        expect(removed).toBe(2);
+        expect(tree.nodes.size).toBe(4);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(finalContent);
+    });
+
+    it('ルートノードは削除されない', () => {
+        const { manager, tree } = makeInsertChain(4);
+        manager.compact(tree);
+        expect(tree.nodes.has(0)).toBe(true);
+    });
+
+    it('現在ノードは削除されない', () => {
+        const { manager, tree } = makeInsertChain(4);
+        // currentId をn3（中間ノード）に移動
+        // n3のidはrootが0, n1=1, n2=2, n3=3
+        tree.currentId = 3;
+        manager.compact(tree);
+        expect(tree.nodes.has(3)).toBe(true);
+    });
+
+    it('分岐点は削除されない', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        // n1から2方向に分岐させる
+        const content2 = base + 'b';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(content2), [{ offset: 100, removeLength: 0, text: 'b' }])
+        );
+        manager.onDidSaveTextDocument(makeDocument(content2));
+
+        const tree = manager.getTree(makeUri());
+        tree.currentId = 1; // n1に戻して分岐作成
+
+        const content3 = base + 'c';
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(content3), [{ offset: 100, removeLength: 0, text: 'c' }])
+        );
+        manager.onDidSaveTextDocument(makeDocument(content3));
+
+        // n1はchildren.length===2の分岐点
+        const n1 = tree.nodes.get(1)!;
+        expect(n1.children.length).toBe(2);
+
+        manager.compact(tree);
+        expect(tree.nodes.has(1)).toBe(true); // 分岐点は残る
+    });
+
+    it('終点（leaf）は削除されない', () => {
+        const { manager, tree } = makeInsertChain(2);
+        // 末尾のleafノード（currentId）が残ることを確認
+        const leafId = tree.currentId;
+        manager.compact(tree);
+        expect(tree.nodes.has(leafId)).toBe(true);
+    });
+
+    it('mixedノード（insert+delete混在）は削除されない', () => {
+        const manager = new UndoTreeManager();
+        const base = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        // 置換操作: insert+deleteが混在 → mixed
+        const replaced = base.slice(0, 99) + 'z';
+        const doc = makeDocument(replaced);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(doc, [{ offset: 99, removeLength: 1, text: 'z' }])
+        );
+        manager.onDidSaveTextDocument(doc);
+
+        const tree = manager.getTree(makeUri());
+        const mixedId = tree.currentId; // n2 (mixed: insert 'z' + delete 'a')
+        const sizeBefore = tree.nodes.size;
+
+        manager.compact(tree);
+
+        expect(tree.nodes.has(mixedId)).toBe(true);
+        expect(tree.nodes.size).toBe(sizeBefore); // 圧縮なし
+    });
+
+    it('圧縮後もreconstructContentが正しく復元できる', () => {
+        const { manager, tree, finalContent } = makeInsertChain(6);
+        manager.compact(tree);
+        // すべての残存ノードを復元できることを確認
+        for (const [id] of tree.nodes) {
+            expect(() => manager.reconstructContent(tree, id)).not.toThrow();
+        }
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(finalContent);
+    });
+});
+
+// -----------------------------------------------
 // ファイルを閉じたときのクリーンアップ
 // -----------------------------------------------
 describe('クリーンアップ', () => {

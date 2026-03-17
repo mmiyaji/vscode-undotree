@@ -169,6 +169,17 @@ export function activate(context: vscode.ExtensionContext) {
             );
         }),
 
+        vscode.commands.registerCommand('undotree.compact', () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !manager) {
+                return;
+            }
+            const tree = manager.getTree(editor.document.uri);
+            const removed = manager.compact(tree);
+            provider.refresh();
+            vscode.window.showInformationMessage(`Undo Tree: compacted ${removed} node(s)`);
+        }),
+
         vscode.commands.registerCommand('undotree.togglePause', () => {
             if (!manager) {
                 return;

@@ -213,7 +213,148 @@ describe('多数の分岐パフォーマンス', () => {
 });
 
 // -----------------------------------------------
-// 5. DAG収束パフォーマンス
+// 5. compact（履歴圧縮）パフォーマンス
+// -----------------------------------------------
+describe('compactパフォーマンス', () => {
+    it('1000ノードの直列insertチェーンをcompactして100ms以内', () => {
+        const manager = createManager();
+        const base = 'a'.repeat(1000);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        for (let i = 0; i < 1000; i++) {
+            const content = base + 'b'.repeat(i + 1);
+            const doc = makeDocument(content);
+            manager.onDidChangeTextDocument(
+                makeChangeEvent(doc, [{ offset: 1000 + i, removeLength: 0, text: 'b' }])
+            );
+            manager.onDidSaveTextDocument(doc);
+        }
+
+        const tree = manager.getTree(makeUri());
+        const beforeSize = tree.nodes.size;
+
+        const ms = elapsed(() => {
+            manager.compact(tree);
+        });
+
+        console.log(`1000ノードcompact: ${ms.toFixed(2)}ms (${beforeSize} → ${tree.nodes.size}ノード)`);
+        expect(ms).toBeLessThan(100);
+    });
+
+    it('compact後のreconstructContentが50ms以内', () => {
+        const manager = createManager();
+        const base = 'a'.repeat(1000);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        let current = base;
+        for (let i = 0; i < 500; i++) {
+            current += 'b';
+            const doc = makeDocument(current);
+            manager.onDidChangeTextDocument(
+                makeChangeEvent(doc, [{ offset: 1000 + i, removeLength: 0, text: 'b' }])
+            );
+            manager.onDidSaveTextDocument(doc);
+        }
+
+        const tree = manager.getTree(makeUri());
+        manager.compact(tree);
+
+        const ms = elapsed(() => {
+            manager.reconstructContent(tree, tree.currentId);
+        });
+
+        console.log(`compact後500段復元: ${ms.toFixed(2)}ms (残${tree.nodes.size}ノード)`);
+        expect(ms).toBeLessThan(50);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(current);
+    });
+
+    it('mixed操作が混在するチェーンのcompactが100ms以内', () => {
+        // insert連続 → mixed（置換）でチェーンが分断されるパターン
+        // [insert×50] → [mixed] → [insert×50] → [mixed] → [insert×50] の繰り返し×4
+        const manager = createManager();
+        const base = 'a'.repeat(1000);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        let content = base;
+        for (let block = 0; block < 4; block++) {
+            // insert × 50
+            for (let i = 0; i < 50; i++) {
+                content += 'b';
+                const doc = makeDocument(content);
+                manager.onDidChangeTextDocument(
+                    makeChangeEvent(doc, [{ offset: content.length - 1, removeLength: 0, text: 'b' }])
+                );
+                manager.onDidSaveTextDocument(doc);
+            }
+            // mixed: 末尾1文字を置換
+            const replaced = content.slice(0, -1) + 'z';
+            const doc = makeDocument(replaced);
+            manager.onDidChangeTextDocument(
+                makeChangeEvent(doc, [{ offset: content.length - 1, removeLength: 1, text: 'z' }])
+            );
+            manager.onDidSaveTextDocument(doc);
+            content = replaced;
+        }
+
+        const tree = manager.getTree(makeUri());
+        const beforeSize = tree.nodes.size;
+
+        const ms = elapsed(() => {
+            manager.compact(tree);
+        });
+
+        console.log(`mixed混在(${beforeSize}ノード)compact: ${ms.toFixed(2)}ms → 残${tree.nodes.size}ノード`);
+        expect(ms).toBeLessThan(100);
+        // mixedノードはチェーンを分断するため、各block内の中間insertのみ圧縮される
+        expect(tree.nodes.size).toBeLessThan(beforeSize);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(content);
+    });
+
+    it('分岐ありツリーのcompactが100ms以内', () => {
+        // root → base → [branch A: insert×100] × 10本
+        const manager = createManager();
+        const base = 'a'.repeat(500);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        const tree = manager.getTree(makeUri());
+        const branchRootId = tree.currentId;
+
+        for (let branch = 0; branch < 10; branch++) {
+            tree.currentId = branchRootId;
+            let content = base + `[branch${branch}]`;
+            const doc0 = makeDocument(content);
+            manager.onDidChangeTextDocument(
+                makeChangeEvent(doc0, [{ offset: base.length, removeLength: 0, text: `[branch${branch}]` }])
+            );
+            manager.onDidSaveTextDocument(doc0);
+
+            // 各ブランチにinsert × 30
+            for (let i = 0; i < 30; i++) {
+                content += 'x';
+                const doc = makeDocument(content);
+                manager.onDidChangeTextDocument(
+                    makeChangeEvent(doc, [{ offset: content.length - 1, removeLength: 0, text: 'x' }])
+                );
+                manager.onDidSaveTextDocument(doc);
+            }
+        }
+
+        const beforeSize = tree.nodes.size;
+
+        const ms = elapsed(() => {
+            manager.compact(tree);
+        });
+
+        console.log(`10分岐×30ノード(${beforeSize}ノード)compact: ${ms.toFixed(2)}ms → 残${tree.nodes.size}ノード`);
+        expect(ms).toBeLessThan(100);
+        // 分岐点(branchRootId)は削除されない
+        expect(tree.nodes.has(branchRootId)).toBe(true);
+        expect(tree.nodes.has(0)).toBe(true); // root
+    });
+});
+
+// -----------------------------------------------
+// 6. DAG収束パフォーマンス
 // -----------------------------------------------
 describe('DAG収束パフォーマンス', () => {
     it('100回のDAG収束検索が10ms以内', () => {

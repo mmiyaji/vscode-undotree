@@ -40,6 +40,10 @@
       {
         "command": "undotree.togglePause",
         "title": "Undo Tree: Pause / Resume"
+      },
+      {
+        "command": "undotree.compact",
+        "title": "Undo Tree: Compact History"
       }
     ],
     "configuration": {

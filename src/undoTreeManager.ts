@@ -326,6 +326,74 @@ export class UndoTreeManager implements vscode.Disposable {
         this.onRefresh?.();
     }
 
+    compact(tree: UndoTree): number {
+        let removed = 0;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [, node] of tree.nodes) {
+                if (this.isCompressible(tree, node)) {
+                    this.removeNode(tree, node);
+                    removed++;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return removed;
+    }
+
+    private classifyNode(node: UndoNode): 'insert' | 'delete' | 'mixed' {
+        if (node.storage.kind === 'full') {
+            return 'mixed';
+        }
+        const hasInsert = node.storage.diffs.some(d => d.inserted.length > 0);
+        const hasDelete = node.storage.diffs.some(d => d.removeLength > 0);
+        if (hasInsert && hasDelete) {
+            return 'mixed';
+        }
+        if (hasInsert) {
+            return 'insert';
+        }
+        return 'delete';
+    }
+
+    private isCompressible(tree: UndoTree, node: UndoNode): boolean {
+        if (node.id === tree.currentId) { return false; }
+        if (node.parents.length !== 1) { return false; }   // root or multi-parent
+        if (node.children.length !== 1) { return false; }  // branch, leaf, or orphan
+        const kind = this.classifyNode(node);
+        if (kind === 'mixed') { return false; }
+        const parent = tree.nodes.get(node.parents[0]);
+        const child = tree.nodes.get(node.children[0]);
+        if (!parent || !child) { return false; }
+        return this.classifyNode(parent) === kind && this.classifyNode(child) === kind;
+    }
+
+    private removeNode(tree: UndoTree, node: UndoNode): void {
+        const parentId = node.parents[0];
+        const childId = node.children[0];
+        const parent = tree.nodes.get(parentId)!;
+        const child = tree.nodes.get(childId)!;
+
+        // 同種deltaならdiffをマージしてdelta型を維持する（連続圧縮のため）
+        // それ以外はchildを全量化してdeltaチェーンの依存を断ち切る
+        if (node.storage.kind === 'delta' && child.storage.kind === 'delta') {
+            child.storage = { kind: 'delta', diffs: [...node.storage.diffs, ...child.storage.diffs] };
+        } else if (child.storage.kind === 'delta') {
+            const content = this.reconstructContent(tree, childId);
+            child.storage = { kind: 'full', content };
+        }
+
+        parent.children = parent.children.map(id => id === node.id ? childId : id);
+        child.parents = child.parents.map(id => id === node.id ? parentId : id);
+
+        tree.nodes.delete(node.id);
+        if (tree.hashMap.get(node.hash) === node.id) {
+            tree.hashMap.delete(node.hash);
+        }
+    }
+
     dispose() {
         if (this.autosaveTimer) {
             clearInterval(this.autosaveTimer);
