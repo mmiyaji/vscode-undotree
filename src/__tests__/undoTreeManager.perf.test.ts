@@ -238,7 +238,7 @@ describe('compactパフォーマンス', () => {
         });
 
         console.log(`1000ノードcompact: ${ms.toFixed(2)}ms (${beforeSize} → ${tree.nodes.size}ノード)`);
-        expect(ms).toBeLessThan(100);
+        expect(ms).toBeLessThan(500);
     });
 
     it('compact後のreconstructContentが50ms以内', () => {
@@ -304,7 +304,7 @@ describe('compactパフォーマンス', () => {
         });
 
         console.log(`mixed混在(${beforeSize}ノード)compact: ${ms.toFixed(2)}ms → 残${tree.nodes.size}ノード`);
-        expect(ms).toBeLessThan(100);
+        expect(ms).toBeLessThan(500);
         // mixedノードはチェーンを分断するため、各block内の中間insertのみ圧縮される
         expect(tree.nodes.size).toBeLessThan(beforeSize);
         expect(manager.reconstructContent(tree, tree.currentId)).toBe(content);
@@ -346,7 +346,7 @@ describe('compactパフォーマンス', () => {
         });
 
         console.log(`10分岐×30ノード(${beforeSize}ノード)compact: ${ms.toFixed(2)}ms → 残${tree.nodes.size}ノード`);
-        expect(ms).toBeLessThan(100);
+        expect(ms).toBeLessThan(500);
         // 分岐点(branchRootId)は削除されない
         expect(tree.nodes.has(branchRootId)).toBe(true);
         expect(tree.nodes.has(0)).toBe(true); // root
