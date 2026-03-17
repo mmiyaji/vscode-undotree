@@ -146,25 +146,40 @@ ${mode === 'diff' ? '<div class="diff-badge">⎇ Diff mode — click node to com
     document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
     document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
 
+    // currentIdから遡ってメインライン（root→current）を特定
+    function findMainPath() {
+      const path = new Set();
+      let id = currentId;
+      while (id !== undefined && !path.has(id)) {
+        path.add(id);
+        const node = map[id];
+        if (!node || node.parents.length === 0) break;
+        id = node.parents[node.parents.length - 1];
+      }
+      return path;
+    }
+    const mainPath = findMainPath();
     const visitedNodes = new Set();
 
-    // prefix: 親から引き継ぐ縦線部分 ("│  " or "   ")
-    // connector: このノードの接続文字 ("├─" or "└─" or "")
+    // メインライン（root→current）はインデントなしで縦に並ぶ
+    // 分岐は├─/└─でメインラインから右に展開する
     function renderNode(id, prefix, isLast) {
       if (visitedNodes.has(id)) return;
       visitedNodes.add(id);
       const node = map[id];
       if (!node) return;
       const isCurrent = node.id === currentId;
+      const isOnMain = mainPath.has(id);
+      const isRoot = (id === 0);
       const storageKind = node.storage?.kind === 'full' ? 'F' : node.storage?.kind === 'delta' ? 'D' : '';
 
-      const isRoot = (prefix === '' && id === 0);
-      const connector = isRoot ? '' : (isLast ? '└─' : '├─');
+      // メインラインは接続文字なし、分岐は├─/└─
+      const connector = (isRoot || isOnMain) ? '' : (isLast ? '└─' : '├─');
       const graphText = prefix + connector;
 
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
-      div.title = 'クリックしてこのノードにジャンプ';
+      div.title = mode === 'diff' ? 'クリックして差分を表示' : 'クリックしてこのノードにジャンプ';
       div.innerHTML =
         (graphText ? \`<span class="graph">\${graphText}</span>\` : '') +
         \`<span class="dot\${isCurrent ? ' current' : ''}"></span>\` +
@@ -182,14 +197,28 @@ ${mode === 'diff' ? '<div class="diff-badge">⎇ Diff mode — click node to com
       });
       container.appendChild(div);
 
-      // 子ノードへ渡すprefixを計算
-      const childPrefix = isRoot ? '' : prefix + (isLast ? '   ' : '│  ');
-      const children = node.children;
-      children.forEach((childId, i) => {
-        renderNode(childId, childPrefix, i === children.length - 1);
+      // 子をメインラインと分岐に分ける
+      const mainChild = node.children.find(cid => mainPath.has(cid));
+      const branchChildren = node.children.filter(cid => !mainPath.has(cid));
+
+      // メインラインは同じprefixを引き継ぐ（インデント増やさない）
+      // 分岐ノードは継続線を追加してインデント
+      const childBasePrefix = (isRoot || isOnMain)
+        ? prefix
+        : prefix + (isLast ? '   ' : '│  ');
+
+      // 分岐を先にレンダリング（メインラインの続きより前に表示）
+      branchChildren.forEach((cid, i) => {
+        const isLastBranch = (i === branchChildren.length - 1) && !mainChild;
+        renderNode(cid, childBasePrefix, isLastBranch);
       });
+
+      // メインラインの子（インデントなし）
+      if (mainChild !== undefined) {
+        renderNode(mainChild, childBasePrefix, false);
+      }
     }
-    renderNode(0, '', true);
+    renderNode(0, '', false);
   }
 
   buildTree(nodes, currentId);
