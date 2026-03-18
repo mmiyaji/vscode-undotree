@@ -16,5 +16,6 @@
   "config.timeFormat.description": "Timestamp display format in the Undo Tree view. Formatting is compatible with [date-fns `format`](https://date-fns.org/v4.1.0/docs/format). `time` uses `HH:mm:ss`, `dateTime` uses `yyyy-MM-dd HH:mm:ss`, and `custom` uses `undotree.timeFormatCustom`.",
   "config.timeFormatCustom.description": "Custom timestamp pattern for the Undo Tree view. This setting is used only when `undotree.timeFormat` is set to `custom`. Formatting is compatible with [date-fns `format`](https://date-fns.org/v4.1.0/docs/format). Example: `yyyy-MM-dd HH:mm:ss`.",
   "config.nodeMarkerStyle.description": "Node marker style in the Undo Tree view. `none` hides node markers. `simple` shows a uniform dot with current highlight. `semantic` uses different markers for the root node, branch points, the latest leaf, and the current node.",
+  "config.nodeSizeMetric.description": "Size metric to display as a diff on each node relative to the current node. `none` hides the metric. `lines` shows line count difference. `bytes` shows byte size difference.",
   "views.treeView.name": "Undo Tree"
 }

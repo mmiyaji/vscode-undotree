@@ -120,6 +120,16 @@
           ],
           "default": "semantic",
           "markdownDescription": "%config.nodeMarkerStyle.description%"
+        },
+        "undotree.nodeSizeMetric": {
+          "type": "string",
+          "enum": [
+            "none",
+            "lines",
+            "bytes"
+          ],
+          "default": "lines",
+          "markdownDescription": "%config.nodeSizeMetric.description%"
         }
       }
     },

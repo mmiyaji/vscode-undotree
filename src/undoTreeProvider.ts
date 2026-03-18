@@ -85,9 +85,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         const timeFormat = this.getTimeFormat();
         const timeFormatCustom = this.getTimeFormatCustom();
         const nodeMarkerStyle = this.getNodeMarkerStyle();
+        const nodeSizeMetric = this.getNodeSizeMetric();
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeMarkerStyle);
+            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeMarkerStyle, nodeSizeMetric);
             return;
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
@@ -103,7 +104,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             this.mode,
             timeFormat,
             timeFormatCustom,
-            nodeMarkerStyle
+            nodeMarkerStyle,
+            nodeSizeMetric
         );
     }
 
@@ -126,6 +128,14 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             return value;
         }
         return 'semantic';
+    }
+
+    private getNodeSizeMetric(): 'none' | 'lines' | 'bytes' {
+        const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeSizeMetric');
+        if (value === 'none' || value === 'lines' || value === 'bytes') {
+            return value;
+        }
+        return 'lines';
     }
 
     private formatTimestamp(
@@ -153,7 +163,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         mode: 'navigate' | 'diff',
         timeFormat: 'time' | 'dateTime' | 'custom',
         timeFormatCustom: string,
-        nodeMarkerStyle: 'none' | 'simple' | 'semantic'
+        nodeMarkerStyle: 'none' | 'simple' | 'semantic',
+        nodeSizeMetric: 'none' | 'lines' | 'bytes'
     ): string {
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
@@ -187,6 +198,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
   .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
   .empty-badge { font-size: 9px; opacity: 0.45; font-style: italic; flex-shrink: 0; }
+  .size-diff { font-size: 9px; flex-shrink: 0; opacity: 0.7; }
+  .size-diff.plus { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
+  .size-diff.minus { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
   .note { font-style: italic; opacity: 0.55; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
@@ -212,9 +226,37 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
   const timeFormat = ${JSON.stringify(timeFormat)};
   const timeFormatCustom = ${JSON.stringify(timeFormatCustom)};
   const nodeMarkerStyle = ${JSON.stringify(nodeMarkerStyle)};
+  const nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
   function escHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+  function formatSizeDiff(node, currentNode) {
+    if (nodeSizeMetric === 'none') { return ''; }
+    const val = nodeSizeMetric === 'lines' ? node.lineCount : node.byteCount;
+    if (val === undefined || val === null) { return ''; }
+    // initialノード: 絶対値を表示
+    if (node.id === 0) {
+      if (nodeSizeMetric === 'lines') {
+        return '<span class="size-diff">' + val + 'L</span>';
+      }
+      const str = val >= 1024 ? (val / 1024).toFixed(1) + 'KB' : val + 'B';
+      return '<span class="size-diff">' + str + '</span>';
+    }
+    if (!currentNode) { return ''; }
+    const cur = nodeSizeMetric === 'lines' ? currentNode.lineCount : currentNode.byteCount;
+    if (cur === undefined || cur === null) { return ''; }
+    const delta = val - cur;
+    if (delta === 0) { return ''; }
+    if (nodeSizeMetric === 'lines') {
+      const cls = delta > 0 ? 'plus' : 'minus';
+      return '<span class="size-diff ' + cls + '">' + (delta > 0 ? '+' : '') + delta + 'L</span>';
+    }
+    const abs = Math.abs(delta);
+    const str = abs >= 1024 ? (abs / 1024).toFixed(1) + 'KB' : abs + 'B';
+    const cls = delta > 0 ? 'plus' : 'minus';
+    return '<span class="size-diff ' + cls + '">' + (delta > 0 ? '+' : '-') + str + '</span>';
+  }
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
@@ -308,12 +350,15 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       const noteHtml = node.note
         ? '<span class="note" title="' + escHtml(node.note) + ' (click to edit)" onclick="event.stopPropagation();send(\'editNote\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
         : '<span class="note-edit" title="Add note" onclick="event.stopPropagation();send(\'editNote\',{nodeId:' + node.id + '})">✎</span>';
+      const sizeDiffHtml = (isCurrent && node.id !== 0) ? '' : formatSizeDiff(node, map[currentId]);
+      const labelHtml = node.note ? '' : '<span class="label">' + node.label + '</span>';
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
         markerHtml +
-        '<span class="label">' + node.label + '</span>' +
+        labelHtml +
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
+        sizeDiffHtml +
         (storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
         '<span class="time">' + node.formattedTime + '</span>';
       div.addEventListener('click', () => {

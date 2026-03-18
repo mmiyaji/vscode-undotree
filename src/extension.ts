@@ -564,7 +564,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.autosaveInterval') ||
                 e.affectsConfiguration('undotree.timeFormat') ||
                 e.affectsConfiguration('undotree.timeFormatCustom') ||
-                e.affectsConfiguration('undotree.nodeMarkerStyle')
+                e.affectsConfiguration('undotree.nodeMarkerStyle') ||
+                e.affectsConfiguration('undotree.nodeSizeMetric')
             ) {
                 if (e.affectsConfiguration('undotree.persistenceMode')) {
                     schedulePersistState(context);

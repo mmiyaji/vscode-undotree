@@ -22,6 +22,8 @@ export type UndoNode = {
     hash: string;
     storage: UndoNodeStorage;
     note?: string;
+    lineCount?: number;
+    byteCount?: number;
 };
 
 export type UndoTree = {
@@ -40,6 +42,8 @@ export type SerializedUndoNode = {
     hash: string;
     storage: UndoNodeStorage;
     note?: string;
+    lineCount?: number;
+    byteCount?: number;
 };
 
 export type SerializedUndoTree = {
@@ -90,18 +94,22 @@ export class UndoTreeManager implements vscode.Disposable {
         const key = uri.toString();
         if (!this.trees.has(key)) {
             const content = initialContent ?? '';
+            const contentHash = this.hashContent(content);
             const root: UndoNode = {
                 id: 0,
                 parents: [],
                 children: [],
                 timestamp: Date.now(),
                 label: 'initial',
-                hash: '',
+                hash: contentHash,
                 storage: { kind: 'full', content },
+                ...this.computeSizeMetrics(content),
             };
+            const hashMap = new Map<string, number>();
+            hashMap.set(contentHash, 0);
             this.trees.set(key, {
                 nodes: new Map([[0, root]]),
-                hashMap: new Map(),
+                hashMap,
                 currentId: 0,
                 rootId: 0,
             });
@@ -109,7 +117,11 @@ export class UndoTreeManager implements vscode.Disposable {
             const tree = this.trees.get(key)!;
             const root = tree.nodes.get(tree.rootId);
             if (root && root.storage.kind === 'full' && root.storage.content === '' && root.children.length === 0) {
+                tree.hashMap.delete(root.hash);
                 root.storage.content = initialContent;
+                root.hash = this.hashContent(initialContent);
+                tree.hashMap.set(root.hash, 0);
+                Object.assign(root, this.computeSizeMetrics(initialContent));
             }
         }
         return this.trees.get(key)!;
@@ -187,7 +199,11 @@ export class UndoTreeManager implements vscode.Disposable {
             currentNode.storage.content === '';
 
         if (isCurrentEmptyRoot) {
+            tree.hashMap.delete(currentNode.hash);
             currentNode.storage = { kind: 'full', content };
+            currentNode.hash = hash;
+            tree.hashMap.set(hash, 0);
+            Object.assign(currentNode, this.computeSizeMetrics(content));
         }
 
         const storage: UndoNodeStorage = (isCurrentEmptyRoot || this.shouldStoreFull(diffs, content.length))
@@ -203,6 +219,7 @@ export class UndoTreeManager implements vscode.Disposable {
             label,
             hash,
             storage,
+            ...this.computeSizeMetrics(content),
         };
         currentNode.children.push(newId);
 
@@ -312,6 +329,13 @@ export class UndoTreeManager implements vscode.Disposable {
         return crypto.createHash('sha1').update(content).digest('hex').slice(0, 8);
     }
 
+    private computeSizeMetrics(content: string): { lineCount: number; byteCount: number } {
+        return {
+            lineCount: content === '' ? 0 : content.split('\n').length,
+            byteCount: Buffer.byteLength(content, 'utf8'),
+        };
+    }
+
     async undo() {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -414,6 +438,8 @@ export class UndoTreeManager implements vscode.Disposable {
                             ),
                         },
                     ...(node.note !== undefined ? { note: node.note } : {}),
+                    ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
+                    ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
                 })),
                 hashMap: Array.from(tree.hashMap.entries()),
                 currentId: tree.currentId,
@@ -448,6 +474,8 @@ export class UndoTreeManager implements vscode.Disposable {
                             ),
                         },
                     ...(node.note !== undefined ? { note: node.note } : {}),
+                    ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
+                    ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
                 }])),
                 hashMap: new Map(tree.hashMap),
                 currentId: tree.currentId,
@@ -481,6 +509,8 @@ export class UndoTreeManager implements vscode.Disposable {
                         ),
                     },
                 ...(node.note !== undefined ? { note: node.note } : {}),
+                ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
+                ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
             }])),
             hashMap: new Map(tree.hashMap),
             currentId: tree.currentId,
@@ -558,6 +588,7 @@ export class UndoTreeManager implements vscode.Disposable {
             label,
             hash: this.hashContent(content),
             storage: { kind: 'full', content },
+            ...this.computeSizeMetrics(content),
         };
 
         currentNode.children.push(newId);

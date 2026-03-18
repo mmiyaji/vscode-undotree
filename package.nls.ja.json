@@ -16,5 +16,6 @@
   "config.timeFormat.description": "Undo Tree ビューに表示する時刻形式です。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) に準拠します。`time` は `HH:mm:ss`、`dateTime` は `yyyy-MM-dd HH:mm:ss`、`custom` は `undotree.timeFormatCustom` を使用します。",
   "config.timeFormatCustom.description": "Undo Tree ビュー用のカスタム時刻書式です。この設定は `undotree.timeFormat` が `custom` のときだけ使用されます。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) に準拠します。例: `yyyy-MM-dd HH:mm:ss`。",
   "config.nodeMarkerStyle.description": "Undo Tree ビューのノード記号スタイルです。`none` はノード記号を非表示にし、`simple` は current 強調付きの単一ドットを表示し、`semantic` は root、分岐点、最新 leaf、current で異なる記号を使います。",
+  "config.nodeSizeMetric.description": "各ノードに current との差分として表示するサイズ指標です。`none` は非表示、`lines` は行数差分、`bytes` はバイト数差分を表示します。",
   "views.treeView.name": "Undo Tree"
 }
