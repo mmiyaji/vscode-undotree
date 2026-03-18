@@ -65,6 +65,7 @@ const FULL_STORAGE_THRESHOLD = 0.3;
 export class UndoTreeManager implements vscode.Disposable {
     private trees = new Map<string, UndoTree>();
     private diffBuffer = new Map<string, Diff[][]>();
+    private dirtyTrees = new Set<string>();
     private nextId = 1;
     private autosaveTimer: ReturnType<typeof setInterval> | undefined;
     private autosaveIntervalMs = DEFAULT_AUTOSAVE_INTERVAL_MS;
@@ -222,6 +223,20 @@ export class UndoTreeManager implements vscode.Disposable {
         return this.trees.has(uri.toString());
     }
 
+    markDirty(uri: vscode.Uri): void {
+        this.dirtyTrees.add(uri.toString());
+    }
+
+    getDirtyUris(): Set<string> {
+        return new Set(this.dirtyTrees);
+    }
+
+    clearDirty(uris: Iterable<string>): void {
+        for (const u of uris) {
+            this.dirtyTrees.delete(u);
+        }
+    }
+
     onDidChangeTextDocument(e: vscode.TextDocumentChangeEvent) {
         if (e.contentChanges.length === 0 || this.restoring || this.paused) {
             return;
@@ -323,6 +338,7 @@ export class UndoTreeManager implements vscode.Disposable {
         tree.hashMap.set(hash, newId);
         tree.currentId = newId;
         this.diffBuffer.delete(key);
+        this.dirtyTrees.add(key);
         this.onRefresh?.();
     }
 
@@ -491,7 +507,9 @@ export class UndoTreeManager implements vscode.Disposable {
             this.restoring = false;
         }
 
-        this.diffBuffer.delete(editor.document.uri.toString());
+        const uriStr = editor.document.uri.toString();
+        this.diffBuffer.delete(uriStr);
+        this.dirtyTrees.add(uriStr);
         this.onRefresh?.();
     }
 
@@ -694,6 +712,7 @@ export class UndoTreeManager implements vscode.Disposable {
         tree.hashMap.set(node.hash, newId);
         tree.currentId = newId;
         this.diffBuffer.delete(key);
+        this.dirtyTrees.add(key);
         this.onRefresh?.();
         return tree;
     }

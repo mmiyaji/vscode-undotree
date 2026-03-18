@@ -833,6 +833,119 @@ describe('DAG収束', () => {
 });
 
 // -----------------------------------------------
+// ダーティフラグ
+// -----------------------------------------------
+describe('dirtyTrees', () => {
+    it('初期状態はdirtyなし', () => {
+        const manager = new UndoTreeManager();
+        expect(manager.getDirtyUris().size).toBe(0);
+    });
+
+    it('保存でノードが追加されるとdirtyになる', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        expect(manager.getDirtyUris().has(doc.uri.toString())).toBe(true);
+    });
+
+    it('内容が変わらない保存ではdirtyにならない', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+        manager.clearDirty(manager.getDirtyUris());
+
+        manager.onDidSaveTextDocument(doc); // 同じ内容
+        expect(manager.getDirtyUris().has(doc.uri.toString())).toBe(false);
+    });
+
+    it('clearDirtyで特定URIのみクリアされる', () => {
+        const manager = new UndoTreeManager();
+        const doc1 = makeDocument('A', 'file:///a.md');
+        const doc2 = makeDocument('B', 'file:///b.md');
+        manager.onDidSaveTextDocument(doc1);
+        manager.onDidSaveTextDocument(doc2);
+
+        manager.clearDirty([doc1.uri.toString()]);
+        expect(manager.getDirtyUris().has(doc1.uri.toString())).toBe(false);
+        expect(manager.getDirtyUris().has(doc2.uri.toString())).toBe(true);
+    });
+
+    it('markDirtyで手動マークできる', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri('file:///manual.md');
+        manager.markDirty(uri);
+        expect(manager.getDirtyUris().has(uri.toString())).toBe(true);
+    });
+
+    it('getDirtyUrisはスナップショットを返す（元のSetと独立）', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello');
+        manager.onDidSaveTextDocument(doc);
+
+        const snapshot = manager.getDirtyUris();
+        manager.clearDirty(manager.getDirtyUris());
+
+        // スナップショットはclearDirtyの影響を受けない
+        expect(snapshot.has(doc.uri.toString())).toBe(true);
+        expect(manager.getDirtyUris().size).toBe(0);
+    });
+
+    it('DAG収束（新ノード作成なし）ではdirtyにならない', () => {
+        const manager = new UndoTreeManager();
+        const doc1 = makeDocument('A');
+        const doc2 = makeDocument('B');
+        manager.onDidSaveTextDocument(doc1);
+        manager.onDidSaveTextDocument(doc2);
+        manager.clearDirty(manager.getDirtyUris());
+
+        // Aに収束（新ノード作成なし・currentId変更のみ）
+        // addNodeが呼ばれないのでdirtyはmarkされない
+        // ただし実装上 addNode の早期returnは dirtyをmarkしないので
+        // この挙動をテストで明確化する
+        manager.onDidSaveTextDocument(doc1);
+        // 収束時はdirtyにならないこと（実装の現状を記録）
+        expect(manager.getDirtyUris().has(doc1.uri.toString())).toBe(false);
+    });
+
+    it('syncDocumentStateでノードが追加されるとdirtyになる', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.syncDocumentState(uri, 'initial');
+        manager.clearDirty(manager.getDirtyUris());
+
+        manager.syncDocumentState(uri, 'changed');
+        expect(manager.getDirtyUris().has(uri.toString())).toBe(true);
+    });
+
+    it('syncDocumentStateで内容が変わらなければdirtyにならない', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.syncDocumentState(uri, 'same');
+        manager.clearDirty(manager.getDirtyUris());
+
+        manager.syncDocumentState(uri, 'same');
+        expect(manager.getDirtyUris().has(uri.toString())).toBe(false);
+    });
+
+    it('複数URIが混在するときdirtyは正確に追跡される', () => {
+        const manager = new UndoTreeManager();
+        const docA = makeDocument('A', 'file:///a.md');
+        const docB = makeDocument('B', 'file:///b.md');
+        const docC = makeDocument('C', 'file:///c.md');
+
+        manager.onDidSaveTextDocument(docA);
+        manager.onDidSaveTextDocument(docB);
+        manager.onDidSaveTextDocument(docC);
+
+        const dirty = manager.getDirtyUris();
+        expect(dirty.size).toBe(3);
+        expect(dirty.has('file:///a.md')).toBe(true);
+        expect(dirty.has('file:///b.md')).toBe(true);
+        expect(dirty.has('file:///c.md')).toBe(true);
+    });
+});
+
+// -----------------------------------------------
 // hardCompact
 // -----------------------------------------------
 describe('hardCompact', () => {

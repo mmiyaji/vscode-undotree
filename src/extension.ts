@@ -52,7 +52,8 @@ function makeTreeFileName(uri: string): string {
 async function persistStateToDisk(
     context: vscode.ExtensionContext,
     state: ReturnType<UndoTreeManager['exportState']>,
-    paused: boolean
+    paused: boolean,
+    dirtyUris?: Set<string>  // undefined = 全ツリーを保存（手動保存時）
 ) {
     const rootDir = context.globalStorageUri.fsPath;
     const treesDir = path.join(rootDir, 'undo-trees');
@@ -61,12 +62,16 @@ async function persistStateToDisk(
 
     const compressionThreshold = getCompressionThresholdBytes();
     const checkpointThreshold = getCheckpointThresholdBytes();
-    const entries = Object.entries(state.trees);
-    const referencedHashes = new Set<string>();
+    const allEntries = Object.entries(state.trees);
+
+    // dirty なエントリのみ書き込む（undefined は全件）
+    const writeEntries = dirtyUris
+        ? allEntries.filter(([uri]) => dirtyUris.has(uri))
+        : allEntries;
 
     // メモリにないツリーを既存 manifest から保持（上書き保存で消えないようにする）
     const existingManifest = await readPersistedManifest(context);
-    const inMemoryUris = new Set(entries.map(([uri]) => uri));
+    const inMemoryUris = new Set(allEntries.map(([uri]) => uri));
     const preservedEntries = (existingManifest?.trees ?? []).filter(e => !inMemoryUris.has(e.uri));
 
     const manifest: PersistedManifest = {
@@ -75,12 +80,12 @@ async function persistStateToDisk(
         nextId: state.nextId,
         paused,
         trees: [
-            ...entries.map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
+            ...allEntries.map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
             ...preservedEntries,
         ],
     };
 
-    await Promise.all(entries.map(async ([uri, tree]) => {
+    await Promise.all(writeEntries.map(async ([uri, tree]) => {
         const totalFullBytes = tree.nodes.reduce((sum, node) => {
             if (node.storage.kind === 'full') {
                 return sum + (node.byteCount ?? Buffer.byteLength(node.storage.content, 'utf8'));
@@ -97,7 +102,6 @@ async function persistStateToDisk(
                 if (node.storage.kind !== 'full' || node.storage.content === '') {
                     return node;
                 }
-                referencedHashes.add(node.hash);
                 return { ...node, storage: { kind: 'checkpoint' as const, contentHash: node.hash } };
             })
             : tree.nodes;
@@ -150,7 +154,8 @@ async function persistStateToDisk(
     return {
         rootDir,
         treesDir,
-        treeCount: entries.length,
+        treeCount: allEntries.length,
+        writtenCount: writeEntries.length,
     };
 }
 
@@ -328,8 +333,10 @@ function schedulePersistState(context: vscode.ExtensionContext) {
         clearTimeout(persistTimer);
     }
 
+    const dirtyUris = manager!.getDirtyUris();
     persistTimer = setTimeout(() => {
-        void persistStateToDisk(context, manager!.exportState(), manager!.paused);
+        manager!.clearDirty(dirtyUris);
+        void persistStateToDisk(context, manager!.exportState(), manager!.paused, dirtyUris);
         persistTimer = undefined;
     }, PERSIST_DEBOUNCE_MS);
 }
@@ -626,6 +633,9 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             const tree = manager.getTree(editor.document.uri);
             const removed = manager.compact(tree);
+            if (removed > 0) {
+                manager.markDirty(editor.document.uri);
+            }
             provider.refresh();
             vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: compacted {0} node(s)', removed));
         }),
@@ -653,6 +663,9 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             const tree = manager.getTree(editor.document.uri);
             const removed = manager.hardCompact(tree, days);
+            if (removed > 0) {
+                manager.markDirty(editor.document.uri);
+            }
             provider.refresh();
             schedulePersistState(context);
             vscode.window.showInformationMessage(

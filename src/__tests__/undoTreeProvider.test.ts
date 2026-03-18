@@ -43,7 +43,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).toContain('const isDirectBranchChild = !isRoot && parentChildCount > 1;');
         expect(html).toContain("function renderSegment(kind) {");
@@ -51,8 +51,8 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain("case 'tee':");
         expect(html).toContain("case 'elbow':");
         expect(html).toContain("const graphHtml = prefixParts.map(renderSegment).join('') +");
-        expect(html).toContain("renderSegment(isLast ? 'elbow' : 'tee')");
-        expect(html).toContain("const childPrefix = isDirectBranchChild");
+        expect(html).toContain("isDirectBranchChild ? (isLast ? 'elbow' : 'tee')");
+        expect(html).toContain("const childPrefix = (isDirectBranchChild || isBranchParent)");
         expect(html).toContain("[...prefixParts, isLast ? 'blank' : 'pipe']");
         expect(html).toContain('renderNode(cid, childPrefix, i === node.children.length - 1, node.children.length);');
     });
@@ -61,7 +61,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).not.toContain('function findMainPath()');
         expect(html).not.toContain('const mainPath');
@@ -71,7 +71,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).toContain('node.children.forEach((cid, i) => {');
         expect(html).not.toContain('mainChild');
@@ -82,7 +82,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).not.toContain('const isLinear');
         expect(html).toContain('renderNode(0, [], false, 0);');
@@ -92,7 +92,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).toContain(`onclick="send('showMenu')"`);
         expect(html).toContain('title="Open Undo Tree menu"');
@@ -103,7 +103,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'dateTime', 'YYYY-MM-DD HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'dateTime', 'YYYY-MM-DD HH:mm:ss', 'none', 'current', false);
 
         expect((provider as any).formatTimestamp(
             new Date('2026-03-18T09:41:22').getTime(),
@@ -117,7 +117,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'custom', 'DD/MM/YYYY HH:mm', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'custom', 'DD/MM/YYYY HH:mm', 'none', 'current', false);
 
         expect((provider as any).formatTimestamp(
             new Date('2026-03-18T09:41:22').getTime(),
@@ -138,32 +138,26 @@ describe('UndoTreeProvider initialization', () => {
         )).toBe('2026-03-18 09:41:22');
     });
 
-    it('supports semantic node markers', () => {
+    it('embeds nodeSizeMetric in the HTML', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'semantic');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'lines', 'current', false);
 
-        expect(html).toContain('const nodeMarkerStyle = "semantic";');
-        expect(html).toContain('const latestLeafId = nodes');
-        expect(html).toContain("function renderMarker(kind) {");
-        expect(html).toContain("case 'root':");
-        expect(html).toContain("case 'branch':");
-        expect(html).toContain("case 'latest':");
-        expect(html).toContain("case 'current':");
-        expect(html).toContain("nodeMarkerStyle === 'semantic'");
+        expect(html).toContain('const nodeSizeMetric = "lines";');
+        expect(html).toContain('const nodeSizeMetricBase = "current";');
+        expect(html).toContain("function formatSizeDiff(node, refNode) {");
+        expect(html).toContain("if (nodeSizeMetric === 'none') { return ''; }");
     });
 
-    it('supports hiding node markers', () => {
+    it('hides size diff when nodeSizeMetric is none', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
-        expect(html).toContain('const nodeMarkerStyle = "none";');
-        expect(html).toContain("case 'none':");
-        expect(html).toContain("nodeMarkerStyle === 'none'");
-        expect(html).toContain("const markerHtml = markerKind === 'none'");
+        expect(html).toContain('const nodeSizeMetric = "none";');
+        expect(html).toContain("if (nodeSizeMetric === 'none') { return ''; }");
     });
 
     it('creates a restore node when the loaded file content differs', () => {
