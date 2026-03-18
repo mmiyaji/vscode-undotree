@@ -523,6 +523,21 @@ describe('compact', () => {
         }
         expect(manager.reconstructContent(tree, tree.currentId)).toBe(finalContent);
     });
+
+    it('メモ付きノードはコンパクション対象外', () => {
+        const { manager, tree } = makeInsertChain(6);
+        // 中間ノード(id=2)にメモを付ける
+        const noteNodeId = 2;
+        const noteNode = tree.nodes.get(noteNodeId)!;
+        noteNode.note = 'checkpoint';
+
+        const sizeBefore = tree.nodes.size;
+        manager.compact(tree);
+
+        expect(tree.nodes.has(noteNodeId)).toBe(true);
+        expect(tree.nodes.size).toBeGreaterThan(2); // メモノードが残るので全圧縮にならない
+        expect(tree.nodes.size).toBeLessThan(sizeBefore); // それ以外は圧縮される
+    });
 });
 
 // -----------------------------------------------

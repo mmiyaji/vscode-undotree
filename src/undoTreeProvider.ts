@@ -51,6 +51,23 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                         await vscode.commands.executeCommand('undotree.diffWithNode', message.nodeId);
                     }
                     break;
+                case 'editNote': {
+                    if (typeof message.nodeId !== 'number' || !editor) {
+                        break;
+                    }
+                    const tree = this.manager.getTree(editor.document.uri);
+                    const node = tree.nodes.get(message.nodeId);
+                    const input = await vscode.window.showInputBox({
+                        prompt: 'Node note (empty to clear)',
+                        value: node?.note ?? '',
+                        placeHolder: 'e.g. build passed',
+                    });
+                    if (input === undefined) {
+                        break;
+                    }
+                    this.manager.setNote(editor.document.uri, message.nodeId, input);
+                    break;
+                }
             }
         });
     }
@@ -168,6 +185,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
   .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
+  .note { font-style: italic; opacity: 0.55; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
+  .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
+  .node:hover .note-edit { opacity: 0.45; }
+  .node:hover .note-edit:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -191,6 +212,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
   const nodeMarkerStyle = ${JSON.stringify(nodeMarkerStyle)};
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
+  function escHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
@@ -281,10 +303,14 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
+      const noteHtml = node.note
+        ? '<span class="note" title="' + escHtml(node.note) + ' (click to edit)" onclick="event.stopPropagation();send(\'editNote\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
+        : '<span class="note-edit" title="Add note" onclick="event.stopPropagation();send(\'editNote\',{nodeId:' + node.id + '})">✎</span>';
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
         markerHtml +
         '<span class="label">' + node.label + '</span>' +
+        noteHtml +
         (storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
         '<span class="time">' + node.formattedTime + '</span>';
       div.addEventListener('click', () => {

@@ -21,6 +21,7 @@ export type UndoNode = {
     label: string;
     hash: string;
     storage: UndoNodeStorage;
+    note?: string;
 };
 
 export type UndoTree = {
@@ -38,6 +39,7 @@ export type SerializedUndoNode = {
     label: string;
     hash: string;
     storage: UndoNodeStorage;
+    note?: string;
 };
 
 export type SerializedUndoTree = {
@@ -402,6 +404,7 @@ export class UndoTreeManager implements vscode.Disposable {
                                 eventDiffs.map((diff) => ({ ...diff }))
                             ),
                         },
+                    ...(node.note !== undefined ? { note: node.note } : {}),
                 })),
                 hashMap: Array.from(tree.hashMap.entries()),
                 currentId: tree.currentId,
@@ -435,6 +438,7 @@ export class UndoTreeManager implements vscode.Disposable {
                                 eventDiffs.map((diff) => ({ ...diff }))
                             ),
                         },
+                    ...(node.note !== undefined ? { note: node.note } : {}),
                 }])),
                 hashMap: new Map(tree.hashMap),
                 currentId: tree.currentId,
@@ -467,6 +471,7 @@ export class UndoTreeManager implements vscode.Disposable {
                             eventDiffs.map((diff) => ({ ...diff }))
                         ),
                     },
+                ...(node.note !== undefined ? { note: node.note } : {}),
             }])),
             hashMap: new Map(tree.hashMap),
             currentId: tree.currentId,
@@ -481,6 +486,20 @@ export class UndoTreeManager implements vscode.Disposable {
                 ...Array.from(this.trees.values()).flatMap((value) => Array.from(value.nodes.keys()).map((id) => id + 1))
             );
         }
+        this.onRefresh?.();
+    }
+
+    setNote(uri: vscode.Uri, nodeId: number, note: string): void {
+        const tree = this.trees.get(uri.toString());
+        if (!tree) {
+            return;
+        }
+        const node = tree.nodes.get(nodeId);
+        if (!node) {
+            return;
+        }
+        const trimmed = note.trim();
+        node.note = trimmed || undefined;
         this.onRefresh?.();
     }
 
@@ -549,6 +568,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
     private isCompressible(tree: UndoTree, node: UndoNode): boolean {
         if (node.id === tree.currentId) { return false; }
+        if (node.note) { return false; }
         if (node.parents.length !== 1) { return false; }
         if (node.children.length !== 1) { return false; }
         const kind = this.classifyNode(node);
