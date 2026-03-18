@@ -498,6 +498,20 @@ export class UndoTreeManager implements vscode.Disposable {
         this.onRefresh?.();
     }
 
+    isNodeEmpty(tree: UndoTree, nodeId: number): boolean {
+        const node = tree.nodes.get(nodeId);
+        if (!node) {
+            return false;
+        }
+        if (nodeId === tree.rootId) {
+            return node.storage.kind === 'full' && node.storage.content === '';
+        }
+        if (node.storage.kind === 'full') {
+            return node.storage.content === '';
+        }
+        return node.hash === this.hashContent('');
+    }
+
     setNote(uri: vscode.Uri, nodeId: number, note: string): void {
         const tree = this.trees.get(uri.toString());
         if (!tree) {

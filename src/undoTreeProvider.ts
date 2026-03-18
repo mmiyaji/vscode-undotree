@@ -5,7 +5,7 @@ import { format as formatDate } from 'date-fns';
 import { UndoTreeManager } from './undoTreeManager';
 
 type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<number, infer T>
-    ? T & { formattedTime: string }
+    ? T & { formattedTime: string; isEmpty: boolean }
     : never;
 
 export class UndoTreeProvider implements vscode.WebviewViewProvider {
@@ -94,6 +94,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
             ...node,
             formattedTime: this.formatTimestamp(node.timestamp, timeFormat, timeFormatCustom),
+            isEmpty: this.manager.isNodeEmpty(tree, node.id),
         }));
         this.view.webview.html = this.buildHtml(
             displayNodes,
@@ -185,6 +186,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
   .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
+  .empty-badge { font-size: 9px; opacity: 0.45; font-style: italic; flex-shrink: 0; }
   .note { font-style: italic; opacity: 0.55; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
@@ -310,6 +312,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
         markerHtml +
         '<span class="label">' + node.label + '</span>' +
+        (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
         '<span class="time">' + node.formattedTime + '</span>';
