@@ -61,6 +61,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 case 'openSettings':
                     await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
                     break;
+                case 'toggleTracking':
+                    await vscode.commands.executeCommand('undotree.toggleTracking');
+                    break;
                 case 'toggleMode':
                     this.mode = this.mode === 'navigate' ? 'diff' : 'navigate';
                     this.render();
@@ -119,8 +122,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             return;
         }
         if (this.isTracked && !this.isTracked(editor.document.uri)) {
-            const ext = editor.document.isUntitled ? '' : editor.document.fileName.match(/\.[^.]+$/)?.[0] ?? '';
-            this.view.webview.html = this.buildNotTrackedHtml(ext);
+            const fileName = editor.document.isUntitled ? '' : editor.document.fileName.replace(/.*[\\/]/, '');
+            const ext = fileName.match(/\.[^.]+$/)?.[0] ?? '';
+            this.view.webview.html = this.buildNotTrackedHtml(ext, fileName);
             return;
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
@@ -191,23 +195,27 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private buildNotTrackedHtml(ext: string): string {
+    private buildNotTrackedHtml(ext: string, fileName: string): string {
         const label = ext
             ? vscode.l10n.t('Undo Tree: {0} is not tracked', ext)
             : vscode.l10n.t('Undo Tree: this file is not tracked');
-        const hint = vscode.l10n.t('Use the status bar item or menu to enable tracking for this extension.');
+        const enableLabel = fileName
+            ? vscode.l10n.t('Enable tracking for {0}', fileName)
+            : vscode.l10n.t('Enable tracking for this file');
+        const settingsHint = vscode.l10n.t('To track all files of this type, add the extension in Settings.');
         const settingsLabel = vscode.l10n.t('Open Settings');
         return `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
 body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);}
-.msg{opacity:0.7;margin-bottom:8px;}
-.hint{opacity:0.45;font-size:11px;margin-bottom:12px;}
-.link{background:none;border:none;padding:0;color:var(--vscode-textLink-foreground);font-size:12px;cursor:pointer;text-decoration:underline;}
+.msg{opacity:0.7;margin-bottom:12px;}
+.hint{opacity:0.45;font-size:11px;margin-top:12px;margin-bottom:4px;}
+.link{background:none;border:none;padding:0;color:var(--vscode-textLink-foreground);font-size:12px;cursor:pointer;text-decoration:underline;display:block;margin-bottom:6px;}
 .link:hover{color:var(--vscode-textLink-activeForeground);}
 </style>
 </head><body>
 <div class="msg">${label}</div>
-<div class="hint">${hint}</div>
+<button class="link" onclick="acquireVsCodeApi().postMessage({command:'toggleTracking'})">${enableLabel}</button>
+<div class="hint">${settingsHint}</div>
 <button class="link" onclick="acquireVsCodeApi().postMessage({command:'openSettings'})">${settingsLabel}</button>
 </body></html>`;
     }
