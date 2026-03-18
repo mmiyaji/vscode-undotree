@@ -338,16 +338,14 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
         '';
       const isDirectBranchChild = !isRoot && parentChildCount > 1;
       const graphHtml = prefixParts.map(renderSegment).join('') +
-        (isDirectBranchChild ? renderSegment(isLast ? 'elbow' : 'tee') : '');
+        (!isRoot ? renderSegment(isDirectBranchChild ? (isLast ? 'elbow' : 'tee') : (node.children.length === 0 ? 'elbow' : 'pipe')) : '');
 
       const markerKind = nodeMarkerStyle === 'none'
         ? 'none'
         : nodeMarkerStyle === 'semantic'
           ? (isCurrent ? 'current'
-            : isRoot ? 'root'
             : isBranchPoint ? 'branch'
-            : isLatestLeaf ? 'latest'
-            : 'normal')
+            : 'none')
           : (isCurrent ? 'current' : 'normal');
       const markerHtml = markerKind === 'none'
         ? ''
