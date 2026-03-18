@@ -1,0 +1,20 @@
+{
+  "commands.show.title": "Undo Tree: 表示",
+  "commands.undo.title": "Undo Tree: 元に戻す",
+  "commands.redo.title": "Undo Tree: やり直し",
+  "commands.toggleTracking.title": "Undo Tree: 現在の拡張子の追跡を切り替え",
+  "commands.togglePause.title": "Undo Tree: 一時停止 / 再開",
+  "commands.compact.title": "Undo Tree: 履歴を圧縮",
+  "commands.savePersistedState.title": "Undo Tree: 永続化状態を保存",
+  "commands.restorePersistedState.title": "Undo Tree: 永続化状態を復元",
+  "commands.showMenu.title": "Undo Tree: メニューを表示",
+  "config.title": "Undo Tree",
+  "config.enabledExtensions.description": "Undo 履歴を自動追跡するファイル拡張子です。例: `[\".txt\", \".md\", \".js\"]`",
+  "config.excludePatterns.description": "追跡から除外するファイル名パターンです。`*` ワイルドカードをサポートします。例: `[\"*.min.*\", \"CHANGELOG*\", \".env*\"]`",
+  "config.persistenceMode.description": "Undo 履歴の永続保存モードです。`manual` はコマンド実行時のみ保存し、`auto` は履歴変更後に自動保存します。",
+  "config.autosaveInterval.description": "履歴スナップショットを自動取得する間隔（秒）です。最小値は 5 です。`0` で無効化します。既定値: 30。",
+  "config.timeFormat.description": "Undo Tree ビューに表示する時刻形式です。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) に準拠します。`time` は `HH:mm:ss`、`dateTime` は `yyyy-MM-dd HH:mm:ss`、`custom` は `undotree.timeFormatCustom` を使用します。",
+  "config.timeFormatCustom.description": "Undo Tree ビュー用のカスタム時刻書式です。この設定は `undotree.timeFormat` が `custom` のときだけ使用されます。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) に準拠します。例: `yyyy-MM-dd HH:mm:ss`。",
+  "config.nodeMarkerStyle.description": "Undo Tree ビューのノード記号スタイルです。`none` はノード記号を非表示にし、`simple` は current 強調付きの単一ドットを表示し、`semantic` は root、分岐点、最新 leaf、current で異なる記号を使います。",
+  "views.treeView.name": "Undo Tree"
+}

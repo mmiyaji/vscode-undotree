@@ -1,7 +1,12 @@
 'use strict';
 
 import * as vscode from 'vscode';
+import { format as formatDate } from 'date-fns';
 import { UndoTreeManager } from './undoTreeManager';
+
+type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<number, infer T>
+    ? T & { formattedTime: string }
+    : never;
 
 export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
@@ -60,25 +65,77 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         if (!this.view) {
             return;
         }
+        const timeFormat = this.getTimeFormat();
+        const timeFormatCustom = this.getTimeFormatCustom();
+        const nodeMarkerStyle = this.getNodeMarkerStyle();
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode);
+            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeMarkerStyle);
             return;
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
+        const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
+            ...node,
+            formattedTime: this.formatTimestamp(node.timestamp, timeFormat, timeFormatCustom),
+        }));
         this.view.webview.html = this.buildHtml(
-            Array.from(tree.nodes.values()),
+            displayNodes,
             tree.currentId,
             this.manager.paused,
-            this.mode
+            this.mode,
+            timeFormat,
+            timeFormatCustom,
+            nodeMarkerStyle
         );
     }
 
+    private getTimeFormat(): 'time' | 'dateTime' | 'custom' {
+        const value = vscode.workspace.getConfiguration('undotree').get<string>('timeFormat');
+        if (value === 'dateTime' || value === 'custom') {
+            return value;
+        }
+        return 'time';
+    }
+
+    private getTimeFormatCustom(): string {
+        const value = vscode.workspace.getConfiguration('undotree').get<string>('timeFormatCustom');
+        return value && value.trim() ? value : 'yyyy-MM-dd HH:mm:ss';
+    }
+
+    private getNodeMarkerStyle(): 'none' | 'simple' | 'semantic' {
+        const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeMarkerStyle');
+        if (value === 'none' || value === 'simple' || value === 'semantic') {
+            return value;
+        }
+        return 'semantic';
+    }
+
+    private formatTimestamp(
+        timestamp: number,
+        timeFormat: 'time' | 'dateTime' | 'custom',
+        timeFormatCustom: string
+    ): string {
+        const pattern = timeFormat === 'time'
+            ? 'HH:mm:ss'
+            : timeFormat === 'dateTime'
+                ? 'yyyy-MM-dd HH:mm:ss'
+                : timeFormatCustom;
+
+        try {
+            return formatDate(new Date(timestamp), pattern);
+        } catch {
+            return formatDate(new Date(timestamp), 'yyyy-MM-dd HH:mm:ss');
+        }
+    }
+
     private buildHtml(
-        nodes: ReturnType<typeof Array.from> | null,
+        nodes: DisplayNode[] | null,
         currentId: number,
         paused: boolean,
-        mode: 'navigate' | 'diff'
+        mode: 'navigate' | 'diff',
+        timeFormat: 'time' | 'dateTime' | 'custom',
+        timeFormatCustom: string,
+        nodeMarkerStyle: 'none' | 'simple' | 'semantic'
     ): string {
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
@@ -92,10 +149,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
-  .toggle { width: 12px; text-align: center; flex-shrink: 0; opacity: 0.8; cursor: pointer; }
-  .toggle.spacer { cursor: default; opacity: 0; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--vscode-foreground); flex-shrink: 0; }
-  .dot.current { background: var(--vscode-focusBorder); box-shadow: 0 0 0 2px var(--vscode-focusBorder); }
+  .dot { width: 12px; height: 12px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-foreground); }
+  .dot svg { width: 12px; height: 12px; display: block; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
   .label { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
   .time { opacity: 0.5; font-size: 10px; margin-left: auto; padding-left: 6px; flex-shrink: 0; }
@@ -131,40 +186,11 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
   const nodes = ${nodesJson};
   const currentId = ${currentId};
   const mode = ${JSON.stringify(mode)};
-  const collapsed = {};
+  const timeFormat = ${JSON.stringify(timeFormat)};
+  const timeFormatCustom = ${JSON.stringify(timeFormatCustom)};
+  const nodeMarkerStyle = ${JSON.stringify(nodeMarkerStyle)};
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
-
-  function formatTime(ts) {
-    const d = new Date(ts);
-    return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
-  }
-
-  function buildCurrentPath(map, currentId) {
-    const path = new Set();
-    let cursor = map[currentId];
-    while (cursor) {
-      path.add(cursor.id);
-      if (!cursor.parents || cursor.parents.length === 0) {
-        break;
-      }
-      cursor = map[cursor.parents[cursor.parents.length - 1]];
-    }
-    return path;
-  }
-
-  function initializeCollapsedState(nodes, currentPath) {
-    nodes.forEach((node) => {
-      if (node.children.length > 0) {
-        collapsed[node.id] = !currentPath.has(node.id);
-      }
-    });
-  }
-
-  function toggleCollapsed(nodeId) {
-    collapsed[nodeId] = !collapsed[nodeId];
-    buildTree(nodes, currentId);
-  }
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
@@ -174,15 +200,13 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
 
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
-    const currentPath = buildCurrentPath(map, currentId);
-    if (Object.keys(collapsed).length === 0) {
-      initializeCollapsedState(nodes, currentPath);
-    }
-
     const container = document.getElementById('tree');
     container.innerHTML = '';
 
     const cur = map[currentId];
+    const latestLeafId = nodes
+      .filter((node) => node.children.length === 0)
+      .sort((a, b) => b.timestamp - a.timestamp)[0]?.id ?? -1;
     document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
     document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
 
@@ -201,6 +225,23 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       }
     }
 
+    function renderMarker(kind) {
+      switch (kind) {
+        case 'none':
+          return '<svg viewBox="0 0 12 12" aria-hidden="true"></svg>';
+        case 'current':
+          return '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" fill="var(--vscode-focusBorder)" stroke="var(--vscode-focusBorder)" stroke-width="1.5" /></svg>';
+        case 'root':
+          return '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6" opacity="0.9" /></svg>';
+        case 'branch':
+          return '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5 L10.5 6 L6 10.5 L1.5 6 Z" fill="currentColor" opacity="0.85" /></svg>';
+        case 'latest':
+          return '<svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1.1" fill="currentColor" opacity="0.8" /></svg>';
+        default:
+          return '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="3.2" fill="currentColor" opacity="0.45" /></svg>';
+      }
+    }
+
     function renderNode(id, prefixParts, isLast, parentChildCount) {
       if (visitedNodes.has(id)) {
         return;
@@ -214,37 +255,38 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
 
       const isCurrent = node.id === currentId;
       const isRoot = id === 0;
+      const isBranchPoint = node.children.length > 1;
+      const isLatestLeaf = node.children.length === 0 && node.id === latestLeafId;
       const storageKind =
         node.storage?.kind === 'full' ? 'F' :
         node.storage?.kind === 'delta' ? 'D' :
         '';
-      const hasChildren = node.children.length > 0;
       const isDirectBranchChild = !isRoot && parentChildCount > 1;
       const graphHtml = prefixParts.map(renderSegment).join('') +
         (isDirectBranchChild ? renderSegment(isLast ? 'elbow' : 'tee') : '');
-      const toggleHtml = hasChildren
-        ? '<span class="toggle" data-node-id="' + node.id + '">' + (collapsed[node.id] ? '&#9654;' : '&#9660;') + '</span>'
-        : '<span class="toggle spacer">.</span>';
+
+      const markerKind = nodeMarkerStyle === 'none'
+        ? 'none'
+        : nodeMarkerStyle === 'semantic'
+          ? (isCurrent ? 'current'
+            : isRoot ? 'root'
+            : isBranchPoint ? 'branch'
+            : isLatestLeaf ? 'latest'
+            : 'normal')
+          : (isCurrent ? 'current' : 'normal');
+      const markerHtml = markerKind === 'none'
+        ? ''
+        : '<span class="dot dot-svg">' + renderMarker(markerKind) + '</span>';
 
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
-        toggleHtml +
-        '<span class="dot' + (isCurrent ? ' current' : '') + '"></span>' +
+        markerHtml +
         '<span class="label">' + node.label + '</span>' +
         (storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-        '<span class="time">' + formatTime(node.timestamp) + '</span>';
-
-      const toggle = div.querySelector('.toggle[data-node-id]');
-      if (toggle) {
-        toggle.addEventListener('click', (event) => {
-          event.stopPropagation();
-          toggleCollapsed(node.id);
-        });
-      }
-
+        '<span class="time">' + node.formattedTime + '</span>';
       div.addEventListener('click', () => {
         if (!isCurrent) {
           if (mode === 'diff') {
@@ -255,10 +297,6 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
         }
       });
       container.appendChild(div);
-
-      if (collapsed[node.id]) {
-        return;
-      }
 
       const childPrefix = isDirectBranchChild
         ? [...prefixParts, isLast ? 'blank' : 'pipe']

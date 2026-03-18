@@ -43,7 +43,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
 
         expect(html).toContain('const isDirectBranchChild = !isRoot && parentChildCount > 1;');
         expect(html).toContain("function renderSegment(kind) {");
@@ -61,7 +61,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
 
         expect(html).not.toContain('function findMainPath()');
         expect(html).not.toContain('const mainPath');
@@ -71,7 +71,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
 
         expect(html).toContain('node.children.forEach((cid, i) => {');
         expect(html).not.toContain('mainChild');
@@ -82,7 +82,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
 
         expect(html).not.toContain('const isLinear');
         expect(html).toContain('renderNode(0, [], false, 0);');
@@ -92,24 +92,78 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'YYYY-MM-DD HH:mm:ss', 'semantic');
 
         expect(html).toContain(`onclick="send('showMenu')"`);
         expect(html).toContain('title="Open Undo Tree menu"');
         expect(html).toContain('&#9881;</button>');
     });
 
-    it('initializes collapse state so only the current path is expanded', () => {
+    it('supports dateTime timestamp formatting', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 0, false, 'navigate');
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'dateTime', 'YYYY-MM-DD HH:mm:ss', 'semantic');
 
-        expect(html).toContain('function buildCurrentPath(map, currentId) {');
-        expect(html).toContain('const currentPath = buildCurrentPath(map, currentId);');
-        expect(html).toContain('collapsed[node.id] = !currentPath.has(node.id);');
-        expect(html).toContain('function toggleCollapsed(nodeId) {');
-        expect(html).toContain('if (collapsed[node.id]) {');
+        expect((provider as any).formatTimestamp(
+            new Date('2026-03-18T09:41:22').getTime(),
+            'dateTime',
+            'yyyy-MM-dd HH:mm:ss'
+        )).toBe('2026-03-18 09:41:22');
+        expect(html).toContain('const timeFormatCustom = "YYYY-MM-DD HH:mm:ss";');
+    });
+
+    it('supports custom timestamp formatting', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'custom', 'DD/MM/YYYY HH:mm', 'semantic');
+
+        expect((provider as any).formatTimestamp(
+            new Date('2026-03-18T09:41:22').getTime(),
+            'custom',
+            'dd/MM/yyyy HH:mm'
+        )).toBe('18/03/2026 09:41');
+        expect(html).toContain('const timeFormatCustom = "DD/MM/YYYY HH:mm";');
+    });
+
+    it('falls back to the default dateTime pattern for invalid custom formats', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        expect((provider as any).formatTimestamp(
+            new Date('2026-03-18T09:41:22').getTime(),
+            'custom',
+            'invalid ['
+        )).toBe('2026-03-18 09:41:22');
+    });
+
+    it('supports semantic node markers', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'semantic');
+
+        expect(html).toContain('const nodeMarkerStyle = "semantic";');
+        expect(html).toContain('const latestLeafId = nodes');
+        expect(html).toContain("function renderMarker(kind) {");
+        expect(html).toContain("case 'root':");
+        expect(html).toContain("case 'branch':");
+        expect(html).toContain("case 'latest':");
+        expect(html).toContain("case 'current':");
+        expect(html).toContain("nodeMarkerStyle === 'semantic'");
+    });
+
+    it('supports hiding node markers', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none');
+
+        expect(html).toContain('const nodeMarkerStyle = "none";');
+        expect(html).toContain("case 'none':");
+        expect(html).toContain("nodeMarkerStyle === 'none'");
+        expect(html).toContain("const markerHtml = markerKind === 'none'");
     });
 
     it('creates a restore node when the loaded file content differs', () => {

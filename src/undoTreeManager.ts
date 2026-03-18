@@ -52,7 +52,7 @@ export type SerializedUndoTreeState = {
     trees: Record<string, SerializedUndoTree>;
 };
 
-const AUTOSAVE_INTERVAL_MS = 30_000;
+const DEFAULT_AUTOSAVE_INTERVAL_MS = 30_000;
 const FULL_STORAGE_THRESHOLD = 0.3;
 
 export class UndoTreeManager implements vscode.Disposable {
@@ -60,12 +60,28 @@ export class UndoTreeManager implements vscode.Disposable {
     private diffBuffer = new Map<string, Diff[][]>();
     private nextId = 1;
     private autosaveTimer: ReturnType<typeof setInterval> | undefined;
+    private autosaveIntervalMs = DEFAULT_AUTOSAVE_INTERVAL_MS;
     private restoring = false;
     paused = false;
     onRefresh: (() => void) | undefined;
 
     constructor() {
-        this.autosaveTimer = setInterval(() => this.autosave(), AUTOSAVE_INTERVAL_MS);
+        this.autosaveTimer = setInterval(() => this.autosave(), this.autosaveIntervalMs);
+    }
+
+    setAutosaveInterval(ms: number) {
+        if (ms === this.autosaveIntervalMs) {
+            return;
+        }
+        this.autosaveIntervalMs = ms;
+        if (this.autosaveTimer) {
+            clearInterval(this.autosaveTimer);
+            this.autosaveTimer = undefined;
+        }
+        // 0 = 無効
+        if (ms > 0) {
+            this.autosaveTimer = setInterval(() => this.autosave(), this.autosaveIntervalMs);
+        }
     }
 
     getTree(uri: vscode.Uri, initialContent?: string): UndoTree {

@@ -1,0 +1,20 @@
+{
+  "commands.show.title": "Undo Tree: Show",
+  "commands.undo.title": "Undo Tree: Undo",
+  "commands.redo.title": "Undo Tree: Redo",
+  "commands.toggleTracking.title": "Undo Tree: Toggle Tracking for Current Extension",
+  "commands.togglePause.title": "Undo Tree: Pause / Resume",
+  "commands.compact.title": "Undo Tree: Compact History",
+  "commands.savePersistedState.title": "Undo Tree: Save Persisted State",
+  "commands.restorePersistedState.title": "Undo Tree: Restore Persisted State",
+  "commands.showMenu.title": "Undo Tree: Show Menu",
+  "config.title": "Undo Tree",
+  "config.enabledExtensions.description": "File extensions to automatically track undo history. Example: `[\".txt\", \".md\", \".js\"]`",
+  "config.excludePatterns.description": "Filename patterns to exclude from tracking. Supports `*` wildcard. Example: `[\"*.min.*\", \"CHANGELOG*\", \".env*\"]`",
+  "config.persistenceMode.description": "Persistent save mode for undo history. `manual` only saves when you run the command. `auto` saves automatically after history changes.",
+  "config.autosaveInterval.description": "Interval in seconds for auto-capturing history snapshots (minimum 5). Set to `0` to disable. Default: 30.",
+  "config.timeFormat.description": "Timestamp display format in the Undo Tree view. Formatting is compatible with [date-fns `format`](https://date-fns.org/v4.1.0/docs/format). `time` uses `HH:mm:ss`, `dateTime` uses `yyyy-MM-dd HH:mm:ss`, and `custom` uses `undotree.timeFormatCustom`.",
+  "config.timeFormatCustom.description": "Custom timestamp pattern for the Undo Tree view. This setting is used only when `undotree.timeFormat` is set to `custom`. Formatting is compatible with [date-fns `format`](https://date-fns.org/v4.1.0/docs/format). Example: `yyyy-MM-dd HH:mm:ss`.",
+  "config.nodeMarkerStyle.description": "Node marker style in the Undo Tree view. `none` hides node markers. `simple` shows a uniform dot with current highlight. `semantic` uses different markers for the root node, branch points, the latest leaf, and the current node.",
+  "views.treeView.name": "Undo Tree"
+}

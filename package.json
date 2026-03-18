@@ -2,7 +2,7 @@
   "name": "vscode-undotree",
   "displayName": "UndoTree History",
   "description": "Visualize and navigate undo history as a tree",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "mmiyaji",
   "repository": {
     "type": "git",
@@ -19,47 +19,48 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "l10n": "./l10n",
   "contributes": {
     "commands": [
       {
         "command": "undotree.show",
-        "title": "Undo Tree: Show"
+        "title": "%commands.show.title%"
       },
       {
         "command": "undotree.undo",
-        "title": "Undo Tree: Undo"
+        "title": "%commands.undo.title%"
       },
       {
         "command": "undotree.redo",
-        "title": "Undo Tree: Redo"
+        "title": "%commands.redo.title%"
       },
       {
         "command": "undotree.toggleTracking",
-        "title": "Undo Tree: Toggle Tracking for Current Extension"
+        "title": "%commands.toggleTracking.title%"
       },
       {
         "command": "undotree.togglePause",
-        "title": "Undo Tree: Pause / Resume"
+        "title": "%commands.togglePause.title%"
       },
       {
         "command": "undotree.compact",
-        "title": "Undo Tree: Compact History"
+        "title": "%commands.compact.title%"
       },
       {
         "command": "undotree.savePersistedState",
-        "title": "Undo Tree: Save Persisted State"
+        "title": "%commands.savePersistedState.title%"
       },
       {
         "command": "undotree.restorePersistedState",
-        "title": "Undo Tree: Restore Persisted State"
+        "title": "%commands.restorePersistedState.title%"
       },
       {
         "command": "undotree.showMenu",
-        "title": "Undo Tree: Show Menu"
+        "title": "%commands.showMenu.title%"
       }
     ],
     "configuration": {
-      "title": "Undo Tree",
+      "title": "%config.title%",
       "properties": {
         "undotree.enabledExtensions": {
           "type": "array",
@@ -70,7 +71,7 @@
             ".txt",
             ".md"
           ],
-          "markdownDescription": "File extensions to automatically track undo history. Example: `[\".txt\", \".md\", \".js\"]`"
+          "markdownDescription": "%config.enabledExtensions.description%"
         },
         "undotree.excludePatterns": {
           "type": "array",
@@ -78,7 +79,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Filename patterns to exclude from tracking. Supports `*` wildcard. Example: `[\"*.min.*\", \"CHANGELOG*\", \".env*\"]`"
+          "markdownDescription": "%config.excludePatterns.description%"
         },
         "undotree.persistenceMode": {
           "type": "string",
@@ -87,7 +88,38 @@
             "auto"
           ],
           "default": "manual",
-          "markdownDescription": "Persistent save mode for undo history. `manual` only saves when you run the command. `auto` saves automatically after history changes."
+          "markdownDescription": "%config.persistenceMode.description%"
+        },
+        "undotree.autosaveInterval": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "%config.autosaveInterval.description%"
+        },
+        "undotree.timeFormat": {
+          "type": "string",
+          "enum": [
+            "time",
+            "dateTime",
+            "custom"
+          ],
+          "default": "time",
+          "markdownDescription": "%config.timeFormat.description%"
+        },
+        "undotree.timeFormatCustom": {
+          "type": "string",
+          "default": "yyyy-MM-dd HH:mm:ss",
+          "markdownDescription": "%config.timeFormatCustom.description%"
+        },
+        "undotree.nodeMarkerStyle": {
+          "type": "string",
+          "enum": [
+            "none",
+            "simple",
+            "semantic"
+          ],
+          "default": "semantic",
+          "markdownDescription": "%config.nodeMarkerStyle.description%"
         }
       }
     },
@@ -96,7 +128,7 @@
         {
           "type": "webview",
           "id": "undotree.treeView",
-          "name": "Undo Tree"
+          "name": "%views.treeView.name%"
         }
       ]
     },
@@ -128,6 +160,9 @@
     "testMatch": [
       "**/src/__tests__/**/*.test.ts"
     ]
+  },
+  "dependencies": {
+    "date-fns": "^4.1.0"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
