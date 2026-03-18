@@ -12,13 +12,19 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private mode: 'navigate' | 'diff' = 'navigate';
     private lastEditor?: vscode.TextEditor;
+    private lastEditorUri?: string;
     private loadingRequest?: { uri: string; token: number };
     private loadingToken = 0;
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
+        const nextUri = editor?.document.uri.toString();
+        if (this.mode === 'diff' && this.lastEditorUri && nextUri !== this.lastEditorUri) {
+            this.mode = 'navigate';
+        }
         if (editor) {
             this.lastEditor = editor;
         }
+        this.lastEditorUri = nextUri;
     }
 
     showCheckpointLoading() {
@@ -289,6 +295,10 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
   .node:hover { background: var(--vscode-list-hoverBackground); }
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .node.focused { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .node.diff-target { background: color-mix(in srgb, var(--vscode-focusBorder) 16%, transparent); color: var(--vscode-foreground); }
+  .node.diff-target .right-area { background: color-mix(in srgb, var(--vscode-focusBorder) 16%, var(--vscode-sideBar-background)); }
+  .node.current.diff-target { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
+  .diff-target-badge { font-size: 9px; color: var(--vscode-focusBorder); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
@@ -330,7 +340,7 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
   <button class="btn-settings" onclick="send('showMenu')" title="${vscode.l10n.t('Open Undo Tree menu')}">&#9881;</button>
 </div>
 ${paused ? `<div class="paused-badge">${vscode.l10n.t('Tracking paused - history is frozen')}</div>` : ''}
-${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click node to compare with current')}</div>` : ''}
+${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
 <div id="tree"></div>
 <script>
   const vscode = acquireVsCodeApi();
@@ -398,10 +408,23 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
   let nodeIds = [];
   let treeMap = {};
 
+  function previewDiffForFocused() {
+    if (mode !== 'diff' || focusedIndex < 0) { return; }
+    const nodeId = nodeIds[focusedIndex];
+    if (nodeId === undefined || nodeId === currentId) { return; }
+    send('diffWithNode', { nodeId });
+  }
+
   function setFocused(idx) {
-    nodeEls.forEach((el, i) => el.classList.toggle('focused', i === idx));
+    nodeEls.forEach((el, i) => {
+      const isFocused = i === idx;
+      const nodeId = nodeIds[i];
+      el.classList.toggle('focused', isFocused);
+      el.classList.toggle('diff-target', mode === 'diff' && isFocused && nodeId !== currentId);
+    });
     focusedIndex = idx;
     if (idx >= 0 && nodeEls[idx]) { nodeEls[idx].scrollIntoView({ block: 'nearest' }); }
+    previewDiffForFocused();
   }
 
   function jumpFocused() {
@@ -434,7 +457,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
 
   document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') { return; }
-    if (e.key === 'ArrowDown' || e.key === 'j') {
+    if (e.key === 'Escape' && mode === 'diff') {
+      e.preventDefault(); send('toggleMode');
+    } else if (e.key === 'ArrowDown' || e.key === 'j') {
       e.preventDefault();
       setFocused(Math.min(focusedIndex < 0 ? 0 : focusedIndex + 1, nodeEls.length - 1));
     } else if (e.key === 'ArrowUp' || e.key === 'k') {
@@ -548,11 +573,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
         labelHtml +
+        (mode === 'diff' && !isCurrent ? '<span class="diff-target-badge">Diff</span>' : '') +
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
         '<span class="right-area">' + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + node.formattedTime + '</span>' : '') + '</span>';
       div.addEventListener('click', () => {
+        const idx = nodeIds.indexOf(node.id);
+        if (idx >= 0) { setFocused(idx); }
         if (!isCurrent) {
           if (mode === 'diff') {
             send('diffWithNode', { nodeId: node.id });
@@ -579,7 +607,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
 
     const currentEl = container.querySelector('.node.current');
     if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
-    focusedIndex = nodeIds.indexOf(currentId);
+    setFocused(nodeIds.indexOf(currentId));
   }
 
   buildTree(nodes, currentId);

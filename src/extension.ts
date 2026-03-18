@@ -695,7 +695,12 @@ export async function activate(context: vscode.ExtensionContext) {
                 'vscode.diff',
                 targetUri,
                 currentUri,
-                vscode.l10n.t('Undo Tree: {0} \u2194 {1}', targetLabel, currentLabel)
+                vscode.l10n.t('Undo Tree: {0} \u2194 {1}', targetLabel, currentLabel),
+                {
+                    preview: true,
+                    preserveFocus: true,
+                    viewColumn: vscode.ViewColumn.Beside,
+                }
             );
         }),
 
