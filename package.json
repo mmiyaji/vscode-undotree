@@ -103,6 +103,7 @@
         "undotree.timeFormat": {
           "type": "string",
           "enum": [
+            "none",
             "time",
             "dateTime",
             "custom"

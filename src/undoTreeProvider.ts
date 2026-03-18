@@ -114,9 +114,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         );
     }
 
-    private getTimeFormat(): 'time' | 'dateTime' | 'custom' {
+    private getTimeFormat(): 'none' | 'time' | 'dateTime' | 'custom' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('timeFormat');
-        if (value === 'dateTime' || value === 'custom') {
+        if (value === 'none' || value === 'dateTime' || value === 'custom') {
             return value;
         }
         return 'time';
@@ -146,9 +146,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     private formatTimestamp(
         timestamp: number,
-        timeFormat: 'time' | 'dateTime' | 'custom',
+        timeFormat: 'none' | 'time' | 'dateTime' | 'custom',
         timeFormatCustom: string
     ): string {
+        if (timeFormat === 'none') { return ''; }
         const pattern = timeFormat === 'time'
             ? 'HH:mm:ss'
             : timeFormat === 'dateTime'
@@ -167,7 +168,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         currentId: number,
         paused: boolean,
         mode: 'navigate' | 'diff',
-        timeFormat: 'time' | 'dateTime' | 'custom',
+        timeFormat: 'none' | 'time' | 'dateTime' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial',
@@ -179,7 +180,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 <head>
 <meta charset="UTF-8">
 <style>
-  body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; }
+  body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
+  #tree { min-width: max-content; }
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
@@ -187,9 +189,11 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
-  .label { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
-  .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding-left: 6px; }
+  .label { opacity: 0.8; }
+  .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding-left: 6px; position: sticky; right: 4px; background: var(--vscode-sideBar-background); }
+  .node.current .right-area { background: var(--vscode-list-activeSelectionBackground); }
   .time { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
+  .time.latest { opacity: 0.9; color: var(--vscode-charts-green, #89d185); }
   .empty { opacity: 0.5; padding: 8px; }
   .actions { display: flex; gap: 4px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 1; padding: 8px 0 4px; }
   button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
@@ -361,6 +365,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
     treeMap = map;
+    const latestId = nodes.reduce((best, n) => n.timestamp > map[best].timestamp ? n.id : best, nodes[0].id);
     const container = document.getElementById('tree');
     container.innerHTML = '';
     nodeEls = [];
@@ -423,7 +428,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-        '<span class="right-area">' + sizeDiffHtml + '<span class="time">' + node.formattedTime + '</span></span>';
+        '<span class="right-area">' + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + node.formattedTime + '</span>' : '') + '</span>';
       div.addEventListener('click', () => {
         if (!isCurrent) {
           if (mode === 'diff') {
