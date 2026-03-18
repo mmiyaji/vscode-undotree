@@ -34,6 +34,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 case 'jumpToNode':
                     if (editor && typeof message.nodeId === 'number') {
                         await this.manager.jumpToNode(message.nodeId, editor);
+                        if (message.focusEditor) {
+                            await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+                        }
                     }
                     break;
                 case 'togglePause':
@@ -180,6 +183,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .node.focused { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
@@ -262,6 +266,92 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
     return '<span class="size-diff ' + cls + '">' + sign + (delta !== 0 ? str : '0B') + '</span>';
   }
 
+  let focusedIndex = -1;
+  let nodeEls = [];
+  let nodeIds = [];
+  let treeMap = {};
+
+  function setFocused(idx) {
+    nodeEls.forEach((el, i) => el.classList.toggle('focused', i === idx));
+    focusedIndex = idx;
+    if (idx >= 0 && nodeEls[idx]) { nodeEls[idx].scrollIntoView({ block: 'nearest' }); }
+  }
+
+  function jumpFocused() {
+    if (focusedIndex < 0) { return; }
+    const nodeId = nodeIds[focusedIndex];
+    if (mode === 'diff') { send('diffWithNode', { nodeId }); }
+    else { send('jumpToNode', { nodeId, focusEditor: true }); }
+  }
+
+  function moveSibling(dir) {
+    if (focusedIndex < 0) { return; }
+    const node = treeMap[nodeIds[focusedIndex]];
+    if (!node || node.parents.length === 0) { return; }
+    const siblings = treeMap[node.parents[node.parents.length - 1]]?.children ?? [];
+    if (siblings.length <= 1) { return; }
+    const sibIdx = siblings.indexOf(node.id);
+    const nextId = siblings[(sibIdx + dir + siblings.length) % siblings.length];
+    const next = nodeIds.indexOf(nextId);
+    if (next >= 0) { setFocused(next); }
+  }
+
+  function moveToNoted(dir) {
+    if (nodeIds.length === 0) { return; }
+    const start = focusedIndex < 0 ? 0 : focusedIndex;
+    for (let i = 1; i <= nodeIds.length; i++) {
+      const idx = (start + i * dir + nodeIds.length * 10) % nodeIds.length;
+      if (treeMap[nodeIds[idx]]?.note) { setFocused(idx); return; }
+    }
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') { return; }
+    if (e.key === 'ArrowDown' || e.key === 'j') {
+      e.preventDefault();
+      setFocused(Math.min(focusedIndex < 0 ? 0 : focusedIndex + 1, nodeEls.length - 1));
+    } else if (e.key === 'ArrowUp' || e.key === 'k') {
+      e.preventDefault();
+      setFocused(Math.max(focusedIndex < 0 ? nodeEls.length - 1 : focusedIndex - 1, 0));
+    } else if (e.key === 'Home') {
+      e.preventDefault(); setFocused(0);
+    } else if (e.key === 'End') {
+      e.preventDefault(); setFocused(nodeEls.length - 1);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault(); jumpFocused();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (focusedIndex >= 0) {
+        const node = treeMap[nodeIds[focusedIndex]];
+        const parentId = node?.parents?.[node.parents.length - 1];
+        const idx = parentId !== undefined ? nodeIds.indexOf(parentId) : -1;
+        if (idx >= 0) { setFocused(idx); }
+      }
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (focusedIndex >= 0) {
+        const node = treeMap[nodeIds[focusedIndex]];
+        const childId = node?.children?.[node.children.length - 1];
+        const idx = childId !== undefined ? nodeIds.indexOf(childId) : -1;
+        if (idx >= 0) { setFocused(idx); }
+      }
+    } else if (e.key === 'Tab') {
+      e.preventDefault(); moveSibling(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'u') {
+      e.preventDefault(); send('undo');
+    } else if (e.key === 'r') {
+      e.preventDefault(); send('redo');
+    } else if (e.key === 'd') {
+      e.preventDefault(); send('toggleMode');
+    } else if (e.key === 'p') {
+      e.preventDefault(); send('togglePause');
+    } else if (e.key === 'n') {
+      e.preventDefault(); moveToNoted(1);
+    } else if (e.key === 'N') {
+      e.preventDefault(); moveToNoted(-1);
+    }
+  });
+
   function buildTree(nodes, currentId) {
     if (!nodes) {
       document.getElementById('tree').innerHTML = '<div class="empty">No active editor</div>';
@@ -270,8 +360,11 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
 
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
+    treeMap = map;
     const container = document.getElementById('tree');
     container.innerHTML = '';
+    nodeEls = [];
+    nodeIds = [];
 
     const cur = map[currentId];
     document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
@@ -340,6 +433,8 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
           }
         }
       });
+      nodeEls.push(div);
+      nodeIds.push(node.id);
       container.appendChild(div);
 
       const isBranchParent = !isRoot && node.children.length > 1;
@@ -355,9 +450,8 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
     renderNode(0, [], false, 0);
 
     const currentEl = container.querySelector('.node.current');
-    if (currentEl) {
-      currentEl.scrollIntoView({ block: 'nearest' });
-    }
+    if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
+    focusedIndex = nodeIds.indexOf(currentId);
   }
 
   buildTree(nodes, currentId);
