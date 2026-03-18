@@ -17,5 +17,8 @@
   "config.timeFormatCustom.description": "Custom timestamp pattern for the Undo Tree view. This setting is used only when `undotree.timeFormat` is set to `custom`. Formatting is compatible with [date-fns `format`](https://date-fns.org/v4.1.0/docs/format). Example: `yyyy-MM-dd HH:mm:ss`.",
   "config.nodeMarkerStyle.description": "Node marker style in the Undo Tree view. `none` hides node markers. `simple` shows a uniform dot with current highlight. `semantic` uses different markers for the root node, branch points, the latest leaf, and the current node.",
   "config.nodeSizeMetric.description": "Size metric to display as a diff on each node relative to the current node. `none` hides the metric. `lines` shows line count difference. `bytes` shows byte size difference.",
+  "config.compressionThresholdKB.description": "Total full-node content size (KB) above which the tree file is gzip-compressed. Set to 0 to always compress.",
+  "config.checkpointThresholdKB.description": "Total full-node content size (KB) above which full node contents are stored as separate checkpoint files with lazy loading. Should be ≥ compressionThresholdKB.",
+  "config.contentCacheMaxKB.description": "Maximum in-memory cache size (KB) for lazily-loaded checkpoint content. Oldest entries are evicted (LRU) when the limit is exceeded.",
   "views.treeView.name": "Undo Tree"
 }

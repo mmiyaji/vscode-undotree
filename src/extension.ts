@@ -2,8 +2,14 @@
 
 import * as vscode from 'vscode';
 import { promises as fs } from 'fs';
+import { readFileSync } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { promisify } from 'util';
+import { gzip as gzipCb, gunzip as gunzipCb } from 'zlib';
+
+const gzip = promisify(gzipCb);
+const gunzip = promisify(gunzipCb);
 import { UndoTreeProvider } from './undoTreeProvider';
 import { UndoTreeManager } from './undoTreeManager';
 
@@ -50,9 +56,14 @@ async function persistStateToDisk(
 ) {
     const rootDir = context.globalStorageUri.fsPath;
     const treesDir = path.join(rootDir, 'undo-trees');
-    await fs.mkdir(treesDir, { recursive: true });
+    const contentDir = path.join(treesDir, 'content');
+    await fs.mkdir(contentDir, { recursive: true });
 
+    const compressionThreshold = getCompressionThresholdBytes();
+    const checkpointThreshold = getCheckpointThresholdBytes();
     const entries = Object.entries(state.trees);
+    const referencedHashes = new Set<string>();
+
     const manifest: PersistedManifest = {
         version: 1,
         savedAt: Date.now(),
@@ -65,16 +76,66 @@ async function persistStateToDisk(
     };
 
     await Promise.all(entries.map(async ([uri, tree]) => {
+        const totalFullBytes = tree.nodes.reduce((sum, node) => {
+            if (node.storage.kind === 'full') {
+                return sum + (node.byteCount ?? Buffer.byteLength(node.storage.content, 'utf8'));
+            }
+            return sum;
+        }, 0);
+
+        const useCheckpoint = totalFullBytes >= checkpointThreshold;
+        const useCompression = useCheckpoint || totalFullBytes >= compressionThreshold;
+
+        // チェックポイントモード: fullコンテンツを別ファイルに分離
+        const serializedNodes = useCheckpoint
+            ? tree.nodes.map((node) => {
+                if (node.storage.kind !== 'full' || node.storage.content === '') {
+                    return node;
+                }
+                referencedHashes.add(node.hash);
+                return { ...node, storage: { kind: 'checkpoint' as const, contentHash: node.hash } };
+            })
+            : tree.nodes;
+
+        // コンテンツファイルの書き込み（既存ならスキップ）
+        if (useCheckpoint) {
+            await Promise.all(tree.nodes
+                .filter((n) => n.storage.kind === 'full' && n.storage.content !== '')
+                .map(async (n) => {
+                    const full = n.storage as { kind: 'full'; content: string };
+                    const filePath = path.join(contentDir, n.hash);
+                    try {
+                        await fs.access(filePath);
+                    } catch {
+                        await fs.writeFile(filePath, full.content, 'utf8');
+                    }
+                })
+            );
+        }
+
+        const json = JSON.stringify({ uri, tree: { ...tree, nodes: serializedNodes } }, null, 2);
         const filePath = path.join(treesDir, makeTreeFileName(uri));
-        await fs.writeFile(
-            filePath,
-            JSON.stringify({ uri, tree }, null, 2),
-            'utf8'
-        );
+
+        if (useCompression) {
+            const compressed = await gzip(Buffer.from(json, 'utf8'));
+            await fs.writeFile(filePath, compressed);
+        } else {
+            await fs.writeFile(filePath, json, 'utf8');
+        }
     }));
+
+    // 不要なコンテンツファイルを削除
+    if (referencedHashes.size > 0 || (await fs.readdir(contentDir).catch(() => [])).length > 0) {
+        const contentFiles = await fs.readdir(contentDir).catch(() => [] as string[]);
+        await Promise.all(contentFiles
+            .filter((f) => !referencedHashes.has(f))
+            .map((f) => fs.unlink(path.join(contentDir, f)).catch(() => undefined))
+        );
+    }
 
     const expectedFiles = new Set(manifest.trees.map((entry) => entry.file));
     expectedFiles.add('manifest.json');
+    expectedFiles.add('content'); // サブディレクトリは除外しない
     const existingFiles = await fs.readdir(treesDir, { withFileTypes: true });
     await Promise.all(existingFiles
         .filter((entry) => entry.isFile() && !expectedFiles.has(entry.name))
@@ -143,7 +204,10 @@ async function loadPersistedTreeFromDisk(
 
     const treePath = path.join(context.globalStorageUri.fsPath, 'undo-trees', entry.file);
     try {
-        const raw = await fs.readFile(treePath, 'utf8');
+        const buf = await fs.readFile(treePath);
+        // gzipマジックバイトで自動判別
+        const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+        const raw = isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
         const parsed = JSON.parse(raw) as {
             tree?: ReturnType<UndoTreeManager['exportState']>['trees'][string];
         };
@@ -215,6 +279,21 @@ function getPersistenceMode(): 'manual' | 'auto' {
         .getConfiguration('undotree')
         .get<string>('persistenceMode');
     return value === 'auto' ? 'auto' : 'manual';
+}
+
+function getCompressionThresholdBytes(): number {
+    const kb = vscode.workspace.getConfiguration('undotree').get<number>('compressionThresholdKB');
+    return (typeof kb === 'number' && kb >= 0 ? kb : 100) * 1024;
+}
+
+function getCheckpointThresholdBytes(): number {
+    const kb = vscode.workspace.getConfiguration('undotree').get<number>('checkpointThresholdKB');
+    return (typeof kb === 'number' && kb >= 0 ? kb : 1000) * 1024;
+}
+
+function getContentCacheMaxBytes(): number {
+    const kb = vscode.workspace.getConfiguration('undotree').get<number>('contentCacheMaxKB');
+    return (typeof kb === 'number' && kb >= 0 ? kb : 2048) * 1024;
 }
 
 function getAutosaveIntervalMs(): number {
@@ -304,6 +383,16 @@ export async function activate(context: vscode.ExtensionContext) {
 
     manager.paused = persistedManifest?.paused === true;
     manager.setAutosaveInterval(getAutosaveIntervalMs());
+    manager.setContentCacheMax(getContentCacheMaxBytes());
+
+    const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
+    manager.contentResolver = (hash) => {
+        try {
+            return readFileSync(path.join(treesDir, 'content', hash), 'utf8');
+        } catch {
+            return '';
+        }
+    };
 
     manager.onRefresh = () => {
         provider.refresh();
@@ -565,13 +654,19 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.timeFormat') ||
                 e.affectsConfiguration('undotree.timeFormatCustom') ||
                 e.affectsConfiguration('undotree.nodeMarkerStyle') ||
-                e.affectsConfiguration('undotree.nodeSizeMetric')
+                e.affectsConfiguration('undotree.nodeSizeMetric') ||
+                e.affectsConfiguration('undotree.compressionThresholdKB') ||
+                e.affectsConfiguration('undotree.checkpointThresholdKB') ||
+                e.affectsConfiguration('undotree.contentCacheMaxKB')
             ) {
                 if (e.affectsConfiguration('undotree.persistenceMode')) {
                     schedulePersistState(context);
                 }
                 if (e.affectsConfiguration('undotree.autosaveInterval')) {
                     manager?.setAutosaveInterval(getAutosaveIntervalMs());
+                }
+                if (e.affectsConfiguration('undotree.contentCacheMaxKB')) {
+                    manager?.setContentCacheMax(getContentCacheMaxBytes());
                 }
                 updateStatusBar(vscode.window.activeTextEditor);
                 provider.refresh();

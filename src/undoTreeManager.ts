@@ -11,7 +11,8 @@ type Diff = {
 
 type UndoNodeStorage =
     | { kind: 'full'; content: string }
-    | { kind: 'delta'; diffs: Diff[][] };
+    | { kind: 'delta'; diffs: Diff[][] }
+    | { kind: 'checkpoint'; contentHash: string };
 
 export type UndoNode = {
     id: number;
@@ -68,11 +69,53 @@ export class UndoTreeManager implements vscode.Disposable {
     private autosaveTimer: ReturnType<typeof setInterval> | undefined;
     private autosaveIntervalMs = DEFAULT_AUTOSAVE_INTERVAL_MS;
     private restoring = false;
+    private contentCache = new Map<string, string>();
+    private contentCacheBytes = 0;
+    private contentCacheMaxBytes = 2048 * 1024;
+    private emptyHash: string | undefined;
+    contentResolver: ((hash: string) => string) | undefined;
     paused = false;
     onRefresh: (() => void) | undefined;
 
     constructor() {
         this.autosaveTimer = setInterval(() => this.autosave(), this.autosaveIntervalMs);
+    }
+
+    setContentCacheMax(maxBytes: number) {
+        this.contentCacheMaxBytes = maxBytes;
+        this.evictCache(0);
+    }
+
+    private getEmptyHash(): string {
+        return this.emptyHash ??= this.hashContent('');
+    }
+
+    private getOrLoadContent(contentHash: string): string {
+        const cached = this.contentCache.get(contentHash);
+        if (cached !== undefined) {
+            // LRU: move to end
+            this.contentCache.delete(contentHash);
+            this.contentCache.set(contentHash, cached);
+            return cached;
+        }
+        const content = this.contentResolver?.(contentHash) ?? '';
+        this.setCachedContent(contentHash, content);
+        return content;
+    }
+
+    private setCachedContent(hash: string, content: string) {
+        const bytes = Buffer.byteLength(content, 'utf8');
+        this.evictCache(bytes);
+        this.contentCache.set(hash, content);
+        this.contentCacheBytes += bytes;
+    }
+
+    private evictCache(incoming: number) {
+        while (this.contentCacheBytes + incoming > this.contentCacheMaxBytes && this.contentCache.size > 0) {
+            const oldest = this.contentCache.keys().next().value!;
+            this.contentCacheBytes -= Buffer.byteLength(this.contentCache.get(oldest)!, 'utf8');
+            this.contentCache.delete(oldest);
+        }
     }
 
     setAutosaveInterval(ms: number) {
@@ -272,7 +315,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
     private upgradeToFull(tree: UndoTree, nodeId: number, content: string) {
         const node = tree.nodes.get(nodeId);
-        if (!node || node.storage.kind === 'full') {
+        if (!node || node.storage.kind === 'full' || node.storage.kind === 'checkpoint') {
             return;
         }
         node.storage = { kind: 'full', content };
@@ -304,6 +347,8 @@ export class UndoTreeManager implements vscode.Disposable {
             }
             if (node.storage.kind === 'full') {
                 content = node.storage.content;
+            } else if (node.storage.kind === 'checkpoint') {
+                content = this.getOrLoadContent(node.storage.contentHash);
             } else {
                 content = this.applyDiffs(content, node.storage.diffs);
             }
@@ -431,10 +476,12 @@ export class UndoTreeManager implements vscode.Disposable {
                     hash: node.hash,
                     storage: node.storage.kind === 'full'
                         ? { kind: 'full', content: node.storage.content }
+                        : node.storage.kind === 'checkpoint'
+                        ? { kind: 'checkpoint', contentHash: node.storage.contentHash }
                         : {
                             kind: 'delta',
-                            diffs: node.storage.diffs.map((eventDiffs) =>
-                                eventDiffs.map((diff) => ({ ...diff }))
+                            diffs: node.storage.diffs.map((eventDiffs: Diff[]) =>
+                                eventDiffs.map((diff: Diff) => ({ ...diff }))
                             ),
                         },
                     ...(node.note !== undefined ? { note: node.note } : {}),
@@ -467,10 +514,12 @@ export class UndoTreeManager implements vscode.Disposable {
                     hash: node.hash,
                     storage: node.storage.kind === 'full'
                         ? { kind: 'full', content: node.storage.content }
+                        : node.storage.kind === 'checkpoint'
+                        ? { kind: 'checkpoint', contentHash: node.storage.contentHash }
                         : {
                             kind: 'delta',
-                            diffs: node.storage.diffs.map((eventDiffs) =>
-                                eventDiffs.map((diff) => ({ ...diff }))
+                            diffs: node.storage.diffs.map((eventDiffs: Diff[]) =>
+                                eventDiffs.map((diff: Diff) => ({ ...diff }))
                             ),
                         },
                     ...(node.note !== undefined ? { note: node.note } : {}),
@@ -502,10 +551,12 @@ export class UndoTreeManager implements vscode.Disposable {
                 hash: node.hash,
                 storage: node.storage.kind === 'full'
                     ? { kind: 'full', content: node.storage.content }
+                    : node.storage.kind === 'checkpoint'
+                    ? { kind: 'checkpoint', contentHash: node.storage.contentHash }
                     : {
                         kind: 'delta',
-                        diffs: node.storage.diffs.map((eventDiffs) =>
-                            eventDiffs.map((diff) => ({ ...diff }))
+                        diffs: node.storage.diffs.map((eventDiffs: Diff[]) =>
+                            eventDiffs.map((diff: Diff) => ({ ...diff }))
                         ),
                     },
                 ...(node.note !== undefined ? { note: node.note } : {}),
@@ -533,13 +584,7 @@ export class UndoTreeManager implements vscode.Disposable {
         if (!node) {
             return false;
         }
-        if (nodeId === tree.rootId) {
-            return node.storage.kind === 'full' && node.storage.content === '';
-        }
-        if (node.storage.kind === 'full') {
-            return node.storage.content === '';
-        }
-        return node.hash === this.hashContent('');
+        return node.hash === this.getEmptyHash();
     }
 
     setNote(uri: vscode.Uri, nodeId: number, note: string): void {
@@ -605,7 +650,7 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private classifyNode(node: UndoNode): 'insert' | 'delete' | 'mixed' {
-        if (node.storage.kind === 'full') {
+        if (node.storage.kind === 'full' || node.storage.kind === 'checkpoint') {
             return 'mixed';
         }
         const allDiffs = node.storage.diffs.flat();
@@ -661,5 +706,7 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         this.trees.clear();
         this.diffBuffer.clear();
+        this.contentCache.clear();
+        this.contentCacheBytes = 0;
     }
 }

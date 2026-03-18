@@ -130,6 +130,24 @@
           ],
           "default": "lines",
           "markdownDescription": "%config.nodeSizeMetric.description%"
+        },
+        "undotree.compressionThresholdKB": {
+          "type": "number",
+          "default": 100,
+          "minimum": 0,
+          "markdownDescription": "%config.compressionThresholdKB.description%"
+        },
+        "undotree.checkpointThresholdKB": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "markdownDescription": "%config.checkpointThresholdKB.description%"
+        },
+        "undotree.contentCacheMaxKB": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 0,
+          "markdownDescription": "%config.contentCacheMaxKB.description%"
         }
       }
     },
