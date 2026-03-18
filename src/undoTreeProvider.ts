@@ -13,6 +13,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private mode: 'navigate' | 'diff' = 'navigate';
     private lastEditor?: vscode.TextEditor;
     loading = false;
+    isTracked: ((uri: vscode.Uri) => boolean) | undefined;
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
         if (editor) {
@@ -57,6 +58,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 case 'showMenu':
                     await vscode.commands.executeCommand('undotree.showMenu');
                     break;
+                case 'openSettings':
+                    await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
+                    break;
                 case 'toggleMode':
                     this.mode = this.mode === 'navigate' ? 'diff' : 'navigate';
                     this.render();
@@ -100,7 +104,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         if (this.loading) {
             this.view.webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);opacity:0.6;}</style>
-</head><body>Loading...</body></html>`;
+</head><body>${vscode.l10n.t('Loading...')}</body></html>`;
             return;
         }
         const timeFormat = this.getTimeFormat();
@@ -112,6 +116,11 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             ?? (this.lastEditor && !this.lastEditor.document.isClosed ? this.lastEditor : undefined);
         if (!editor) {
             this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind);
+            return;
+        }
+        if (this.isTracked && !this.isTracked(editor.document.uri)) {
+            const ext = editor.document.isUntitled ? '' : editor.document.fileName.match(/\.[^.]+$/)?.[0] ?? '';
+            this.view.webview.html = this.buildNotTrackedHtml(ext);
             return;
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
@@ -182,6 +191,27 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private buildNotTrackedHtml(ext: string): string {
+        const label = ext
+            ? vscode.l10n.t('Undo Tree: {0} is not tracked', ext)
+            : vscode.l10n.t('Undo Tree: this file is not tracked');
+        const hint = vscode.l10n.t('Use the status bar item or menu to enable tracking for this extension.');
+        const settingsLabel = vscode.l10n.t('Open Settings');
+        return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);}
+.msg{opacity:0.7;margin-bottom:8px;}
+.hint{opacity:0.45;font-size:11px;margin-bottom:12px;}
+.link{background:none;border:none;padding:0;color:var(--vscode-textLink-foreground);font-size:12px;cursor:pointer;text-decoration:underline;}
+.link:hover{color:var(--vscode-textLink-activeForeground);}
+</style>
+</head><body>
+<div class="msg">${label}</div>
+<div class="hint">${hint}</div>
+<button class="link" onclick="acquireVsCodeApi().postMessage({command:'openSettings'})">${settingsLabel}</button>
+</body></html>`;
+    }
+
     private buildHtml(
         nodes: DisplayNode[] | null,
         currentId: number,
@@ -239,14 +269,14 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
 <div class="actions">
-  <button id="btn-undo" onclick="send('undo')">Undo</button>
-  <button id="btn-redo" onclick="send('redo')">Redo</button>
-  <button class="btn-pause" onclick="send('togglePause')" title="${paused ? 'Resume tracking' : 'Pause tracking'}">${paused ? 'Resume' : 'Pause'}</button>
-  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? 'Switch to Diff mode' : 'Switch to Navigate mode'}">${mode === 'navigate' ? 'Diff' : 'Nav'}</button>
-  <button class="btn-settings" onclick="send('showMenu')" title="Open Undo Tree menu">&#9881;</button>
+  <button id="btn-undo" onclick="send('undo')">${vscode.l10n.t('Undo')}</button>
+  <button id="btn-redo" onclick="send('redo')">${vscode.l10n.t('Redo')}</button>
+  <button class="btn-pause" onclick="send('togglePause')" title="${paused ? vscode.l10n.t('Resume tracking') : vscode.l10n.t('Pause tracking')}">${paused ? vscode.l10n.t('Resume') : vscode.l10n.t('Pause')}</button>
+  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? vscode.l10n.t('Switch to Diff mode') : vscode.l10n.t('Switch to Navigate mode')}">${mode === 'navigate' ? vscode.l10n.t('Diff') : vscode.l10n.t('Nav')}</button>
+  <button class="btn-settings" onclick="send('showMenu')" title="${vscode.l10n.t('Open Undo Tree menu')}">&#9881;</button>
 </div>
-${paused ? '<div class="paused-badge">Tracking paused - history is frozen</div>' : ''}
-${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare with current</div>' : ''}
+${paused ? `<div class="paused-badge">${vscode.l10n.t('Tracking paused - history is frozen')}</div>` : ''}
+${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click node to compare with current')}</div>` : ''}
 <div id="tree"></div>
 <script>
   const vscode = acquireVsCodeApi();
@@ -258,6 +288,10 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
   const nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
   const nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
   const showStorageKind = ${JSON.stringify(showStorageKind)};
+  const i18n = {
+    noteClickToEdit: ${JSON.stringify(vscode.l10n.t(' (click to edit)'))},
+    noteAdd: ${JSON.stringify(vscode.l10n.t('Add note'))},
+  };
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
 
@@ -269,7 +303,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
         const ov = document.createElement('div');
         ov.id = 'jump-overlay';
         ov.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;opacity:0.7;pointer-events:none;';
-        ov.textContent = 'Loading...';
+        ov.textContent = ${JSON.stringify(vscode.l10n.t('Loading...'))};
         document.body.appendChild(ov);
       }
     }
@@ -393,7 +427,7 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
-      document.getElementById('tree').innerHTML = '<div class="empty">No active editor</div>';
+      document.getElementById('tree').innerHTML = '<div class="empty">${vscode.l10n.t('No active editor')}</div>';
       return;
     }
 
@@ -450,8 +484,8 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       const noteHtml = node.note
-        ? '<span class="note" title="' + escHtml(node.note) + ' (click to edit)" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
-        : '<span class="note-edit" title="Add note" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">✎</span>';
+        ? '<span class="note" title="' + escHtml(node.note) + i18n.noteClickToEdit + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
+        : '<span class="note-edit" title="' + i18n.noteAdd + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">✎</span>';
       const refNode = (nodeSizeMetricBase === 'current' && isCurrent && node.id !== 0)
         ? node
         : nodeSizeMetricBase === 'initial' ? map[nodes[0].id] : map[currentId];

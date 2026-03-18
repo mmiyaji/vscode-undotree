@@ -433,6 +433,14 @@ export async function activate(context: vscode.ExtensionContext) {
     manager.onCheckpointLoadStart = () => {
         provider.showCheckpointLoading();
     };
+    manager.isTracked = (uri) => {
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+        return doc ? isTracked(doc) : false;
+    };
+    provider.isTracked = (uri) => {
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+        return doc ? isTracked(doc) : false;
+    };
 
 
     // 既に開いているエディタのツリーを実際のコンテンツで初期化

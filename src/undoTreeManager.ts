@@ -80,6 +80,7 @@ export class UndoTreeManager implements vscode.Disposable {
     onRefresh: (() => void) | undefined;
     debugLog: ((msg: string) => void) | undefined;
     onCheckpointLoadStart: (() => void) | undefined;
+    isTracked: ((uri: vscode.Uri) => boolean) | undefined;
 
     constructor() {
         this.autosaveTimer = setInterval(() => this.autosave(), this.autosaveIntervalMs);
@@ -272,6 +273,9 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         const editor = vscode.window.activeTextEditor;
         if (!editor || editor.document.isUntitled) {
+            return;
+        }
+        if (this.isTracked && !this.isTracked(editor.document.uri)) {
             return;
         }
         this.addNode(editor.document, 'auto');
