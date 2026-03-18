@@ -135,6 +135,15 @@
           "default": "lines",
           "markdownDescription": "%config.nodeSizeMetric.description%"
         },
+        "undotree.nodeSizeMetricBase": {
+          "type": "string",
+          "enum": [
+            "current",
+            "initial"
+          ],
+          "default": "current",
+          "markdownDescription": "%config.nodeSizeMetricBase.description%"
+        },
         "undotree.compressionThresholdKB": {
           "type": "number",
           "default": 100,
