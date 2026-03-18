@@ -171,6 +171,15 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
 
+        // DAG収束: 既存ノードと同一ハッシュなら新ノードを作らずそこへ移動
+        const existingId = tree.hashMap.get(hash);
+        if (existingId !== undefined && tree.nodes.has(existingId)) {
+            tree.currentId = existingId;
+            this.diffBuffer.delete(key);
+            this.onRefresh?.();
+            return;
+        }
+
         const diffs = this.diffBuffer.get(key) ?? [];
         const isCurrentEmptyRoot =
             currentNode.parents.length === 0 &&

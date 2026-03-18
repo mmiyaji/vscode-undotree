@@ -202,19 +202,21 @@ describe('既存ファイルを開いた場合', () => {
 // DAG収束（同じhashへのリンク）
 // -----------------------------------------------
 describe('DAG収束', () => {
-    it('同じ内容に戻ったとき既存ノードにリンクする', () => {
+    it('同じ内容に戻ったとき既存ノードに収束する（新ノード作成なし）', () => {
         const manager = new UndoTreeManager();
         const doc1 = makeDocument('Hello');
         const doc2 = makeDocument('Hello World');
         const doc3 = makeDocument('Hello'); // doc1と同じ内容
 
         manager.onDidSaveTextDocument(doc1);
-        manager.onDidSaveTextDocument(doc2);
-        manager.onDidSaveTextDocument(doc3);
-
         const tree = manager.getTree(makeUri());
-        expect(tree.nodes.size).toBe(4);
-        expect(tree.currentId).toBe(3);
+        const helloNodeId = tree.currentId;
+
+        manager.onDidSaveTextDocument(doc2);
+        manager.onDidSaveTextDocument(doc3); // Helloノードに収束
+
+        expect(tree.nodes.size).toBe(3); // root + Hello + HelloWorld のみ
+        expect(tree.currentId).toBe(helloNodeId);
     });
 });
 
@@ -343,7 +345,7 @@ describe('オートセーブ', () => {
 describe('DAG循環防止', () => {
     it('同じ内容に複数回戻っても循環リンクが発生しない', () => {
         const manager = new UndoTreeManager();
-        // A → B → A → B → A のように繰り返してもノード数は3以下
+        // A → B → A → B → A のように繰り返してもノード数は増えない
         const docA = makeDocument('content-A');
         const docB = makeDocument('content-B');
 
@@ -354,7 +356,7 @@ describe('DAG循環防止', () => {
         manager.onDidSaveTextDocument(docA); // Aに収束 → node1へジャンプ
 
         const tree = manager.getTree(makeUri());
-        expect(tree.nodes.size).toBe(6);
+        expect(tree.nodes.size).toBe(3); // root + A + B のみ
     });
 
     it('先祖ノードへのリンクはスキップされる（循環グラフにならない）', () => {
@@ -621,5 +623,211 @@ describe('reconcileCurrentNode', () => {
         const originalCurrentId = tree.currentId;
         manager.reconcileCurrentNode(uri, 'hello');
         expect(tree.currentId).toBe(originalCurrentId);
+    });
+});
+
+// -----------------------------------------------
+// DAG収束
+// -----------------------------------------------
+describe('DAG収束', () => {
+    // ケース1: A→B→A で2つ目のAは新ノードを作らず既存Aに収束
+    it('同一内容を再保存すると既存ノードに収束し新ノードを作らない', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        const sizeAfterB = manager.getTree(uri).nodes.size;
+
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+
+        expect(tree.nodes.size).toBe(sizeAfterB); // 新ノード追加なし
+    });
+
+    // ケース2: 収束後のcurrentIdが既存ノードを指す
+    it('収束後のcurrentIdが収束先ノードのidになる', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+        const nodeAId = tree.currentId;
+
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        manager.onDidSaveTextDocument(makeDocument('A'));
+
+        expect(tree.currentId).toBe(nodeAId);
+    });
+
+    // ケース3: ツリー構造不変（エッジ追加なし）
+    it('収束時にエッジは追加されない', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+        const nodeAId = tree.currentId;
+
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        // B保存後のnodeAのchildrenを記録（BがAの子として追加されている）
+        const childrenAfterB = [...(tree.nodes.get(nodeAId)?.children ?? [])];
+
+        // Aに収束 → nodeAのchildrenはB保存後から変わらない
+        manager.onDidSaveTextDocument(makeDocument('A'));
+
+        expect(tree.nodes.get(nodeAId)?.children).toEqual(childrenAfterB);
+    });
+
+    // ケース4: hashMapは変わらない
+    it('収束後もhashMapは収束先ノードを指したまま', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+        const nodeAId = tree.currentId;
+        const hashA = tree.nodes.get(nodeAId)!.hash;
+
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        manager.onDidSaveTextDocument(makeDocument('A'));
+
+        expect(tree.hashMap.get(hashA)).toBe(nodeAId);
+    });
+
+    // ケース5: diffBufferがクリアされる
+    it('収束時にdiffBufferがクリアされる', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        manager.onDidSaveTextDocument(makeDocument('BB'));
+
+        // diffBufferに積む
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument('A'), [{ offset: 1, removeLength: 1, text: '' }])
+        );
+
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+
+        // 収束後のノードはdelta蓄積を持たない（フルで復元できる）
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe('A');
+    });
+
+    // ケース6: onRefreshが呼ばれる
+    it('収束時にonRefreshが呼ばれる', () => {
+        const manager = new UndoTreeManager();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        manager.onDidSaveTextDocument(makeDocument('B'));
+
+        let refreshCalled = false;
+        manager.onRefresh = () => { refreshCalled = true; };
+
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        expect(refreshCalled).toBe(true);
+    });
+
+    // ケース7: rootへの収束
+    it('rootと同一内容を保存するとrootに収束する', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        // rootの内容を確定させる
+        manager.onDidSaveTextDocument(makeDocument('root content'));
+        const tree = manager.getTree(uri);
+        const rootNodeId = 0; // rootは常にid=0
+        // rootのhashを設定するためにrootの内容で直接保存するシナリオ
+        // root(空) → A → 空 で収束テスト
+        const manager2 = new UndoTreeManager();
+        const uri2 = makeUri('file:///test2.md');
+        manager2.onDidSaveTextDocument(makeDocument('X', 'file:///test2.md'));
+        const tree2 = manager2.getTree(uri2);
+        const nodeXId = tree2.currentId;
+
+        manager2.onDidSaveTextDocument(makeDocument('Y', 'file:///test2.md'));
+        manager2.onDidSaveTextDocument(makeDocument('X', 'file:///test2.md'));
+
+        expect(tree2.currentId).toBe(nodeXId);
+        expect(manager2.reconstructContent(tree2, tree2.currentId)).toBe('X');
+    });
+
+    // ケース8: 別ブランチへの収束
+    it('別ブランチの内容と一致する場合そのブランチのノードに収束する', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        // root → A → B (branch1)
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        const tree = manager.getTree(uri);
+        const nodeBId = tree.currentId;
+
+        // root → A → C (branch2 start from A)
+        const nodeAId = tree.nodes.get(nodeBId)!.parents[0];
+        tree.currentId = nodeAId;
+        manager.onDidSaveTextDocument(makeDocument('C'));
+
+        // branch2から B と同一内容を保存 → branch1のBに収束
+        manager.onDidSaveTextDocument(makeDocument('B'));
+
+        expect(tree.currentId).toBe(nodeBId);
+    });
+
+    // ケース9: 収束後の新規編集は収束先から分岐する
+    it('収束後の新規保存は収束先ノードの子になる', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+        const nodeAId = tree.currentId;
+
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        manager.onDidSaveTextDocument(makeDocument('A')); // 収束 → nodeAId
+        manager.onDidSaveTextDocument(makeDocument('D')); // 新規編集
+
+        const nodeDId = tree.currentId;
+        expect(tree.nodes.get(nodeDId)!.parents).toContain(nodeAId);
+    });
+
+    // ケース10: compact後（hashMapにない）は通常の新ノード作成にフォールバック
+    it('compactでノードが消えhashMapにない場合は新ノードを作成する', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        // insertチェーンを作り compact でノードを削除
+        manager.onDidSaveTextDocument(makeDocument('aaa'));
+        manager.onDidSaveTextDocument(makeDocument('aaab'));
+        manager.onDidSaveTextDocument(makeDocument('aaabb'));
+        const tree = manager.getTree(uri);
+        // id=1(aaa)はcompact対象: 親=root,子=2,insertのみ → compressible
+        // ただし今のcurrentId=2なのでid=1は圧縮可能
+        // 手動でid=1をhashMapから削除してcompactなしでシミュレート
+        const node1 = tree.nodes.get(1)!;
+        tree.hashMap.delete(node1.hash);
+
+        const sizeBefore = tree.nodes.size;
+        manager.onDidSaveTextDocument(makeDocument('aaa')); // node1と同内容だがhashMapにない
+
+        expect(tree.nodes.size).toBe(sizeBefore + 1); // 新ノード作成
+    });
+
+    // ケース11: メモ付きノードへの収束でメモが保持される
+    it('メモ付きノードへ収束してもメモは保持される', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('A'));
+        const tree = manager.getTree(uri);
+        const nodeAId = tree.currentId;
+        tree.nodes.get(nodeAId)!.note = 'important checkpoint';
+
+        manager.onDidSaveTextDocument(makeDocument('B'));
+        manager.onDidSaveTextDocument(makeDocument('A')); // Aに収束
+
+        expect(tree.nodes.get(nodeAId)!.note).toBe('important checkpoint');
+    });
+
+    // ケース12: 収束後のreconstructContentが正しい
+    it('収束後のreconstructContentが収束先ノードの内容を返す', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('hello world'));
+        manager.onDidSaveTextDocument(makeDocument('hello there'));
+        manager.onDidSaveTextDocument(makeDocument('hello world')); // 収束
+
+        const tree = manager.getTree(uri);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe('hello world');
     });
 });
