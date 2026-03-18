@@ -20,5 +20,7 @@
   "config.compressionThresholdKB.description": "ツリーファイルをgzip圧縮する全fullノードコンテンツの合計サイズ（KB）の閾値です。0にすると常に圧縮します。",
   "config.checkpointThresholdKB.description": "fullノードのコンテンツを別ファイルに分離しレイジーロードするサイズ（KB）の閾値です。compressionThresholdKB以上を推奨します。",
   "config.contentCacheMaxKB.description": "チェックポイントコンテンツのインメモリキャッシュ上限（KB）です。上限を超えると最も古いエントリをLRU方式で削除します。",
+  "config.hardCompactAfterDays.description": "`Undo Tree: Hard Compact` コマンドの閾値（日数）です。この日数より古いノードを削除します（current ノード・メモ付きノード・それらの祖先は保護されます）。`0` で無効化します。",
+  "commands.hardCompact.title": "Undo Tree: Hard Compact",
   "views.treeView.name": "Undo Tree"
 }

@@ -296,6 +296,11 @@ function getContentCacheMaxBytes(): number {
     return (typeof kb === 'number' && kb >= 0 ? kb : 2048) * 1024;
 }
 
+function getHardCompactAfterDays(): number {
+    const days = vscode.workspace.getConfiguration('undotree').get<number>('hardCompactAfterDays');
+    return typeof days === 'number' && days >= 1 ? days : 0;
+}
+
 function getAutosaveIntervalMs(): number {
     const seconds = vscode.workspace
         .getConfiguration('undotree')
@@ -595,6 +600,35 @@ export async function activate(context: vscode.ExtensionContext) {
             const removed = manager.compact(tree);
             provider.refresh();
             vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: compacted {0} node(s)', removed));
+        }),
+
+        vscode.commands.registerCommand('undotree.hardCompact', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || !manager) {
+                return;
+            }
+            const days = getHardCompactAfterDays();
+            if (days <= 0) {
+                vscode.window.showWarningMessage(
+                    vscode.l10n.t('Undo Tree: set undotree.hardCompactAfterDays (≥ 1) to use this command')
+                );
+                return;
+            }
+            const confirm = await vscode.window.showWarningMessage(
+                vscode.l10n.t('Undo Tree: delete nodes older than {0} day(s)? This cannot be undone.', days),
+                { modal: true },
+                vscode.l10n.t('Delete')
+            );
+            if (confirm !== vscode.l10n.t('Delete')) {
+                return;
+            }
+            const tree = manager.getTree(editor.document.uri);
+            const removed = manager.hardCompact(tree, days);
+            provider.refresh();
+            schedulePersistState(context);
+            vscode.window.showInformationMessage(
+                vscode.l10n.t('Undo Tree: hard compacted {0} node(s) older than {1} day(s)', removed, days)
+            );
         }),
 
         vscode.commands.registerCommand('undotree.togglePause', () => {

@@ -57,6 +57,10 @@
       {
         "command": "undotree.showMenu",
         "title": "%commands.showMenu.title%"
+      },
+      {
+        "command": "undotree.hardCompact",
+        "title": "%commands.hardCompact.title%"
       }
     ],
     "configuration": {
@@ -148,6 +152,12 @@
           "default": 2048,
           "minimum": 0,
           "markdownDescription": "%config.contentCacheMaxKB.description%"
+        },
+        "undotree.hardCompactAfterDays": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "%config.hardCompactAfterDays.description%"
         }
       }
     },

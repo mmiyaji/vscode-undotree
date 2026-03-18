@@ -700,6 +700,92 @@ export class UndoTreeManager implements vscode.Disposable {
         }
     }
 
+    hardCompact(tree: UndoTree, maxAgeDays: number): number {
+        const thresholdMs = maxAgeDays * 86_400_000;
+        const now = Date.now();
+
+        // Step 1: current の祖先を保護対象に
+        const currentAncestors = new Set<number>();
+        let id: number | undefined = tree.currentId;
+        while (id !== undefined) {
+            currentAncestors.add(id);
+            const node = tree.nodes.get(id);
+            id = node && node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
+        }
+
+        // Step 2: noted ノードの祖先を保護対象に（noted が孤立しないよう）
+        const hasNotedAncestor = new Set<number>();
+        for (const [nodeId, node] of tree.nodes) {
+            if (!node.note) { continue; }
+            let aid: number | undefined = nodeId;
+            while (aid !== undefined) {
+                if (hasNotedAncestor.has(aid)) { break; }
+                hasNotedAncestor.add(aid);
+                const anode = tree.nodes.get(aid);
+                aid = anode && anode.parents.length > 0 ? anode.parents[anode.parents.length - 1] : undefined;
+            }
+        }
+
+        // Step 3: 削除対象サブツリーを収集（DFS）
+        const toDelete = new Set<number>();
+
+        const markSubtree = (nodeId: number) => {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { return; }
+            toDelete.add(nodeId);
+            for (const childId of node.children) {
+                markSubtree(childId);
+            }
+        };
+
+        const dfs = (nodeId: number) => {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { return; }
+
+            if (currentAncestors.has(nodeId)) {
+                // current の祖先: 削除しないが子を辿る
+                for (const childId of node.children) {
+                    dfs(childId);
+                }
+                return;
+            }
+
+            const isExpired = (now - node.timestamp) > thresholdMs;
+            const isProtected = node.note || hasNotedAncestor.has(nodeId);
+
+            if (isExpired && !isProtected) {
+                markSubtree(nodeId);
+            } else {
+                for (const childId of node.children) {
+                    dfs(childId);
+                }
+            }
+        };
+
+        dfs(tree.rootId);
+
+        // Step 4: 削除実行
+        for (const nodeId of toDelete) {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { continue; }
+            for (const parentId of node.parents) {
+                const parent = tree.nodes.get(parentId);
+                if (parent) {
+                    parent.children = parent.children.filter(id => id !== nodeId);
+                }
+            }
+            tree.nodes.delete(nodeId);
+            if (tree.hashMap.get(node.hash) === nodeId) {
+                tree.hashMap.delete(node.hash);
+            }
+        }
+
+        if (toDelete.size > 0) {
+            this.onRefresh?.();
+        }
+        return toDelete.size;
+    }
+
     dispose() {
         if (this.autosaveTimer) {
             clearInterval(this.autosaveTimer);

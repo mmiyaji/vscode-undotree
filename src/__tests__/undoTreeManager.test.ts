@@ -831,3 +831,162 @@ describe('DAG収束', () => {
         expect(manager.reconstructContent(tree, tree.currentId)).toBe('hello world');
     });
 });
+
+// -----------------------------------------------
+// hardCompact
+// -----------------------------------------------
+describe('hardCompact', () => {
+    const DAY_MS = 86_400_000;
+
+    // 共通ヘルパー: base保存後に分岐を作るシナリオを構築
+    // root(0) → base(baseId) → main(mainId, current=recent)
+    //                        → branch(branchId, timestamp=daysAgo)
+    function makeBranchScenario(branchDaysAgo: number) {
+        const manager = new UndoTreeManager();
+        const now = Date.now();
+        manager.onDidSaveTextDocument(makeDocument('base'));
+        const tree = manager.getTree(makeUri());
+        const baseId = tree.currentId;
+
+        // main path (recent)
+        manager.onDidSaveTextDocument(makeDocument('main'));
+        const mainId = tree.currentId;
+
+        // old branch from baseId
+        tree.currentId = baseId;
+        manager.onDidSaveTextDocument(makeDocument('old_branch'));
+        const branchId = tree.currentId;
+        tree.nodes.get(branchId)!.timestamp = now - branchDaysAgo * DAY_MS;
+
+        // restore current to main
+        tree.currentId = mainId;
+        return { manager, tree, baseId, mainId, branchId };
+    }
+
+    it('古いブランチが削除される', () => {
+        const { manager, tree, branchId } = makeBranchScenario(60);
+        const sizeBefore = tree.nodes.size;
+        const removed = manager.hardCompact(tree, 30);
+        expect(removed).toBe(1);
+        expect(tree.nodes.has(branchId)).toBe(false);
+        expect(tree.nodes.size).toBe(sizeBefore - 1);
+    });
+
+    it('currentノードは古くても保護される', () => {
+        const { manager, tree } = makeBranchScenario(60);
+        const currentId = tree.currentId;
+        // current自体も古くする
+        tree.nodes.get(currentId)!.timestamp = Date.now() - 60 * DAY_MS;
+        manager.hardCompact(tree, 30);
+        expect(tree.nodes.has(currentId)).toBe(true);
+    });
+
+    it('currentの祖先は古くても保護される', () => {
+        const { manager, tree, baseId, mainId } = makeBranchScenario(60);
+        // baseId は current(mainId) の祖先 → 保護される
+        tree.nodes.get(baseId)!.timestamp = Date.now() - 60 * DAY_MS;
+        const sizeBefore = tree.nodes.size;
+        manager.hardCompact(tree, 30);
+        expect(tree.nodes.has(baseId)).toBe(true);
+        expect(tree.nodes.has(mainId)).toBe(true);
+    });
+
+    it('notedノードは古くても保護される', () => {
+        const { manager, tree, branchId } = makeBranchScenario(60);
+        tree.nodes.get(branchId)!.note = 'keep this';
+        manager.hardCompact(tree, 30);
+        expect(tree.nodes.has(branchId)).toBe(true);
+    });
+
+    it('notedノードの祖先も保護される', () => {
+        // baseId → old_branch_parent(60d) → noted_leaf(50d)
+        const manager = new UndoTreeManager();
+        const now = Date.now();
+        manager.onDidSaveTextDocument(makeDocument('base'));
+        const tree = manager.getTree(makeUri());
+        const baseId = tree.currentId;
+
+        // main path (current, recent)
+        manager.onDidSaveTextDocument(makeDocument('main'));
+        const mainId = tree.currentId;
+
+        // branch: parent(60d) → noted_leaf(50d)
+        tree.currentId = baseId;
+        manager.onDidSaveTextDocument(makeDocument('branch_parent'));
+        const parentId = tree.currentId;
+        tree.nodes.get(parentId)!.timestamp = now - 60 * DAY_MS;
+
+        manager.onDidSaveTextDocument(makeDocument('noted_leaf'));
+        const notedId = tree.currentId;
+        tree.nodes.get(notedId)!.timestamp = now - 50 * DAY_MS;
+        tree.nodes.get(notedId)!.note = 'important';
+
+        tree.currentId = mainId;
+        const removed = manager.hardCompact(tree, 30);
+        expect(removed).toBe(0); // noted の祖先 parentId も保護
+        expect(tree.nodes.has(parentId)).toBe(true);
+        expect(tree.nodes.has(notedId)).toBe(true);
+    });
+
+    it('閾値以内のブランチは削除されない', () => {
+        const { manager, tree } = makeBranchScenario(10); // 10日前, 閾値30日以内
+        const sizeBefore = tree.nodes.size;
+        const removed = manager.hardCompact(tree, 30);
+        expect(removed).toBe(0);
+        expect(tree.nodes.size).toBe(sizeBefore);
+    });
+
+    it('削除後にhashMapから対象エントリが除去される', () => {
+        const { manager, tree, branchId } = makeBranchScenario(60);
+        const oldHash = tree.nodes.get(branchId)!.hash;
+        manager.hardCompact(tree, 30);
+        expect(tree.nodes.has(branchId)).toBe(false);
+        expect(tree.hashMap.has(oldHash)).toBe(false);
+    });
+
+    it('削除ノードが親の children から除去される', () => {
+        const { manager, tree, baseId, branchId } = makeBranchScenario(60);
+        manager.hardCompact(tree, 30);
+        expect(tree.nodes.get(baseId)!.children).not.toContain(branchId);
+    });
+
+    it('削除ノードが 0 のとき返り値は 0', () => {
+        const { manager, tree } = makeBranchScenario(10);
+        const removed = manager.hardCompact(tree, 30);
+        expect(removed).toBe(0);
+    });
+
+    it('古いブランチのサブツリーがまとめて削除される', () => {
+        // baseId → old_root(60d) → old_child1(55d) → old_child2(50d)
+        const manager = new UndoTreeManager();
+        const now = Date.now();
+        manager.onDidSaveTextDocument(makeDocument('base'));
+        const tree = manager.getTree(makeUri());
+        const baseId = tree.currentId;
+
+        // main path
+        manager.onDidSaveTextDocument(makeDocument('main'));
+        const mainId = tree.currentId;
+
+        // old subtree: 3ノード
+        tree.currentId = baseId;
+        manager.onDidSaveTextDocument(makeDocument('old1'));
+        const oldId1 = tree.currentId;
+        tree.nodes.get(oldId1)!.timestamp = now - 60 * DAY_MS;
+
+        manager.onDidSaveTextDocument(makeDocument('old2'));
+        const oldId2 = tree.currentId;
+        tree.nodes.get(oldId2)!.timestamp = now - 55 * DAY_MS;
+
+        manager.onDidSaveTextDocument(makeDocument('old3'));
+        const oldId3 = tree.currentId;
+        tree.nodes.get(oldId3)!.timestamp = now - 50 * DAY_MS;
+
+        tree.currentId = mainId;
+        const removed = manager.hardCompact(tree, 30);
+        expect(removed).toBe(3);
+        expect(tree.nodes.has(oldId1)).toBe(false);
+        expect(tree.nodes.has(oldId2)).toBe(false);
+        expect(tree.nodes.has(oldId3)).toBe(false);
+    });
+});
