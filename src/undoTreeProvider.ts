@@ -11,6 +11,18 @@ type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<n
 export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private mode: 'navigate' | 'diff' = 'navigate';
+    private lastEditor?: vscode.TextEditor;
+    loading = false;
+
+    setActiveEditor(editor: vscode.TextEditor | undefined) {
+        if (editor) {
+            this.lastEditor = editor;
+        }
+    }
+
+    showCheckpointLoading() {
+        this.view?.webview.postMessage({ command: 'showJumpLoading' });
+    }
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -85,12 +97,19 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         if (!this.view) {
             return;
         }
+        if (this.loading) {
+            this.view.webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);opacity:0.6;}</style>
+</head><body>Loading...</body></html>`;
+            return;
+        }
         const timeFormat = this.getTimeFormat();
         const timeFormatCustom = this.getTimeFormatCustom();
         const nodeSizeMetric = this.getNodeSizeMetric();
         const nodeSizeMetricBase = this.getNodeSizeMetricBase();
         const showStorageKind = this.getShowStorageKind();
-        const editor = vscode.window.activeTextEditor;
+        const editor = vscode.window.activeTextEditor
+            ?? (this.lastEditor && !this.lastEditor.document.isClosed ? this.lastEditor : undefined);
         if (!editor) {
             this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind);
             return;
@@ -241,33 +260,49 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
   const showStorageKind = ${JSON.stringify(showStorageKind)};
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
+
+  window.addEventListener('message', (event) => {
+    if (event.data?.command === 'showJumpLoading') {
+      const treeEl = document.getElementById('tree');
+      if (treeEl) { treeEl.style.opacity = '0.4'; treeEl.style.pointerEvents = 'none'; }
+      if (!document.getElementById('jump-overlay')) {
+        const ov = document.createElement('div');
+        ov.id = 'jump-overlay';
+        ov.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;opacity:0.7;pointer-events:none;';
+        ov.textContent = 'Loading...';
+        document.body.appendChild(ov);
+      }
+    }
+  });
   function escHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
+  function fmtLines(n) {
+    return n.toLocaleString() + 'L';
+  }
+  function fmtBytes(b) {
+    if (b >= 1024 * 1024) { return (b / (1024 * 1024)).toFixed(1) + 'MB'; }
+    if (b >= 1024) { return (b / 1024).toFixed(1) + 'KB'; }
+    return b + 'B';
+  }
   function formatSizeDiff(node, refNode) {
     if (nodeSizeMetric === 'none') { return ''; }
     const val = nodeSizeMetric === 'lines' ? node.lineCount : node.byteCount;
     if (val === undefined || val === null) { return ''; }
     // 基準ノード自身 or 基準が取れない場合: 絶対値を表示
     if (!refNode || node.id === refNode.id) {
-      if (nodeSizeMetric === 'lines') {
-        return '<span class="size-diff">' + val + 'L</span>';
-      }
-      const str = val >= 1024 ? (val / 1024).toFixed(1) + 'KB' : val + 'B';
+      const str = nodeSizeMetric === 'lines' ? fmtLines(val) : fmtBytes(val);
       return '<span class="size-diff">' + str + '</span>';
     }
     const ref = nodeSizeMetric === 'lines' ? refNode.lineCount : refNode.byteCount;
     if (ref === undefined || ref === null) { return ''; }
     const delta = val - ref;
-    if (nodeSizeMetric === 'lines') {
-      const cls = delta > 0 ? 'plus' : delta < 0 ? 'minus' : '';
-      const sign = delta > 0 ? '+' : delta < 0 ? '' : '±';
-      return '<span class="size-diff ' + cls + '">' + sign + delta + 'L</span>';
-    }
-    const abs = Math.abs(delta);
-    const str = abs >= 1024 ? (abs / 1024).toFixed(1) + 'KB' : abs + 'B';
     const cls = delta > 0 ? 'plus' : delta < 0 ? 'minus' : '';
     const sign = delta > 0 ? '+' : delta < 0 ? '-' : '±';
-    return '<span class="size-diff ' + cls + '">' + sign + (delta !== 0 ? str : '0B') + '</span>';
+    if (nodeSizeMetric === 'lines') {
+      return '<span class="size-diff ' + cls + '">' + sign + fmtLines(Math.abs(delta)) + '</span>';
+    }
+    const str = delta !== 0 ? fmtBytes(Math.abs(delta)) : '0B';
+    return '<span class="size-diff ' + cls + '">' + sign + str + '</span>';
   }
 
   let focusedIndex = -1;

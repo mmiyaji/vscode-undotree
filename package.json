@@ -154,7 +154,7 @@
         },
         "undotree.contentCacheMaxKB": {
           "type": "number",
-          "default": 2048,
+          "default": 20480,
           "minimum": 0,
           "markdownDescription": "%config.contentCacheMaxKB.description%"
         },

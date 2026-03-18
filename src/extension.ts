@@ -6,7 +6,7 @@ import { readFileSync } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { promisify } from 'util';
-import { gzip as gzipCb, gunzip as gunzipCb } from 'zlib';
+import { gzip as gzipCb, gunzip as gunzipCb, gunzipSync } from 'zlib';
 
 const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
@@ -102,7 +102,7 @@ async function persistStateToDisk(
             })
             : tree.nodes;
 
-        // コンテンツファイルの書き込み（既存ならスキップ）
+        // コンテンツファイルの書き込み（既存ならスキップ、gzip圧縮）
         if (useCheckpoint) {
             await Promise.all(tree.nodes
                 .filter((n) => n.storage.kind === 'full' && n.storage.content !== '')
@@ -112,7 +112,8 @@ async function persistStateToDisk(
                     try {
                         await fs.access(filePath);
                     } catch {
-                        await fs.writeFile(filePath, full.content, 'utf8');
+                        const compressed = await gzip(Buffer.from(full.content, 'utf8'));
+                        await fs.writeFile(filePath, compressed);
                     }
                 })
             );
@@ -233,7 +234,12 @@ async function ensureTreeLoaded(
     document: vscode.TextDocument
 ) {
     if (!treeManager.hasTree(document.uri)) {
-        const persisted = await loadPersistedTreeFromDisk(context, document.uri);
+        let persisted;
+        try {
+            persisted = await loadPersistedTreeFromDisk(context, document.uri);
+        } catch {
+            // ファイル読み込み失敗は無視して新規ツリーで継続
+        }
         if (persisted) {
             treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
             treeManager.reconcileCurrentNode(document.uri, document.getText());
@@ -292,7 +298,7 @@ function getCheckpointThresholdBytes(): number {
 
 function getContentCacheMaxBytes(): number {
     const kb = vscode.workspace.getConfiguration('undotree').get<number>('contentCacheMaxKB');
-    return (typeof kb === 'number' && kb >= 0 ? kb : 2048) * 1024;
+    return (typeof kb === 'number' && kb > 0 ? kb : 20480) * 1024;
 }
 
 function getHardCompactAfterDays(): number {
@@ -385,6 +391,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const contentProvider = new UndoTreeDocumentContentProvider();
     const persistedManifest = await readPersistedManifest(context);
 
+    const outputChannel = vscode.window.createOutputChannel('Undo Tree');
+    context.subscriptions.push(outputChannel);
+    manager.debugLog = (msg) => outputChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+
     manager.paused = persistedManifest?.paused === true;
     manager.setAutosaveInterval(getAutosaveIntervalMs());
     manager.setContentCacheMax(getContentCacheMaxBytes());
@@ -392,7 +402,18 @@ export async function activate(context: vscode.ExtensionContext) {
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     manager.contentResolver = (hash) => {
         try {
-            return readFileSync(path.join(treesDir, 'content', hash), 'utf8');
+            const buf = readFileSync(path.join(treesDir, 'content', hash));
+            const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+            return isGzip ? gunzipSync(buf).toString('utf8') : buf.toString('utf8');
+        } catch {
+            return '';
+        }
+    };
+    manager.asyncContentResolver = async (hash) => {
+        try {
+            const buf = await fs.readFile(path.join(treesDir, 'content', hash));
+            const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+            return isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
         } catch {
             return '';
         }
@@ -402,12 +423,20 @@ export async function activate(context: vscode.ExtensionContext) {
         provider.refresh();
         schedulePersistState(context);
     };
+    manager.onCheckpointLoadStart = () => {
+        provider.showCheckpointLoading();
+    };
 
 
     // 既に開いているエディタのツリーを実際のコンテンツで初期化
     if (vscode.window.activeTextEditor && isTracked(vscode.window.activeTextEditor.document)) {
         const ed = vscode.window.activeTextEditor;
-        await ensureTreeLoaded(context, manager, ed.document);
+        provider.setActiveEditor(ed);
+        try {
+            await ensureTreeLoaded(context, manager, ed.document);
+        } catch {
+            // ロード失敗は無視して新規ツリーで継続
+        }
     }
 
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -669,14 +698,25 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.window.onDidChangeActiveTextEditor((e) => {
-            void (async () => {
-                manager?.onDidChangeActiveEditor(e);
+            provider.setActiveEditor(e);
+            manager?.onDidChangeActiveEditor(e);
+            updateStatusBar(e);
+            if (e && isTracked(e.document) && manager && !manager.hasTree(e.document.uri)) {
+                // 未ロードのファイル: ローディング表示してから非同期ロード
+                provider.loading = true;
+                provider.refresh();
+                void ensureTreeLoaded(context, manager, e.document)
+                    .catch(() => {/* ロード失敗は無視 */})
+                    .finally(() => {
+                        provider.loading = false;
+                        provider.refresh();
+                    });
+            } else {
                 if (e && isTracked(e.document) && manager) {
-                    await ensureTreeLoaded(context, manager, e.document);
+                    void ensureTreeLoaded(context, manager, e.document).catch(() => {});
                 }
                 provider.refresh();
-                updateStatusBar(e);
-            })();
+            }
         }),
 
         vscode.workspace.onDidChangeConfiguration((e) => {

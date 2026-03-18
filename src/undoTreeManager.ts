@@ -71,11 +71,14 @@ export class UndoTreeManager implements vscode.Disposable {
     private restoring = false;
     private contentCache = new Map<string, string>();
     private contentCacheBytes = 0;
-    private contentCacheMaxBytes = 2048 * 1024;
+    private contentCacheMaxBytes = 20480 * 1024;
     private emptyHash: string | undefined;
     contentResolver: ((hash: string) => string) | undefined;
+    asyncContentResolver: ((hash: string) => Promise<string>) | undefined;
     paused = false;
     onRefresh: (() => void) | undefined;
+    debugLog: ((msg: string) => void) | undefined;
+    onCheckpointLoadStart: (() => void) | undefined;
 
     constructor() {
         this.autosaveTimer = setInterval(() => this.autosave(), this.autosaveIntervalMs);
@@ -93,13 +96,58 @@ export class UndoTreeManager implements vscode.Disposable {
     private getOrLoadContent(contentHash: string): string {
         const cached = this.contentCache.get(contentHash);
         if (cached !== undefined) {
-            // LRU: move to end
             this.contentCache.delete(contentHash);
             this.contentCache.set(contentHash, cached);
             return cached;
         }
         const content = this.contentResolver?.(contentHash) ?? '';
         this.setCachedContent(contentHash, content);
+        return content;
+    }
+
+    private async getOrLoadContentAsync(contentHash: string): Promise<string> {
+        const cached = this.contentCache.get(contentHash);
+        if (cached !== undefined) {
+            this.debugLog?.(`[checkpoint] cache HIT hash=${contentHash}`);
+            this.contentCache.delete(contentHash);
+            this.contentCache.set(contentHash, cached);
+            return cached;
+        }
+        this.debugLog?.(`[checkpoint] cache MISS hash=${contentHash} cacheBytes=${Math.round(this.contentCacheBytes/1024)}KB maxBytes=${Math.round(this.contentCacheMaxBytes/1024)}KB`);
+        this.onCheckpointLoadStart?.();
+        const content = this.asyncContentResolver
+            ? await this.asyncContentResolver(contentHash)
+            : (this.contentResolver?.(contentHash) ?? '');
+        this.setCachedContent(contentHash, content);
+        return content;
+    }
+
+    async reconstructContentAsync(tree: UndoTree, targetId: number): Promise<string> {
+        const path: number[] = [];
+        const visited = new Set<number>();
+        let id: number | undefined = targetId;
+
+        while (id !== undefined) {
+            if (visited.has(id)) { break; }
+            visited.add(id);
+            path.unshift(id);
+            const node = tree.nodes.get(id);
+            if (!node || node.storage.kind === 'full') { break; }
+            id = node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
+        }
+
+        let content = '';
+        for (const nodeId of path) {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { break; }
+            if (node.storage.kind === 'full') {
+                content = node.storage.content;
+            } else if (node.storage.kind === 'checkpoint') {
+                content = await this.getOrLoadContentAsync(node.storage.contentHash);
+            } else {
+                content = this.applyDiffs(content, node.storage.diffs);
+            }
+        }
         return content;
     }
 
@@ -419,7 +467,8 @@ export class UndoTreeManager implements vscode.Disposable {
         if (!node) {
             return;
         }
-        const content = this.reconstructContent(t, nodeId);
+        this.debugLog?.(`[jumpToNode] nodeId=${nodeId} storage=${node.storage.kind}`);
+        const content = await this.reconstructContentAsync(t, nodeId);
         const previousCurrentId = t.currentId;
 
         // Move the logical cursor before mutating the editor so any immediate
