@@ -255,15 +255,16 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
     const ref = nodeSizeMetric === 'lines' ? refNode.lineCount : refNode.byteCount;
     if (ref === undefined || ref === null) { return ''; }
     const delta = val - ref;
-    if (delta === 0) { return ''; }
     if (nodeSizeMetric === 'lines') {
-      const cls = delta > 0 ? 'plus' : 'minus';
-      return '<span class="size-diff ' + cls + '">' + (delta > 0 ? '+' : '') + delta + 'L</span>';
+      const cls = delta > 0 ? 'plus' : delta < 0 ? 'minus' : '';
+      const sign = delta > 0 ? '+' : delta < 0 ? '' : '±';
+      return '<span class="size-diff ' + cls + '">' + sign + delta + 'L</span>';
     }
     const abs = Math.abs(delta);
     const str = abs >= 1024 ? (abs / 1024).toFixed(1) + 'KB' : abs + 'B';
-    const cls = delta > 0 ? 'plus' : 'minus';
-    return '<span class="size-diff ' + cls + '">' + (delta > 0 ? '+' : '-') + str + '</span>';
+    const cls = delta > 0 ? 'plus' : delta < 0 ? 'minus' : '';
+    const sign = delta > 0 ? '+' : delta < 0 ? '-' : '±';
+    return '<span class="size-diff ' + cls + '">' + sign + (delta !== 0 ? str : '0B') + '</span>';
   }
 
   function buildTree(nodes, currentId) {
