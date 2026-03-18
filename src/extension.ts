@@ -688,7 +688,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.autosaveInterval') ||
                 e.affectsConfiguration('undotree.timeFormat') ||
                 e.affectsConfiguration('undotree.timeFormatCustom') ||
-                e.affectsConfiguration('undotree.nodeMarkerStyle') ||
+                e.affectsConfiguration('undotree.showStorageKind') ||
                 e.affectsConfiguration('undotree.nodeSizeMetric') ||
                 e.affectsConfiguration('undotree.nodeSizeMetricBase') ||
                 e.affectsConfiguration('undotree.compressionThresholdKB') ||

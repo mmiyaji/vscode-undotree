@@ -115,15 +115,10 @@
           "default": "yyyy-MM-dd HH:mm:ss",
           "markdownDescription": "%config.timeFormatCustom.description%"
         },
-        "undotree.nodeMarkerStyle": {
-          "type": "string",
-          "enum": [
-            "none",
-            "simple",
-            "semantic"
-          ],
-          "default": "semantic",
-          "markdownDescription": "%config.nodeMarkerStyle.description%"
+        "undotree.showStorageKind": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%config.showStorageKind.description%"
         },
         "undotree.nodeSizeMetric": {
           "type": "string",

@@ -84,12 +84,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         }
         const timeFormat = this.getTimeFormat();
         const timeFormatCustom = this.getTimeFormatCustom();
-        const nodeMarkerStyle = this.getNodeMarkerStyle();
         const nodeSizeMetric = this.getNodeSizeMetric();
         const nodeSizeMetricBase = this.getNodeSizeMetricBase();
+        const showStorageKind = this.getShowStorageKind();
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeMarkerStyle, nodeSizeMetric, nodeSizeMetricBase);
+            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind);
             return;
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
@@ -105,9 +105,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             this.mode,
             timeFormat,
             timeFormatCustom,
-            nodeMarkerStyle,
             nodeSizeMetric,
-            nodeSizeMetricBase
+            nodeSizeMetricBase,
+            showStorageKind
         );
     }
 
@@ -124,20 +124,16 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return value && value.trim() ? value : 'yyyy-MM-dd HH:mm:ss';
     }
 
-    private getNodeMarkerStyle(): 'none' | 'simple' | 'semantic' {
-        const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeMarkerStyle');
-        if (value === 'none' || value === 'simple' || value === 'semantic') {
-            return value;
-        }
-        return 'semantic';
-    }
-
     private getNodeSizeMetric(): 'none' | 'lines' | 'bytes' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeSizeMetric');
         if (value === 'none' || value === 'lines' || value === 'bytes') {
             return value;
         }
         return 'lines';
+    }
+
+    private getShowStorageKind(): boolean {
+        return vscode.workspace.getConfiguration('undotree').get<boolean>('showStorageKind') === true;
     }
 
     private getNodeSizeMetricBase(): 'current' | 'initial' {
@@ -170,9 +166,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         mode: 'navigate' | 'diff',
         timeFormat: 'time' | 'dateTime' | 'custom',
         timeFormatCustom: string,
-        nodeMarkerStyle: 'none' | 'simple' | 'semantic',
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
-        nodeSizeMetricBase: 'current' | 'initial'
+        nodeSizeMetricBase: 'current' | 'initial',
+        showStorageKind: boolean
     ): string {
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
@@ -186,11 +182,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
-  .dot { width: 12px; height: 12px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-foreground); }
-  .dot svg { width: 12px; height: 12px; display: block; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
   .label { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
-  .time { opacity: 0.5; font-size: 10px; margin-left: auto; padding-left: 6px; flex-shrink: 0; }
+  .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding-left: 6px; }
+  .time { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
   .empty { opacity: 0.5; padding: 8px; }
   .actions { display: flex; gap: 4px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 1; padding: 8px 0 4px; }
   button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
@@ -233,9 +228,9 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
   const mode = ${JSON.stringify(mode)};
   const timeFormat = ${JSON.stringify(timeFormat)};
   const timeFormatCustom = ${JSON.stringify(timeFormatCustom)};
-  const nodeMarkerStyle = ${JSON.stringify(nodeMarkerStyle)};
   const nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
   const nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
+  const showStorageKind = ${JSON.stringify(showStorageKind)};
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
   function escHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -279,9 +274,6 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
     container.innerHTML = '';
 
     const cur = map[currentId];
-    const latestLeafId = nodes
-      .filter((node) => node.children.length === 0)
-      .sort((a, b) => b.timestamp - a.timestamp)[0]?.id ?? -1;
     document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
     document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
 
@@ -300,23 +292,6 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       }
     }
 
-    function renderMarker(kind) {
-      switch (kind) {
-        case 'none':
-          return '<svg viewBox="0 0 12 12" aria-hidden="true"></svg>';
-        case 'current':
-          return '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" fill="var(--vscode-focusBorder)" stroke="var(--vscode-focusBorder)" stroke-width="1.5" /></svg>';
-        case 'root':
-          return '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6" opacity="0.9" /></svg>';
-        case 'branch':
-          return '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5 L10.5 6 L6 10.5 L1.5 6 Z" fill="currentColor" opacity="0.85" /></svg>';
-        case 'latest':
-          return '<svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1.1" fill="currentColor" opacity="0.8" /></svg>';
-        default:
-          return '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="3.2" fill="currentColor" opacity="0.45" /></svg>';
-      }
-    }
-
     function renderNode(id, prefixParts, isLast, parentChildCount) {
       if (visitedNodes.has(id)) {
         return;
@@ -330,26 +305,13 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
 
       const isCurrent = node.id === currentId;
       const isRoot = id === 0;
-      const isBranchPoint = node.children.length > 1;
-      const isLatestLeaf = node.children.length === 0 && node.id === latestLeafId;
       const storageKind =
         node.storage?.kind === 'full' ? 'F' :
         node.storage?.kind === 'delta' ? 'D' :
         '';
       const isDirectBranchChild = !isRoot && parentChildCount > 1;
       const graphHtml = prefixParts.map(renderSegment).join('') +
-        (!isRoot ? renderSegment(isDirectBranchChild ? (isLast ? 'elbow' : 'tee') : (node.children.length === 0 ? 'elbow' : 'pipe')) : '');
-
-      const markerKind = nodeMarkerStyle === 'none'
-        ? 'none'
-        : nodeMarkerStyle === 'semantic'
-          ? (isCurrent ? 'current'
-            : isBranchPoint ? 'branch'
-            : 'none')
-          : (isCurrent ? 'current' : 'normal');
-      const markerHtml = markerKind === 'none'
-        ? ''
-        : '<span class="dot dot-svg">' + renderMarker(markerKind) + '</span>';
+        (!isRoot ? renderSegment(isDirectBranchChild ? (isLast ? 'elbow' : 'tee') : (node.children.length === 1 ? 'tee' : 'elbow')) : '');
 
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
@@ -364,13 +326,11 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       const labelHtml = node.note ? '' : '<span class="label">' + node.label + '</span>';
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
-        markerHtml +
         labelHtml +
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
-        sizeDiffHtml +
-        (storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-        '<span class="time">' + node.formattedTime + '</span>';
+        (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
+        '<span class="right-area">' + sizeDiffHtml + '<span class="time">' + node.formattedTime + '</span></span>';
       div.addEventListener('click', () => {
         if (!isCurrent) {
           if (mode === 'diff') {
@@ -382,7 +342,8 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       });
       container.appendChild(div);
 
-      const childPrefix = isDirectBranchChild
+      const isBranchParent = !isRoot && node.children.length > 1;
+      const childPrefix = (isDirectBranchChild || isBranchParent)
         ? [...prefixParts, isLast ? 'blank' : 'pipe']
         : prefixParts;
 
