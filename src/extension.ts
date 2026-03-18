@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 import * as vscode from 'vscode';
 import { promises as fs } from 'fs';
@@ -247,7 +247,7 @@ async function ensureTreeLoaded(
         }
         if (persisted) {
             treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-            treeManager.reconcileCurrentNode(document.uri, document.getText());
+            treeManager.syncDocumentState(document.uri, document.getText());
             return;
         }
     }
@@ -266,7 +266,7 @@ async function restoreTreeForDocument(
     }
 
     treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-    treeManager.reconcileCurrentNode(document.uri, document.getText());
+    treeManager.syncDocumentState(document.uri, document.getText());
     return true;
 }
 
@@ -724,13 +724,14 @@ export async function activate(context: vscode.ExtensionContext) {
             updateStatusBar(e);
             if (e && isTracked(e.document) && manager && !manager.hasTree(e.document.uri)) {
                 // 未ロードのファイル: ローディング表示してから非同期ロード
-                provider.loading = true;
+                const loadingToken = provider.beginLoading(e.document.uri);
                 provider.refresh();
                 void ensureTreeLoaded(context, manager, e.document)
                     .catch(() => {/* ロード失敗は無視 */})
                     .finally(() => {
-                        provider.loading = false;
-                        provider.refresh();
+                        if (provider.endLoading(e.document.uri, loadingToken)) {
+                            provider.refresh();
+                        }
                     });
             } else {
                 if (e && isTracked(e.document) && manager) {

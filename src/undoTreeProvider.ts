@@ -12,7 +12,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private mode: 'navigate' | 'diff' = 'navigate';
     private lastEditor?: vscode.TextEditor;
-    loading = false;
+    private loadingRequest?: { uri: string; token: number };
+    private loadingToken = 0;
     isTracked: ((uri: vscode.Uri) => boolean) | undefined;
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
@@ -23,6 +24,24 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     showCheckpointLoading() {
         this.view?.webview.postMessage({ command: 'showJumpLoading' });
+    }
+
+    beginLoading(uri: vscode.Uri): number {
+        const token = ++this.loadingToken;
+        this.loadingRequest = { uri: uri.toString(), token };
+        return token;
+    }
+
+    endLoading(uri: vscode.Uri, token: number): boolean {
+        if (
+            this.loadingRequest &&
+            this.loadingRequest.uri === uri.toString() &&
+            this.loadingRequest.token === token
+        ) {
+            this.loadingRequest = undefined;
+            return true;
+        }
+        return false;
     }
 
     constructor(
@@ -104,7 +123,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         if (!this.view) {
             return;
         }
-        if (this.loading) {
+        const editor = vscode.window.activeTextEditor
+            ?? (this.lastEditor && !this.lastEditor.document.isClosed ? this.lastEditor : undefined);
+        const isLoadingCurrentEditor = !!editor &&
+            this.loadingRequest?.uri === editor.document.uri.toString();
+
+        if (isLoadingCurrentEditor) {
             this.view.webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);opacity:0.6;}</style>
 </head><body>${vscode.l10n.t('Loading...')}</body></html>`;
@@ -115,8 +139,6 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         const nodeSizeMetric = this.getNodeSizeMetric();
         const nodeSizeMetricBase = this.getNodeSizeMetricBase();
         const showStorageKind = this.getShowStorageKind();
-        const editor = vscode.window.activeTextEditor
-            ?? (this.lastEditor && !this.lastEditor.document.isClosed ? this.lastEditor : undefined);
         if (!editor) {
             this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind);
             return;
@@ -195,28 +217,30 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private buildNotTrackedHtml(ext: string, fileName: string): string {
+    private buildNotTrackedHtml(ext: string, _fileName: string): string {
         const label = ext
             ? vscode.l10n.t('Undo Tree: {0} is not tracked', ext)
             : vscode.l10n.t('Undo Tree: this file is not tracked');
-        const enableLabel = fileName
-            ? vscode.l10n.t('Enable tracking for {0}', fileName)
+        const hint = ext
+            ? vscode.l10n.t('To enable tracking for {0} files, click the status bar item or open Settings.', ext)
+            : vscode.l10n.t('To enable tracking for this file, click the status bar item or open Settings.');
+        const enableLabel = ext
+            ? vscode.l10n.t('Enable tracking for {0}', ext)
             : vscode.l10n.t('Enable tracking for this file');
-        const settingsHint = vscode.l10n.t('To track all files of this type, add the extension in Settings.');
         const settingsLabel = vscode.l10n.t('Open Settings');
         return `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
 body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);}
-.msg{opacity:0.7;margin-bottom:12px;}
-.hint{opacity:0.45;font-size:11px;margin-top:12px;margin-bottom:4px;}
-.link{background:none;border:none;padding:0;color:var(--vscode-textLink-foreground);font-size:12px;cursor:pointer;text-decoration:underline;display:block;margin-bottom:6px;}
-.link:hover{color:var(--vscode-textLink-activeForeground);}
+.msg{opacity:0.7;margin-bottom:8px;}
+.hint{opacity:0.45;font-size:11px;margin-bottom:12px;}
+.btn{display:block;margin-bottom:6px;background:none;border:none;padding:0;color:var(--vscode-textLink-foreground);font-size:12px;cursor:pointer;text-decoration:underline;text-align:left;}
+.btn:hover{color:var(--vscode-textLink-activeForeground);}
 </style>
 </head><body>
 <div class="msg">${label}</div>
-<button class="link" onclick="acquireVsCodeApi().postMessage({command:'toggleTracking'})">${enableLabel}</button>
-<div class="hint">${settingsHint}</div>
-<button class="link" onclick="acquireVsCodeApi().postMessage({command:'openSettings'})">${settingsLabel}</button>
+<div class="hint">${hint}</div>
+<button class="btn" onclick="acquireVsCodeApi().postMessage({command:'toggleTracking'})">${enableLabel}</button>
+<button class="btn" onclick="acquireVsCodeApi().postMessage({command:'openSettings'})">${settingsLabel}</button>
 </body></html>`;
     }
 

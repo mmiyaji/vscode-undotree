@@ -945,6 +945,27 @@ describe('dirtyTrees', () => {
     });
 });
 
+describe('persisted tree reconciliation', () => {
+    it('adds a restore node from the imported current node when persisted content differs', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri('file:///persisted.md');
+
+        manager.onDidSaveTextDocument(makeDocument('base', 'file:///persisted.md'));
+        manager.onDidSaveTextDocument(makeDocument('latest', 'file:///persisted.md'));
+
+        const exported = manager.exportState();
+        const restored = new UndoTreeManager();
+        restored.importState(exported);
+
+        const tree = restored.syncDocumentState(uri, 'disk version');
+        const restoreNode = tree.nodes.get(tree.currentId)!;
+
+        expect(restoreNode.label).toBe('restore');
+        expect(restoreNode.parents).toEqual([2]);
+        expect(restored.reconstructContent(tree, tree.currentId)).toBe('disk version');
+    });
+});
+
 // -----------------------------------------------
 // hardCompact
 // -----------------------------------------------

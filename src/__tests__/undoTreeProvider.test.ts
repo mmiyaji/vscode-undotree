@@ -17,6 +17,17 @@ function makeDocument(content: string, uriStr = 'file:///existing.md') {
 }
 
 describe('UndoTreeProvider initialization', () => {
+    function makeView() {
+        return {
+            webview: {
+                options: {},
+                html: '',
+                onDidReceiveMessage: jest.fn(),
+                postMessage: jest.fn(),
+            },
+        } as any;
+    }
+
     it('seeds the root node with the active editor content during render', () => {
         const vscode = require('vscode');
         const manager = new UndoTreeManager();
@@ -172,5 +183,44 @@ describe('UndoTreeProvider initialization', () => {
         expect(tree.currentId).toBe(2);
         expect(tree.nodes.get(2)?.label).toBe('restore');
         expect(restored.reconstructContent(tree, tree.currentId)).toBe('new text');
+    });
+
+    it('shows loading only for the file currently being loaded', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const loadingDocument = makeDocument('loading file', 'file:///loading.md');
+        const otherDocument = makeDocument('other file', 'file:///other.md');
+        const view = makeView();
+
+        provider.resolveWebviewView(view);
+        provider.beginLoading(loadingDocument.uri);
+
+        vscode.window.activeTextEditor = { document: otherDocument };
+        provider.refresh();
+
+        expect(view.webview.html).not.toContain('</head><body>Loading...</body></html>');
+        expect(view.webview.html).toContain('other file');
+    });
+
+    it('keeps the latest loading request when an older one finishes', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const firstDocument = makeDocument('first file', 'file:///first.md');
+        const secondDocument = makeDocument('second file', 'file:///second.md');
+        const view = makeView();
+
+        provider.resolveWebviewView(view);
+        const firstToken = provider.beginLoading(firstDocument.uri);
+        const secondToken = provider.beginLoading(secondDocument.uri);
+
+        expect(provider.endLoading(firstDocument.uri, firstToken)).toBe(false);
+
+        vscode.window.activeTextEditor = { document: secondDocument };
+        provider.refresh();
+
+        expect(view.webview.html).toContain('Loading...');
+        expect(provider.endLoading(secondDocument.uri, secondToken)).toBe(true);
     });
 });
