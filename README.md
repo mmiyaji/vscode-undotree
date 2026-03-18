@@ -16,14 +16,19 @@ The tree is based on file saves and periodic autosave checkpoints. It does not r
 
 - **Tree-structured undo history**: Branches are preserved instead of discarded
 - **Save-triggered checkpoints**: History nodes are created on every save
-- **Periodic autosave**: Creates a checkpoint every 30 seconds when content changed
+- **Periodic autosave**: Creates a checkpoint every 30 seconds when content changed (configurable)
 - **Hybrid storage**: Small changes are stored as diffs; larger changes and branch points are stored as full snapshots
+- **Adaptive persistence**: Trees are gzip-compressed automatically; large content is split into lazy-loaded checkpoint files
 - **Sidebar panel**: Visualize the history tree and click nodes to jump
+- **Keyboard navigation**: Arrow keys move focus in the sidebar; `Enter` jumps to the focused node
 - **Diff mode**: Compare any node with the current document
+- **Node notes**: Attach a short note to any node via the ✎ icon
+- **Node size metrics**: See line-count or byte-count diff for each node relative to current or initial
 - **Selective tracking**: Track only configured extensions and exclude matching files
 - **Pause / Resume**: Temporarily stop history capture without losing the tree
 - **Persisted history**: Save, restore, and reload tracked trees across sessions
 - **Compaction**: Reduce noise in long linear chains without removing branch points
+- **Hard Compact**: Remove old branches beyond a configurable age
 
 ## Installation
 
@@ -53,17 +58,18 @@ This extension is distributed as a `.vsix` file via [GitHub Releases](https://gi
 ```
 Undo  Redo  Pause  Diff  [menu]
 ────────────────────────────────
-● initial                 00:00:00
-● save   F                00:01:05   ← F = Full snapshot
-└─ ● save   D             00:02:30   ← D = Delta (diff only)
-● auto   D                00:03:00
-● save   D                00:04:12   ◀ current
+● initial                         00:00:00
+● save                  +120 L    00:01:05
+└─ ● save              +1 L      00:02:30
+● auto                 +3 L      00:03:00
+● save   ✎ my note    +5 L      00:04:12   ◀ current
 ```
 
 - The highlighted row is the current position.
-- `F` means full content is stored.
-- `D` means only diffs are stored.
+- Size diff (e.g. `+120 L`) shows lines added/removed relative to the current node.
+- `✎ my note` is a user-attached note; click to edit.
 - Branch lines are drawn with SVG connectors in the sidebar.
+- Enable `undotree.showStorageKind` to show `F` (full) / `D` (delta) badges.
 
 ### Status bar
 
@@ -85,6 +91,7 @@ The settings menu includes:
 - `Save Persisted State`
 - `Restore Persisted State`
 - `Compact History`
+- `Hard Compact` (removes nodes older than `undotree.hardCompactAfterDays`)
 - `Pause Tracking` / `Resume Tracking`
 - `Toggle Tracking for This Extension`
 
@@ -141,6 +148,16 @@ Open settings from the actions menu, or search for `undotree` in VS Code setting
 | `undotree.enabledExtensions` | `[".txt", ".md"]` | File extensions to automatically track |
 | `undotree.excludePatterns` | `[]` | Filename patterns to exclude (supports `*` wildcard) |
 | `undotree.persistenceMode` | `"manual"` | `manual` saves only when requested; `auto` saves automatically after history changes |
+| `undotree.autosaveInterval` | `30` | Autosave snapshot interval in seconds (`0` to disable, minimum 5) |
+| `undotree.timeFormat` | `"time"` | Timestamp format: `none`, `time` (HH:mm:ss), `dateTime`, or `custom` |
+| `undotree.timeFormatCustom` | `"yyyy-MM-dd HH:mm:ss"` | Custom timestamp format (date-fns syntax); used when `timeFormat` is `custom` |
+| `undotree.showStorageKind` | `false` | Show `F`/`D` storage-kind badges on each node |
+| `undotree.nodeSizeMetric` | `"lines"` | Size diff per node: `none`, `lines`, or `bytes` |
+| `undotree.nodeSizeMetricBase` | `"current"` | Reference node for size diff: `current` or `initial` |
+| `undotree.compressionThresholdKB` | `100` | Total full-node content size (KB) above which the tree file is gzip-compressed |
+| `undotree.checkpointThresholdKB` | `1000` | Size (KB) above which full-node content is split into separate checkpoint files |
+| `undotree.contentCacheMaxKB` | `20480` | In-memory cache limit for checkpoint content (KB); LRU eviction |
+| `undotree.hardCompactAfterDays` | `0` | Age threshold (days) for `Hard Compact`; `0` disables the command |
 
 **Examples:**
 
@@ -148,7 +165,9 @@ Open settings from the actions menu, or search for `undotree` in VS Code setting
 {
   "undotree.enabledExtensions": [".txt", ".md", ".js", ".ts"],
   "undotree.excludePatterns": ["*.min.*", "CHANGELOG*"],
-  "undotree.persistenceMode": "auto"
+  "undotree.persistenceMode": "auto",
+  "undotree.nodeSizeMetric": "lines",
+  "undotree.hardCompactAfterDays": 30
 }
 ```
 

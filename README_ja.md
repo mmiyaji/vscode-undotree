@@ -16,14 +16,19 @@ VS Code の保存ベース undo 履歴をツリーとして可視化し、移動
 
 - **ツリー構造の undo 履歴**: 分岐を捨てずに保持
 - **保存トリガーのチェックポイント**: 保存ごとに履歴ノードを追加
-- **定期 autosave**: 内容が変わっていれば 30 秒ごとにチェックポイントを追加
+- **定期 autosave**: 内容が変わっていれば定期的にチェックポイントを追加（間隔設定可）
 - **ハイブリッドストレージ**: 小さい変更は diff、大きい変更や分岐点は full snapshot
+- **適応型永続化**: ツリーファイルを自動 gzip 圧縮。大きなコンテンツは別ファイルに分離してレイジーロード
 - **サイドバーパネル**: 履歴ツリーを表示し、クリックで任意ノードへ移動
+- **キーボード操作**: 矢印キーでフォーカス移動、`Enter` でジャンプ
 - **Diff モード**: 任意ノードと現在内容を比較
+- **ノードメモ**: ✎ アイコンで任意ノードにメモを付与
+- **ノードサイズ指標**: 現在ノードまたは初期ノードとの行数・バイト数差分を表示
 - **選択的トラッキング**: 拡張子単位の追跡と除外パターンに対応
 - **Pause / Resume**: 既存ツリーを保持したまま履歴記録を一時停止
 - **永続化**: 履歴の保存、復元、再オープン時の読込に対応
 - **コンパクション**: 長い直列履歴のノイズを削減
+- **Hard Compact**: 設定日数より古いブランチを一括削除
 
 ## インストール
 
@@ -53,16 +58,18 @@ VS Code の保存ベース undo 履歴をツリーとして可視化し、移動
 ```
 Undo  Redo  Pause  Diff  [menu]
 ────────────────────────────────
-● initial                 00:00:00
-● save   F                00:01:05   ← F = 全量保存
-└─ ● save   D             00:02:30   ← D = 差分保存
-● auto   D                00:03:00
-● save   D                00:04:12   ◀ current
+● initial                           00:00:00
+● save                  +120 L     00:01:05
+└─ ● save              +1 L       00:02:30
+● auto                 +3 L       00:03:00
+● save   ✎ メモ       +5 L       00:04:12   ◀ current
 ```
 
 - ハイライトされた行が現在位置です。
-- `F` は full snapshot、`D` は delta snapshot です。
+- サイズ差分（例: `+120 L`）は現在ノードとの行数差分です。
+- `✎ メモ` はユーザーが付与したメモです。クリックで編集できます。
 - サイドバーの枝線は SVG コネクタで描画されています。
+- `undotree.showStorageKind` を有効にすると `F`（full）/ `D`（delta）バッジが表示されます。
 
 ### ステータスバー
 
@@ -84,6 +91,7 @@ Undo  Redo  Pause  Diff  [menu]
 - `Save Persisted State`
 - `Restore Persisted State`
 - `Compact History`
+- `Hard Compact`（`undotree.hardCompactAfterDays` より古いノードを削除）
 - `Pause Tracking` / `Resume Tracking`
 - `Toggle Tracking for This Extension`
 
@@ -138,8 +146,18 @@ graph LR
 | 設定 | デフォルト | 説明 |
 |------|-----------|------|
 | `undotree.enabledExtensions` | `[".txt", ".md"]` | 自動追跡するファイル拡張子 |
-| `undotree.excludePatterns` | `[]` | 除外するファイル名パターン (`*` ワイルドカード対応) |
+| `undotree.excludePatterns` | `[]` | 除外するファイル名パターン（`*` ワイルドカード対応） |
 | `undotree.persistenceMode` | `"manual"` | `manual` は手動保存のみ、`auto` は履歴更新後に自動保存 |
+| `undotree.autosaveInterval` | `30` | 自動スナップショット間隔（秒）。`0` で無効、最小 5 |
+| `undotree.timeFormat` | `"time"` | タイムスタンプ形式: `none`、`time`（HH:mm:ss）、`dateTime`、`custom` |
+| `undotree.timeFormatCustom` | `"yyyy-MM-dd HH:mm:ss"` | カスタム時刻書式（date-fns 形式）。`timeFormat: custom` のときに使用 |
+| `undotree.showStorageKind` | `false` | 各ノードに `F`/`D` ストレージバッジを表示 |
+| `undotree.nodeSizeMetric` | `"lines"` | ノードのサイズ指標: `none`、`lines`、`bytes` |
+| `undotree.nodeSizeMetricBase` | `"current"` | サイズ差分の基準: `current`（現在ノード）または `initial`（初期ノード） |
+| `undotree.compressionThresholdKB` | `100` | full ノードの合計サイズ（KB）がこの値を超えるとツリーファイルを gzip 圧縮 |
+| `undotree.checkpointThresholdKB` | `1000` | full コンテンツをこのサイズ（KB）以上のときに別ファイルに分離 |
+| `undotree.contentCacheMaxKB` | `20480` | チェックポイントのインメモリキャッシュ上限（KB）。LRU 方式 |
+| `undotree.hardCompactAfterDays` | `0` | Hard Compact の日数閾値。`0` でコマンドを無効化 |
 
 **設定例:**
 
@@ -147,7 +165,9 @@ graph LR
 {
   "undotree.enabledExtensions": [".txt", ".md", ".js", ".ts"],
   "undotree.excludePatterns": ["*.min.*", "CHANGELOG*"],
-  "undotree.persistenceMode": "auto"
+  "undotree.persistenceMode": "auto",
+  "undotree.nodeSizeMetric": "lines",
+  "undotree.hardCompactAfterDays": 30
 }
 ```
 
