@@ -64,15 +64,20 @@ async function persistStateToDisk(
     const entries = Object.entries(state.trees);
     const referencedHashes = new Set<string>();
 
+    // メモリにないツリーを既存 manifest から保持（上書き保存で消えないようにする）
+    const existingManifest = await readPersistedManifest(context);
+    const inMemoryUris = new Set(entries.map(([uri]) => uri));
+    const preservedEntries = (existingManifest?.trees ?? []).filter(e => !inMemoryUris.has(e.uri));
+
     const manifest: PersistedManifest = {
         version: 1,
         savedAt: Date.now(),
         nextId: state.nextId,
         paused,
-        trees: entries.map(([uri]) => ({
-            uri,
-            file: makeTreeFileName(uri),
-        })),
+        trees: [
+            ...entries.map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
+            ...preservedEntries,
+        ],
     };
 
     await Promise.all(entries.map(async ([uri, tree]) => {
@@ -124,15 +129,9 @@ async function persistStateToDisk(
         }
     }));
 
-    // 不要なコンテンツファイルを削除
-    if (referencedHashes.size > 0 || (await fs.readdir(contentDir).catch(() => [])).length > 0) {
-        const contentFiles = await fs.readdir(contentDir).catch(() => [] as string[]);
-        await Promise.all(contentFiles
-            .filter((f) => !referencedHashes.has(f))
-            .map((f) => fs.unlink(path.join(contentDir, f)).catch(() => undefined))
-        );
-    }
+    // コンテンツファイルは削除しない（保存済みツリーが参照している可能性があるため）
 
+    // マニフェストにないツリーファイルのみ削除（保存済みツリーは保持）
     const expectedFiles = new Set(manifest.trees.map((entry) => entry.file));
     expectedFiles.add('manifest.json');
     expectedFiles.add('content'); // サブディレクトリは除外しない
@@ -671,13 +670,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.window.onDidChangeActiveTextEditor((e) => {
             void (async () => {
+                manager?.onDidChangeActiveEditor(e);
                 if (e && isTracked(e.document) && manager) {
                     await ensureTreeLoaded(context, manager, e.document);
                 }
+                provider.refresh();
+                updateStatusBar(e);
             })();
-            manager?.onDidChangeActiveEditor(e);
-            provider.refresh();
-            updateStatusBar(e);
         }),
 
         vscode.workspace.onDidChangeConfiguration((e) => {
