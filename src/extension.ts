@@ -614,12 +614,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
                 return;
             }
+            const deleteLabel = vscode.l10n.t('Delete');
             const confirm = await vscode.window.showWarningMessage(
                 vscode.l10n.t('Undo Tree: delete nodes older than {0} day(s)? This cannot be undone.', days),
                 { modal: true },
-                vscode.l10n.t('Delete')
+                deleteLabel
             );
-            if (confirm !== vscode.l10n.t('Delete')) {
+            if (confirm !== deleteLabel) {
                 return;
             }
             const tree = manager.getTree(editor.document.uri);

@@ -348,8 +348,8 @@ ${mode === 'diff' ? '<div class="diff-badge">Diff mode - click node to compare w
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       const noteHtml = node.note
-        ? '<span class="note" title="' + escHtml(node.note) + ' (click to edit)" onclick="event.stopPropagation();send(\'editNote\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
-        : '<span class="note-edit" title="Add note" onclick="event.stopPropagation();send(\'editNote\',{nodeId:' + node.id + '})">✎</span>';
+        ? '<span class="note" title="' + escHtml(node.note) + ' (click to edit)" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
+        : '<span class="note-edit" title="Add note" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">✎</span>';
       const sizeDiffHtml = (isCurrent && node.id !== 0) ? '' : formatSizeDiff(node, map[currentId]);
       const labelHtml = node.note ? '' : '<span class="label">' + node.label + '</span>';
       div.innerHTML =
