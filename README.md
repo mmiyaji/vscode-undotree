@@ -83,6 +83,27 @@ The status bar item in the lower right shows the tracking state of the current f
 
 Hover over the item to see the detected extension, enabled list, and exclude state.
 
+### Keyboard shortcuts (sidebar panel)
+
+When the sidebar panel has focus:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move focus up |
+| `↓` / `j` | Move focus down |
+| `←` | Move focus to parent node |
+| `→` | Move focus to last child node |
+| `Tab` / `Shift+Tab` | Move to next / previous sibling |
+| `Home` | Move focus to first node |
+| `End` | Move focus to last node |
+| `Enter` / `Space` | Jump to focused node (or compare in Diff mode) |
+| `u` | Undo (move to parent of current node) |
+| `r` | Redo (move to last child of current node) |
+| `d` | Toggle Navigate / Diff mode |
+| `p` | Toggle Pause / Resume |
+| `n` | Move focus to next noted node |
+| `N` | Move focus to previous noted node |
+
 ### Actions menu
 
 The settings menu includes:
