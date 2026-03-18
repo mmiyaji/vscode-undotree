@@ -558,3 +558,53 @@ describe('cleanup', () => {
         expect(node?.storage.kind).toBe('full');
     });
 });
+
+// -----------------------------------------------
+// セッション復元: reconcileCurrentNode
+// -----------------------------------------------
+describe('reconcileCurrentNode', () => {
+    it('ハッシュ一致するノードにcurrentIdを設定する', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('v1'));
+        manager.onDidSaveTextDocument(makeDocument('v2'));
+        manager.onDidSaveTextDocument(makeDocument('v3'));
+
+        const tree = manager.getTree(uri);
+        const v2Id = Array.from(tree.nodes.values()).find((n) => n.label === 'save' && manager.reconstructContent(tree, n.id) === 'v2')?.id;
+        expect(v2Id).toBeDefined();
+
+        // currentId をリセットして reconcile
+        tree.currentId = 0;
+        manager.reconcileCurrentNode(uri, 'v2');
+        expect(tree.currentId).toBe(v2Id);
+    });
+
+    it('ハッシュ不一致の場合はrootIdにフォールバックする', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('v1'));
+        manager.onDidSaveTextDocument(makeDocument('v2'));
+
+        const tree = manager.getTree(uri);
+        tree.currentId = 999; // 不正な状態
+        manager.reconcileCurrentNode(uri, 'unknown content');
+        expect(tree.currentId).toBe(tree.rootId);
+    });
+
+    it('ツリーが存在しない場合は何もしない', () => {
+        const manager = new UndoTreeManager();
+        expect(() => manager.reconcileCurrentNode(makeUri('file:///nonexistent.md'), 'content')).not.toThrow();
+    });
+
+    it('currentノードのコンテンツと一致する場合はそのまま維持される', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('hello'));
+
+        const tree = manager.getTree(uri);
+        const originalCurrentId = tree.currentId;
+        manager.reconcileCurrentNode(uri, 'hello');
+        expect(tree.currentId).toBe(originalCurrentId);
+    });
+});

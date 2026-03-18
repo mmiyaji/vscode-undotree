@@ -354,7 +354,76 @@ describe('compactパフォーマンス', () => {
 });
 
 // -----------------------------------------------
-// 6. DAG収束パフォーマンス
+// 6. ハッシュ計算パフォーマンス（ファイルサイズ別）
+// -----------------------------------------------
+describe('ハッシュ計算パフォーマンス（ファイルサイズ別）', () => {
+    const sizes: Array<{ label: string; bytes: number; limitMs: number }> = [
+        { label: '1 KB',   bytes: 1_024,         limitMs: 5   },
+        { label: '10 KB',  bytes: 10_240,        limitMs: 5   },
+        { label: '100 KB', bytes: 102_400,       limitMs: 10  },
+        { label: '1 MB',   bytes: 1_048_576,     limitMs: 50  },
+        { label: '5 MB',   bytes: 5_242_880,     limitMs: 200 },
+    ];
+
+    // 各サイズごとに: 初回保存(ハッシュ計算) + reconcileCurrentNode(ハッシュ計算+lookup) を計測
+    for (const { label, bytes, limitMs } of sizes) {
+        it(`${label}: addNode時のハッシュ計算が${limitMs}ms以内`, () => {
+            const manager = createManager();
+            const content = 'a'.repeat(bytes);
+
+            // JITウォームアップ
+            manager.onDidSaveTextDocument(makeDocument(content + 'x'));
+
+            const ms = elapsed(() => {
+                manager.onDidSaveTextDocument(makeDocument(content));
+            });
+
+            console.log(`  addNode hash [${label}]: ${ms.toFixed(3)}ms`);
+            expect(ms).toBeLessThan(limitMs);
+        });
+
+        it(`${label}: reconcileCurrentNode（ハッシュ計算+hashMapルックアップ）が${limitMs}ms以内`, () => {
+            const manager = createManager();
+            const uri = makeUri();
+            const content = 'a'.repeat(bytes);
+            manager.onDidSaveTextDocument(makeDocument(content));
+
+            // JITウォームアップ
+            manager.reconcileCurrentNode(uri, content);
+
+            const ms = elapsed(() => {
+                manager.reconcileCurrentNode(uri, content);
+            });
+
+            console.log(`  reconcile   [${label}]: ${ms.toFixed(3)}ms`);
+            expect(ms).toBeLessThan(limitMs);
+        });
+    }
+
+    it('ファイルサイズ別ハッシュ計算時間の一覧（参考）', () => {
+        const results: string[] = [];
+        for (const { label, bytes } of sizes) {
+            const manager = createManager();
+            const content = 'a'.repeat(bytes);
+
+            // ウォームアップ
+            manager.onDidSaveTextDocument(makeDocument(content));
+
+            // 計測: 10回平均
+            const uri = makeUri();
+            let total = 0;
+            for (let i = 0; i < 10; i++) {
+                total += elapsed(() => manager.reconcileCurrentNode(uri, content));
+            }
+            results.push(`${label.padStart(6)}: avg ${(total / 10).toFixed(3)}ms`);
+        }
+        console.log('\n--- ハッシュ計算時間（reconcileCurrentNode, 10回平均） ---');
+        results.forEach((r) => console.log('  ' + r));
+    });
+});
+
+// -----------------------------------------------
+// 7. DAG収束パフォーマンス
 // -----------------------------------------------
 describe('DAG収束パフォーマンス', () => {
     it('100回のDAG収束検索が10ms以内', () => {

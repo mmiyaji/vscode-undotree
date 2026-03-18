@@ -484,6 +484,20 @@ export class UndoTreeManager implements vscode.Disposable {
         this.onRefresh?.();
     }
 
+    reconcileCurrentNode(uri: vscode.Uri, content: string): void {
+        const tree = this.trees.get(uri.toString());
+        if (!tree) {
+            return;
+        }
+        const hash = this.hashContent(content);
+        const matchedId = tree.hashMap.get(hash);
+        if (matchedId !== undefined && tree.nodes.has(matchedId)) {
+            tree.currentId = matchedId;
+        } else {
+            tree.currentId = tree.rootId;
+        }
+    }
+
     syncDocumentState(uri: vscode.Uri, content: string, label = 'restore'): UndoTree {
         const tree = this.getTree(uri, content);
         const currentContent = this.reconstructContent(tree, tree.currentId);

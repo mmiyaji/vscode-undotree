@@ -173,6 +173,8 @@ async function ensureTreeLoaded(
         const persisted = await loadPersistedTreeFromDisk(context, document.uri);
         if (persisted) {
             treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
+            treeManager.reconcileCurrentNode(document.uri, document.getText());
+            return;
         }
     }
 
@@ -190,7 +192,7 @@ async function restoreTreeForDocument(
     }
 
     treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-    treeManager.syncDocumentState(document.uri, document.getText());
+    treeManager.reconcileCurrentNode(document.uri, document.getText());
     return true;
 }
 
