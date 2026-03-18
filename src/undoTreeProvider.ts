@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 import * as vscode from 'vscode';
 import { format as formatDate } from 'date-fns';
@@ -14,7 +14,6 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private lastEditor?: vscode.TextEditor;
     private loadingRequest?: { uri: string; token: number };
     private loadingToken = 0;
-    isTracked: ((uri: vscode.Uri) => boolean) | undefined;
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
         if (editor) {
@@ -123,8 +122,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         if (!this.view) {
             return;
         }
-        const editor = vscode.window.activeTextEditor
-            ?? (this.lastEditor && !this.lastEditor.document.isClosed ? this.lastEditor : undefined);
+        const editor = vscode.window.activeTextEditor;
         const isLoadingCurrentEditor = !!editor &&
             this.loadingRequest?.uri === editor.document.uri.toString();
 
@@ -143,7 +141,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind);
             return;
         }
-        if (this.isTracked && !this.isTracked(editor.document.uri)) {
+        if (!this.isTrackedDocument(editor.document)) {
             const fileName = editor.document.isUntitled ? '' : editor.document.fileName.replace(/.*[\\/]/, '');
             const ext = fileName.match(/\.[^.]+$/)?.[0] ?? '';
             this.view.webview.html = this.buildNotTrackedHtml(ext, fileName);
@@ -196,6 +194,30 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private getNodeSizeMetricBase(): 'current' | 'initial' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeSizeMetricBase');
         return value === 'initial' ? 'initial' : 'current';
+    }
+
+    private getEnabledExtensions(): string[] {
+        const value = vscode.workspace.getConfiguration('undotree').get<string[]>('enabledExtensions');
+        return Array.isArray(value) ? value : ['.txt', '.md'];
+    }
+
+    private getExcludePatterns(): string[] {
+        const value = vscode.workspace.getConfiguration('undotree').get<string[]>('excludePatterns');
+        return Array.isArray(value) ? value : [];
+    }
+
+    private matchesGlob(filename: string, pattern: string): boolean {
+        const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+        return new RegExp(`^${escaped}$`, 'i').test(filename);
+    }
+
+    private isTrackedDocument(document: vscode.TextDocument): boolean {
+        const fileName = document.fileName.replace(/.*[\\/]/, '');
+        if (this.getExcludePatterns().some((pattern) => this.matchesGlob(fileName, pattern))) {
+            return false;
+        }
+        const ext = fileName.match(/\.[^.]+$/)?.[0]?.toLowerCase() ?? '';
+        return this.getEnabledExtensions().map((value) => value.toLowerCase()).includes(ext);
     }
 
     private formatTimestamp(
@@ -343,18 +365,18 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
   function escHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
   function fmtLines(n) {
-    return n.toLocaleString() + 'L';
+    return n.toLocaleString() + ' L';
   }
   function fmtBytes(b) {
-    if (b >= 1024 * 1024) { return (b / (1024 * 1024)).toFixed(1) + 'MB'; }
-    if (b >= 1024) { return (b / 1024).toFixed(1) + 'KB'; }
-    return b + 'B';
+    if (b >= 1024 * 1024) { return (b / (1024 * 1024)).toFixed(1) + ' MB'; }
+    if (b >= 1024) { return (b / 1024).toFixed(1) + ' KB'; }
+    return b + ' B';
   }
   function formatSizeDiff(node, refNode) {
     if (nodeSizeMetric === 'none') { return ''; }
     const val = nodeSizeMetric === 'lines' ? node.lineCount : node.byteCount;
     if (val === undefined || val === null) { return ''; }
-    // 基準ノード自身 or 基準が取れない場合: 絶対値を表示
+    // 蝓ｺ貅悶ヮ繝ｼ繝芽・霄ｫ or 蝓ｺ貅悶′蜿悶ｌ縺ｪ縺・ｴ蜷・ 邨ｶ蟇ｾ蛟､繧定｡ｨ遉ｺ
     if (!refNode || node.id === refNode.id) {
       const str = nodeSizeMetric === 'lines' ? fmtLines(val) : fmtBytes(val);
       return '<span class="size-diff">' + str + '</span>';
@@ -367,7 +389,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
     if (nodeSizeMetric === 'lines') {
       return '<span class="size-diff ' + cls + '">' + sign + fmtLines(Math.abs(delta)) + '</span>';
     }
-    const str = delta !== 0 ? fmtBytes(Math.abs(delta)) : '0B';
+    const str = delta !== 0 ? fmtBytes(Math.abs(delta)) : '0 B';
     return '<span class="size-diff ' + cls + '">' + sign + str + '</span>';
   }
 
@@ -459,7 +481,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
-      document.getElementById('tree').innerHTML = '<div class="empty">${vscode.l10n.t('No active editor')}</div>';
+      document.getElementById('tree').innerHTML = '<div class="empty">${vscode.l10n.t('Undo Tree is only available for text editors.')}</div>';
       return;
     }
 
@@ -517,7 +539,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - click 
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       const noteHtml = node.note
         ? '<span class="note" title="' + escHtml(node.note) + i18n.noteClickToEdit + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
-        : '<span class="note-edit" title="' + i18n.noteAdd + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">✎</span>';
+        : '<span class="note-edit" title="' + i18n.noteAdd + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">&#9998;</span>';
       const refNode = (nodeSizeMetricBase === 'current' && isCurrent && node.id !== 0)
         ? node
         : nodeSizeMetricBase === 'initial' ? map[nodes[0].id] : map[currentId];

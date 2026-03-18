@@ -49,6 +49,48 @@ function makeTreeFileName(uri: string): string {
     return `${crypto.createHash('sha1').update(uri).digest('hex')}.json`;
 }
 
+function getPersistedContentHashes(
+    tree: NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>,
+    checkpointThreshold: number
+): Set<string> {
+    const totalFullBytes = tree.nodes.reduce((sum, node) => {
+        if (node.storage.kind === 'full') {
+            return sum + (node.byteCount ?? Buffer.byteLength(node.storage.content, 'utf8'));
+        }
+        return sum;
+    }, 0);
+
+    if (totalFullBytes < checkpointThreshold) {
+        return new Set<string>();
+    }
+
+    return new Set(
+        tree.nodes
+            .filter((node) => node.storage.kind === 'full' && node.storage.content !== '')
+            .map((node) => node.hash)
+    );
+}
+
+async function readPersistedContentHashesFromTreeFile(
+    treesDir: string,
+    fileName: string
+): Promise<Set<string>> {
+    const treePath = path.join(treesDir, fileName);
+    const buf = await fs.readFile(treePath);
+    const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+    const raw = isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
+    const parsed = JSON.parse(raw) as {
+        tree?: NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>;
+    };
+    const nodes = parsed.tree?.nodes ?? [];
+    return new Set(
+        nodes
+            .filter((node): node is typeof node & { storage: { kind: 'checkpoint'; contentHash: string } } =>
+                node.storage.kind === 'checkpoint')
+            .map((node) => node.storage.contentHash)
+    );
+}
+
 async function persistStateToDisk(
     context: vscode.ExtensionContext,
     state: ReturnType<UndoTreeManager['exportState']>,
@@ -63,6 +105,7 @@ async function persistStateToDisk(
     const compressionThreshold = getCompressionThresholdBytes();
     const checkpointThreshold = getCheckpointThresholdBytes();
     const allEntries = Object.entries(state.trees);
+    const referencedContentHashes = new Set<string>();
 
     // dirty なエントリのみ書き込む（undefined は全件）
     const writeEntries = dirtyUris
@@ -85,15 +128,32 @@ async function persistStateToDisk(
         ],
     };
 
+    for (const [, tree] of allEntries) {
+        for (const hash of getPersistedContentHashes(tree, checkpointThreshold)) {
+            referencedContentHashes.add(hash);
+        }
+    }
+
+    let canPruneContentFiles = true;
+    await Promise.all(preservedEntries.map(async (entry) => {
+        try {
+            for (const hash of await readPersistedContentHashesFromTreeFile(treesDir, entry.file)) {
+                referencedContentHashes.add(hash);
+            }
+        } catch {
+            canPruneContentFiles = false;
+        }
+    }));
+
     await Promise.all(writeEntries.map(async ([uri, tree]) => {
+        const contentHashes = getPersistedContentHashes(tree, checkpointThreshold);
+        const useCheckpoint = contentHashes.size > 0;
         const totalFullBytes = tree.nodes.reduce((sum, node) => {
             if (node.storage.kind === 'full') {
                 return sum + (node.byteCount ?? Buffer.byteLength(node.storage.content, 'utf8'));
             }
             return sum;
         }, 0);
-
-        const useCheckpoint = totalFullBytes >= checkpointThreshold;
         const useCompression = useCheckpoint || totalFullBytes >= compressionThreshold;
 
         // チェックポイントモード: fullコンテンツを別ファイルに分離
@@ -134,8 +194,6 @@ async function persistStateToDisk(
         }
     }));
 
-    // コンテンツファイルは削除しない（保存済みツリーが参照している可能性があるため）
-
     // マニフェストにないツリーファイルのみ削除（保存済みツリーは保持）
     const expectedFiles = new Set(manifest.trees.map((entry) => entry.file));
     expectedFiles.add('manifest.json');
@@ -150,6 +208,13 @@ async function persistStateToDisk(
         JSON.stringify(manifest, null, 2),
         'utf8'
     );
+
+    if (canPruneContentFiles) {
+        const existingContentFiles = await fs.readdir(contentDir, { withFileTypes: true });
+        await Promise.all(existingContentFiles
+            .filter((entry) => entry.isFile() && !referencedContentHashes.has(entry.name))
+            .map((entry) => fs.unlink(path.join(contentDir, entry.name))));
+    }
 
     return {
         rootDir,
@@ -335,9 +400,14 @@ function schedulePersistState(context: vscode.ExtensionContext) {
 
     const dirtyUris = manager!.getDirtyUris();
     persistTimer = setTimeout(() => {
-        manager!.clearDirty(dirtyUris);
-        void persistStateToDisk(context, manager!.exportState(), manager!.paused, dirtyUris);
-        persistTimer = undefined;
+        void persistStateToDisk(context, manager!.exportState(), manager!.paused, dirtyUris)
+            .then(() => {
+                manager?.clearDirty(dirtyUris);
+            })
+            .catch(() => {})
+            .finally(() => {
+                persistTimer = undefined;
+            });
     }, PERSIST_DEBOUNCE_MS);
 }
 
@@ -437,11 +507,6 @@ export async function activate(context: vscode.ExtensionContext) {
         const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
         return doc ? isTracked(doc) : false;
     };
-    provider.isTracked = (uri) => {
-        const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
-        return doc ? isTracked(doc) : false;
-    };
-
 
     // 既に開いているエディタのツリーを実際のコンテンツで初期化
     if (vscode.window.activeTextEditor && isTracked(vscode.window.activeTextEditor.document)) {
