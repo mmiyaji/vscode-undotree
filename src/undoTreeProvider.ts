@@ -98,10 +98,11 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 case 'editNote': {
-                    if (typeof message.nodeId !== 'number' || !editor) {
+                    const contextEditor = this.getContextEditor();
+                    if (typeof message.nodeId !== 'number' || !contextEditor) {
                         break;
                     }
-                    const tree = this.manager.getTree(editor.document.uri);
+                    const tree = this.manager.getTree(contextEditor.document.uri);
                     const node = tree.nodes.get(message.nodeId);
                     const input = await vscode.window.showInputBox({
                         prompt: 'Node note (empty to clear)',
@@ -111,7 +112,15 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                     if (input === undefined) {
                         break;
                     }
-                    this.manager.setNote(editor.document.uri, message.nodeId, input);
+                    this.manager.setNote(contextEditor.document.uri, message.nodeId, input);
+                    break;
+                }
+                case 'togglePin': {
+                    const contextEditor = this.getContextEditor();
+                    if (typeof message.nodeId !== 'number' || !contextEditor) {
+                        break;
+                    }
+                    this.manager.togglePinned(contextEditor.document.uri, message.nodeId);
                     break;
                 }
             }
@@ -170,6 +179,17 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             nodeSizeMetricBase,
             showStorageKind
         );
+    }
+
+    private getContextEditor(): vscode.TextEditor | undefined {
+        const active = vscode.window.activeTextEditor;
+        if (active && this.isTrackedDocument(active.document)) {
+            return active;
+        }
+        if (this.lastEditor && this.isTrackedDocument(this.lastEditor.document)) {
+            return this.lastEditor;
+        }
+        return active;
     }
 
     private getTimeFormat(): 'none' | 'time' | 'dateTime' | 'custom' {
@@ -329,6 +349,15 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
   .node:hover .note-edit:hover { opacity: 1; }
+  .pin-btn { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; margin-left: 6px; }
+  .node:hover .pin-btn, .pin-btn.active { opacity: 0.85; }
+  .pin-btn:hover { opacity: 1; }
+  .pinned-wrap { margin-bottom: 8px; }
+  .pinned-title { font-size: 10px; opacity: 0.55; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .pinned-link { display:flex; align-items:center; gap:4px; padding:2px 4px; cursor:pointer; border-radius:3px; white-space:nowrap; }
+  .pinned-link:hover { background: var(--vscode-list-hoverBackground); }
+  .pinned-link .pin-mark { opacity: 0.85; }
+  .pinned-link .pinned-label { opacity: 0.8; }
 </style>
 </head>
 <body>
@@ -341,6 +370,7 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
 </div>
 ${paused ? `<div class="paused-badge">${vscode.l10n.t('Tracking paused - history is frozen')}</div>` : ''}
 ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
+<div id="pinned"></div>
 <div id="tree"></div>
 <script>
   const vscode = acquireVsCodeApi();
@@ -355,6 +385,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   const i18n = {
     noteClickToEdit: ${JSON.stringify(vscode.l10n.t(' (click to edit)'))},
     noteAdd: ${JSON.stringify(vscode.l10n.t('Add note'))},
+    pinNode: ${JSON.stringify(vscode.l10n.t('Pin node'))},
+    unpinNode: ${JSON.stringify(vscode.l10n.t('Unpin node'))},
+    pinnedNodes: ${JSON.stringify(vscode.l10n.t('Pinned'))},
   };
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
@@ -514,7 +547,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     nodes.forEach((node) => { map[node.id] = node; });
     treeMap = map;
     const latestId = nodes.reduce((best, n) => n.timestamp > map[best].timestamp ? n.id : best, nodes[0].id);
+    const pinnedContainer = document.getElementById('pinned');
     const container = document.getElementById('tree');
+    pinnedContainer.innerHTML = '';
     container.innerHTML = '';
     nodeEls = [];
     nodeIds = [];
@@ -524,6 +559,34 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
 
     const visitedNodes = new Set();
+
+    const pinnedNodes = nodes.filter((node) => node.id !== 0 && node.pinned);
+    if (pinnedNodes.length > 0) {
+      const wrap = document.createElement('div');
+      wrap.className = 'pinned-wrap';
+      wrap.innerHTML = '<div class="pinned-title">' + i18n.pinnedNodes + '</div>';
+      pinnedNodes
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .forEach((node) => {
+          const row = document.createElement('div');
+          row.className = 'pinned-link';
+          row.innerHTML =
+            '<span class="pin-mark">&#128204;</span>' +
+            '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
+            (node.formattedTime ? '<span class="right-area"><span class="time">' + node.formattedTime + '</span></span>' : '');
+          row.addEventListener('click', () => {
+            const idx = nodeIds.indexOf(node.id);
+            if (idx >= 0) { setFocused(idx); }
+            if (mode === 'diff') {
+              send('diffWithNode', { nodeId: node.id });
+            } else {
+              send('jumpToNode', { nodeId: node.id });
+            }
+          });
+          wrap.appendChild(row);
+        });
+      pinnedContainer.appendChild(wrap);
+    }
 
     function renderSegment(kind) {
       switch (kind) {
@@ -565,6 +628,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       const noteHtml = node.note
         ? '<span class="note" title="' + escHtml(node.note) + i18n.noteClickToEdit + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
         : '<span class="note-edit" title="' + i18n.noteAdd + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">&#9998;</span>';
+      const pinHtml = '<span class="pin-btn' + (node.pinned ? ' active' : '') + '" title="' + (node.pinned ? i18n.unpinNode : i18n.pinNode) + '" onclick="event.stopPropagation();send(\\'togglePin\\',{nodeId:' + node.id + '})">&#128204;</span>';
       const refNode = (nodeSizeMetricBase === 'current' && isCurrent && node.id !== 0)
         ? node
         : nodeSizeMetricBase === 'initial' ? map[nodes[0].id] : map[currentId];
@@ -577,7 +641,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-        '<span class="right-area">' + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + node.formattedTime + '</span>' : '') + '</span>';
+        '<span class="right-area">' + pinHtml + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + node.formattedTime + '</span>' : '') + '</span>';
       div.addEventListener('click', () => {
         const idx = nodeIds.indexOf(node.id);
         if (idx >= 0) { setFocused(idx); }

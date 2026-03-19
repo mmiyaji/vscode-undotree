@@ -23,6 +23,7 @@ export type UndoNode = {
     hash: string;
     storage: UndoNodeStorage;
     note?: string;
+    pinned?: boolean;
     lineCount?: number;
     byteCount?: number;
 };
@@ -43,6 +44,7 @@ export type SerializedUndoNode = {
     hash: string;
     storage: UndoNodeStorage;
     note?: string;
+    pinned?: boolean;
     lineCount?: number;
     byteCount?: number;
 };
@@ -64,6 +66,7 @@ export type CompactPreviewItem = {
     label: string;
     timestamp: number;
     note?: string;
+    pinned?: boolean;
     reason: string;
     storageKind: UndoNodeStorage['kind'];
     status?: 'remove' | 'keep';
@@ -660,6 +663,7 @@ export class UndoTreeManager implements vscode.Disposable {
                             ),
                         },
                     ...(node.note !== undefined ? { note: node.note } : {}),
+                    ...(node.pinned !== undefined ? { pinned: node.pinned } : {}),
                     ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
                     ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
                 })),
@@ -698,6 +702,7 @@ export class UndoTreeManager implements vscode.Disposable {
                             ),
                         },
                     ...(node.note !== undefined ? { note: node.note } : {}),
+                    ...(node.pinned !== undefined ? { pinned: node.pinned } : {}),
                     ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
                     ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
                 }])),
@@ -735,6 +740,7 @@ export class UndoTreeManager implements vscode.Disposable {
                         ),
                     },
                 ...(node.note !== undefined ? { note: node.note } : {}),
+                ...(node.pinned !== undefined ? { pinned: node.pinned } : {}),
                 ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
                 ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
             }])),
@@ -773,6 +779,32 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         const trimmed = note.trim();
         node.note = trimmed || undefined;
+        this.onRefresh?.();
+    }
+
+    setPinned(uri: vscode.Uri, nodeId: number, pinned: boolean): void {
+        const tree = this.trees.get(uri.toString());
+        if (!tree) {
+            return;
+        }
+        const node = tree.nodes.get(nodeId);
+        if (!node) {
+            return;
+        }
+        node.pinned = pinned || undefined;
+        this.onRefresh?.();
+    }
+
+    togglePinned(uri: vscode.Uri, nodeId: number): void {
+        const tree = this.trees.get(uri.toString());
+        if (!tree) {
+            return;
+        }
+        const node = tree.nodes.get(nodeId);
+        if (!node) {
+            return;
+        }
+        node.pinned = !node.pinned || undefined;
         this.onRefresh?.();
     }
 
@@ -844,6 +876,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private isCompressible(tree: UndoTree, node: UndoNode): boolean {
         if (node.id === tree.currentId) { return false; }
         if (node.note) { return false; }
+        if (node.pinned) { return false; }
         if (node.parents.length !== 1) { return false; }
         if (node.children.length !== 1) { return false; }
         const kind = this.classifyNode(node);
@@ -901,6 +934,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 aid = anode && anode.parents.length > 0 ? anode.parents[anode.parents.length - 1] : undefined;
             }
         }
+        const hasPinnedAncestor = this.collectPinnedAncestors(tree);
 
         // Step 3: 削除対象サブツリーを収集（DFS）
         const toDelete = new Set<number>();
@@ -927,7 +961,7 @@ export class UndoTreeManager implements vscode.Disposable {
             }
 
             const isExpired = (now - node.timestamp) > thresholdMs;
-            const isProtected = node.note || hasNotedAncestor.has(nodeId);
+            const isProtected = node.note || node.pinned || hasNotedAncestor.has(nodeId) || hasPinnedAncestor.has(nodeId);
 
             if (isExpired && !isProtected) {
                 markSubtree(nodeId);
@@ -1026,6 +1060,7 @@ export class UndoTreeManager implements vscode.Disposable {
             label: node.label,
             timestamp: node.timestamp,
             note: node.note,
+            pinned: node.pinned,
             reason,
             storageKind: node.storage.kind,
             parents: [...node.parents],
@@ -1040,6 +1075,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private getCompactBlockReason(tree: UndoTree, node: UndoNode): string | undefined {
         if (node.id === tree.currentId) { return 'current node'; }
         if (node.note) { return 'has note'; }
+        if (node.pinned) { return 'pinned node'; }
         if (node.parents.length !== 1) { return 'branch or root connection'; }
         if (node.children.length !== 1) { return 'branch point or leaf'; }
         const kind = this.classifyNode(node);
@@ -1079,6 +1115,21 @@ export class UndoTreeManager implements vscode.Disposable {
         return hasNotedAncestor;
     }
 
+    private collectPinnedAncestors(tree: UndoTree): Set<number> {
+        const hasPinnedAncestor = new Set<number>();
+        for (const [nodeId, node] of tree.nodes) {
+            if (!node.pinned) { continue; }
+            let aid: number | undefined = nodeId;
+            while (aid !== undefined) {
+                if (hasPinnedAncestor.has(aid)) { break; }
+                hasPinnedAncestor.add(aid);
+                const anode = tree.nodes.get(aid);
+                aid = anode && anode.parents.length > 0 ? anode.parents[anode.parents.length - 1] : undefined;
+            }
+        }
+        return hasPinnedAncestor;
+    }
+
     private canManuallyRemove(tree: UndoTree, node: UndoNode): boolean {
         return this.getManualRemoveBlockReason(tree, node) === undefined;
     }
@@ -1089,6 +1140,9 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         if (node.id === tree.currentId) {
             return 'current node cannot be removed';
+        }
+        if (node.pinned) {
+            return 'pinned node cannot be removed';
         }
         if (node.parents.length !== 1) {
             return 'requires exactly one parent';
@@ -1104,6 +1158,7 @@ export class UndoTreeManager implements vscode.Disposable {
         const now = Date.now();
         const currentAncestors = this.collectCurrentAncestors(tree);
         const hasNotedAncestor = this.collectNotedAncestors(tree);
+        const hasPinnedAncestor = this.collectPinnedAncestors(tree);
         const keptAncestors = new Set<number>();
         if (overrides) {
             for (const [nodeId, action] of overrides) {
@@ -1145,7 +1200,7 @@ export class UndoTreeManager implements vscode.Disposable {
             }
 
             const isExpired = (now - node.timestamp) > thresholdMs;
-            const isProtected = node.note || hasNotedAncestor.has(nodeId) || keptAncestors.has(nodeId);
+            const isProtected = node.note || node.pinned || hasNotedAncestor.has(nodeId) || hasPinnedAncestor.has(nodeId) || keptAncestors.has(nodeId);
 
             if (isExpired && !isProtected) {
                 markSubtree(nodeId);
@@ -1165,11 +1220,18 @@ export class UndoTreeManager implements vscode.Disposable {
         const ageMs = Date.now() - node.timestamp;
         const currentAncestors = this.collectCurrentAncestors(tree);
         const hasNotedAncestor = this.collectNotedAncestors(tree);
+        const hasPinnedAncestor = this.collectPinnedAncestors(tree);
         if (node.id === tree.currentId) {
             return 'current node';
         }
         if (currentAncestors.has(node.id)) {
             return 'current path';
+        }
+        if (node.pinned) {
+            return 'pinned node';
+        }
+        if (hasPinnedAncestor.has(node.id)) {
+            return 'ancestor of pinned node';
         }
         if (node.note) {
             return 'has note';
@@ -1203,6 +1265,7 @@ export class UndoTreeManager implements vscode.Disposable {
                                             eventDiffs.map((diff: Diff) => ({ ...diff }))
                                         ),
                                     },
+                        ...(node.pinned !== undefined ? { pinned: node.pinned } : {}),
                     },
                 ])
             ),
