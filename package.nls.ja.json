@@ -25,5 +25,6 @@
   "commands.hardCompact.title": "Undo Tree: 古い履歴を圧縮",
   "commands.compactDryRun.title": "Undo Tree: 履歴圧縮プレビュー",
   "commands.hardCompactDryRun.title": "Undo Tree: 古い履歴圧縮プレビュー",
-  "views.treeView.name": "Undo Tree"
+  "views.treeView.name": "Undo Tree",
+  "commands.resetAllState.title": "Undo Tree: すべての状態を初期化"
 }

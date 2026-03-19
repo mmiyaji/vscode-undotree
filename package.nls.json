@@ -7,6 +7,7 @@
   "commands.compact.title": "Undo Tree: Compact History",
   "commands.compactDryRun.title": "Undo Tree: Compact History Preview",
   "commands.savePersistedState.title": "Undo Tree: Save Persisted State",
+  "commands.resetAllState.title": "Undo Tree: Reset All State",
   "commands.restorePersistedState.title": "Undo Tree: Restore Persisted State",
   "commands.showMenu.title": "Undo Tree: Show Menu",
   "commands.hardCompactDryRun.title": "Undo Tree: Hard Compact Preview",

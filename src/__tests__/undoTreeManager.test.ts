@@ -574,6 +574,19 @@ describe('cleanup', () => {
         const node = tree.nodes.get(tree.currentId);
         expect(node?.storage.kind).toBe('full');
     });
+
+    it('can unload a persisted tree from memory explicitly', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello', 'file:///unload.md');
+
+        manager.onDidSaveTextDocument(doc);
+        expect(manager.hasTree(doc.uri)).toBe(true);
+
+        manager.unloadTree(doc.uri);
+
+        expect(manager.hasTree(doc.uri)).toBe(false);
+        expect(manager.getDirtyUris().has(doc.uri.toString())).toBe(false);
+    });
 });
 
 // -----------------------------------------------
@@ -942,6 +955,27 @@ describe('dirtyTrees', () => {
         expect(dirty.has('file:///a.md')).toBe(true);
         expect(dirty.has('file:///b.md')).toBe(true);
         expect(dirty.has('file:///c.md')).toBe(true);
+    });
+
+    it('resetAll clears tracked trees and dirty state and starts fresh afterwards', () => {
+        const manager = new UndoTreeManager();
+        const doc = makeDocument('Hello', 'file:///reset.md');
+        manager.onDidSaveTextDocument(doc);
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument('Hello!', 'file:///reset.md'), [{ offset: 5, removeLength: 0, text: '!' }])
+        );
+
+        expect(manager.hasTree(doc.uri)).toBe(true);
+        expect(manager.getDirtyUris().has(doc.uri.toString())).toBe(true);
+
+        manager.resetAll();
+
+        expect(manager.hasTree(doc.uri)).toBe(false);
+        expect(manager.getDirtyUris().size).toBe(0);
+
+        const freshTree = manager.getTree(doc.uri);
+        expect(freshTree.nodes.size).toBe(1);
+        expect(freshTree.currentId).toBe(0);
     });
 });
 

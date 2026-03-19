@@ -14,9 +14,10 @@ import { UndoTreeProvider } from './undoTreeProvider';
 import { CompactPreviewItem, CompactPreviewResult, UndoTreeManager } from './undoTreeManager';
 
 // バーチャルドキュメント（差分表示用）
-class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
+export class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
     private contents = new Map<string, string>();
     private readonly onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
+    private readonly maxEntries = 24;
 
     readonly onDidChange = this.onDidChangeEmitter.event;
 
@@ -24,13 +25,41 @@ class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvi
         const normalizedExt = ext.startsWith('.') ? ext : `.${ext}`;
         const id = key ?? `node_${this.contents.size}`;
         const uri = vscode.Uri.parse(`undotree:/${encodeURIComponent(id)}${normalizedExt}`);
+        if (this.contents.has(uri.toString())) {
+            this.contents.delete(uri.toString());
+        }
         this.contents.set(uri.toString(), content);
+        while (this.contents.size > this.maxEntries) {
+            const oldest = this.contents.keys().next().value;
+            if (!oldest) {
+                break;
+            }
+            this.contents.delete(oldest);
+        }
         this.onDidChangeEmitter.fire(uri);
         return uri;
     }
 
     provideTextDocumentContent(uri: vscode.Uri): string {
-        return this.contents.get(uri.toString()) ?? '';
+        const key = uri.toString();
+        const content = this.contents.get(key) ?? '';
+        if (this.contents.has(key)) {
+            this.contents.delete(key);
+            this.contents.set(key, content);
+        }
+        return content;
+    }
+
+    releaseByPrefix(prefix: string): void {
+        for (const key of Array.from(this.contents.keys())) {
+            if (key.includes(encodeURIComponent(prefix))) {
+                this.contents.delete(key);
+            }
+        }
+    }
+
+    clear(): void {
+        this.contents.clear();
     }
 }
 
@@ -591,6 +620,11 @@ async function restoreTreeForDocument(
     return true;
 }
 
+async function removePersistedState(context: vscode.ExtensionContext) {
+    const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
+    await fs.rm(treesDir, { recursive: true, force: true });
+}
+
 function getEnabledExtensions(): string[] {
     const value = vscode.workspace
         .getConfiguration('undotree')
@@ -684,6 +718,23 @@ async function flushPersistState(context: vscode.ExtensionContext) {
 
     await persistStateToDisk(context, manager.exportState(), manager.paused, dirtyUris);
     manager.clearDirty(dirtyUris);
+}
+
+async function flushPersistedUri(context: vscode.ExtensionContext, uri: vscode.Uri) {
+    if (!manager || getPersistenceMode() !== 'auto') {
+        return;
+    }
+
+    if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = undefined;
+    }
+
+    const dirtyUris = manager.getDirtyUris();
+    if (dirtyUris.has(uri.toString())) {
+        await persistStateToDisk(context, manager.exportState(), manager.paused, new Set([uri.toString()]));
+        manager.clearDirty([uri.toString()]);
+    }
 }
 
 function matchesGlob(filename: string, pattern: string): boolean {
@@ -798,6 +849,10 @@ function getCompactPreviewContextEditor(editor: vscode.TextEditor | undefined): 
         }
     }
     return getTrackedContextEditor(editor);
+}
+
+function getDiffKeyBase(uri: vscode.Uri): string {
+    return `diff-${crypto.createHash('sha1').update(uri.toString()).digest('hex')}`;
 }
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -999,6 +1054,50 @@ export async function activate(context: vscode.ExtensionContext) {
             );
         }),
 
+        vscode.commands.registerCommand('undotree.resetAllState', async () => {
+            if (!manager) {
+                return;
+            }
+
+            const resetLabel = vscode.l10n.t('Reset');
+            const confirmed = await vscode.window.showWarningMessage(
+                vscode.l10n.t(
+                    'Undo Tree: delete all in-memory and persisted history for this workspace? This only resets Undo Tree history and does not roll back the current file contents. This cannot be undone.'
+                ),
+                { modal: true },
+                resetLabel
+            );
+            if (confirmed !== resetLabel) {
+                return;
+            }
+
+            if (persistTimer) {
+                clearTimeout(persistTimer);
+                persistTimer = undefined;
+            }
+
+            compactPreviewOverrides.clear();
+            compactPreviewTargetUri = undefined;
+            contentProvider.clear();
+            if (compactPreviewPanel) {
+                compactPreviewPanel.dispose();
+                compactPreviewPanel = undefined;
+            }
+
+            await removePersistedState(context);
+            manager.resetAll();
+            manager.paused = false;
+
+            const editor = vscode.window.activeTextEditor;
+            if (editor && isTracked(editor.document)) {
+                manager.getTree(editor.document.uri, editor.document.getText());
+            }
+
+            provider.refresh();
+            updateStatusBar(vscode.window.activeTextEditor);
+            vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: all history has been reset.'));
+        }),
+
         vscode.commands.registerCommand('undotree.restorePersistedState', async () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor || !manager) {
@@ -1036,6 +1135,11 @@ export async function activate(context: vscode.ExtensionContext) {
                     label: vscode.l10n.t('$(save) Save Persisted State'),
                     description: vscode.l10n.t('Write tracked histories to extension storage'),
                     command: 'undotree.savePersistedState',
+                },
+                {
+                    label: vscode.l10n.t('$(trash) Reset Undo Tree State'),
+                    description: vscode.l10n.t('Delete all in-memory and persisted Undo Tree history for this workspace'),
+                    command: 'undotree.resetAllState',
                 },
                 {
                     label: getPersistenceMode() === 'auto'
@@ -1129,7 +1233,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             const tree = manager.getTree(editor.document.uri);
             const ext = path.extname(editor.document.fileName) || '.txt';
-            const diffKeyBase = crypto.createHash('sha1').update(editor.document.uri.toString()).digest('hex');
+            const diffKeyBase = getDiffKeyBase(editor.document.uri);
 
             const targetContent = manager.reconstructContent(tree, targetNodeId);
             const currentContent = editor.document.getText();
@@ -1139,18 +1243,18 @@ export async function activate(context: vscode.ExtensionContext) {
             const targetLabel = targetNode ? `node${targetNodeId} (${targetNode.label})` : `node${targetNodeId}`;
             const currentLabel = currentNode ? `current (${currentNode.label})` : 'current';
 
-            const targetUri = contentProvider.prepare(targetContent, ext, `diff-${diffKeyBase}-target`);
-            const currentUri = contentProvider.prepare(currentContent, ext, `diff-${diffKeyBase}-current`);
+            const targetUri = contentProvider.prepare(targetContent, ext, `${diffKeyBase}-target`);
+            const currentUri = contentProvider.prepare(currentContent, ext, `${diffKeyBase}-current`);
 
             await vscode.commands.executeCommand(
                 'vscode.diff',
                 targetUri,
                 currentUri,
-                vscode.l10n.t('Undo Tree: {0} \u2194 {1}', targetLabel, currentLabel),
+                vscode.l10n.t('Undo Tree Diff: {0}', path.basename(editor.document.fileName)),
                 {
                     preview: true,
                     preserveFocus: true,
-                    viewColumn: vscode.ViewColumn.Beside,
+                    viewColumn: editor.viewColumn ?? vscode.ViewColumn.Active,
                 }
             );
         }),
@@ -1275,6 +1379,21 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.workspace.onDidCloseTextDocument((doc) => {
             manager?.onDidCloseTextDocument(doc);
+            contentProvider.releaseByPrefix(getDiffKeyBase(doc.uri));
+            void (async () => {
+                if (!manager || !isTracked(doc)) {
+                    return;
+                }
+                if (getPersistenceMode() !== 'auto' || !manager.hasTree(doc.uri)) {
+                    return;
+                }
+                try {
+                    await flushPersistedUri(context, doc.uri);
+                    manager.unloadTree(doc.uri);
+                } catch {
+                    // Keep the in-memory tree if persisting fails.
+                }
+            })();
         }),
 
         vscode.workspace.onDidOpenTextDocument((doc) => {

@@ -265,6 +265,24 @@ export class UndoTreeManager implements vscode.Disposable {
         }
     }
 
+    resetAll(): void {
+        this.trees.clear();
+        this.diffBuffer.clear();
+        this.dirtyTrees.clear();
+        this.contentCache.clear();
+        this.contentCacheBytes = 0;
+        this.nextId = 1;
+        this.onRefresh?.();
+    }
+
+    unloadTree(uri: vscode.Uri): void {
+        const key = uri.toString();
+        this.trees.delete(key);
+        this.diffBuffer.delete(key);
+        this.dirtyTrees.delete(key);
+        this.onRefresh?.();
+    }
+
     onDidChangeTextDocument(e: vscode.TextDocumentChangeEvent) {
         if (e.contentChanges.length === 0 || this.restoring || this.paused) {
             return;

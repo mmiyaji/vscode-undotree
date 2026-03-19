@@ -55,6 +55,10 @@
         "title": "%commands.savePersistedState.title%"
       },
       {
+        "command": "undotree.resetAllState",
+        "title": "%commands.resetAllState.title%"
+      },
+      {
         "command": "undotree.restorePersistedState",
         "title": "%commands.restorePersistedState.title%"
       },
@@ -188,6 +192,11 @@
         "command": "undotree.show",
         "key": "ctrl+shift+u",
         "mac": "cmd+shift+u"
+      },
+      {
+        "command": "workbench.action.closeActiveEditor",
+        "key": "escape",
+        "when": "activeEditor == workbench.editors.textDiffEditor && textCompareEditorVisible && resourceScheme == undotree"
       }
     ]
   },
