@@ -22,6 +22,8 @@
   "config.checkpointThresholdKB.description": "fullノードのコンテンツを別ファイルに分離しレイジーロードするサイズ（KB）の閾値です。compressionThresholdKB以上を推奨します。",
   "config.contentCacheMaxKB.description": "チェックポイントコンテンツのインメモリキャッシュ上限（KB）です。上限を超えると最も古いエントリをLRU方式で削除します。",
   "config.hardCompactAfterDays.description": "`Undo Tree: Hard Compact` コマンドの閾値（日数）です。この日数より古いノードを削除します（current ノード・メモ付きノード・それらの祖先は保護されます）。`0` で無効化します。",
-  "commands.hardCompact.title": "Undo Tree: Hard Compact",
+  "commands.hardCompact.title": "Undo Tree: 古い履歴を圧縮",
+  "commands.compactDryRun.title": "Undo Tree: 履歴圧縮プレビュー",
+  "commands.hardCompactDryRun.title": "Undo Tree: 古い履歴圧縮プレビュー",
   "views.treeView.name": "Undo Tree"
 }

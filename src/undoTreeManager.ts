@@ -59,6 +59,33 @@ export type SerializedUndoTreeState = {
     trees: Record<string, SerializedUndoTree>;
 };
 
+export type CompactPreviewItem = {
+    id: number;
+    label: string;
+    timestamp: number;
+    note?: string;
+    reason: string;
+    storageKind: UndoNodeStorage['kind'];
+    status?: 'remove' | 'keep';
+    parents: number[];
+    children: number[];
+    lineCount?: number;
+    byteCount?: number;
+    manualRemoveAllowed: boolean;
+    manualRemoveReason?: string;
+};
+
+export type CompactPreviewResult = {
+    removable: CompactPreviewItem[];
+    protected: CompactPreviewItem[];
+    all: CompactPreviewItem[];
+};
+
+export type CompactApplyResult = {
+    removed: number;
+    skipped: number;
+};
+
 const DEFAULT_AUTOSAVE_INTERVAL_MS = 30_000;
 const FULL_STORAGE_THRESHOLD = 0.3;
 
@@ -534,6 +561,65 @@ export class UndoTreeManager implements vscode.Disposable {
         return removed;
     }
 
+    compactWithOverrides(tree: UndoTree, overrides: Map<number, 'remove' | 'keep'>): CompactApplyResult {
+        let removed = 0;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [, node] of tree.nodes) {
+                if (overrides.get(node.id) === 'keep') {
+                    continue;
+                }
+                if (overrides.get(node.id) === 'remove' && this.canManuallyRemove(tree, node)) {
+                    this.removeNode(tree, node);
+                    removed++;
+                    changed = true;
+                    break;
+                }
+                if (overrides.get(node.id) !== 'remove' && this.isCompressible(tree, node)) {
+                    this.removeNode(tree, node);
+                    removed++;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        const skipped = Array.from(overrides.entries()).filter(([id, action]) =>
+            action === 'remove' && tree.nodes.has(id) && !this.canManuallyRemove(tree, tree.nodes.get(id)!)
+        ).length;
+        return { removed, skipped };
+    }
+
+    previewCompact(tree: UndoTree): number {
+        return this.compact(this.cloneTree(tree));
+    }
+
+    previewCompactDetailed(tree: UndoTree): CompactPreviewResult {
+        const removable: CompactPreviewItem[] = [];
+        const protectedItems: CompactPreviewItem[] = [];
+
+        for (const [, node] of tree.nodes) {
+            if (node.id === tree.rootId) {
+                protectedItems.push(this.toCompactPreviewItem(tree, node, 'root node'));
+                continue;
+            }
+            const reason = this.getCompactBlockReason(tree, node);
+            if (reason === undefined) {
+                removable.push(this.toCompactPreviewItem(tree, node, 'compressible chain'));
+            } else {
+                protectedItems.push(this.toCompactPreviewItem(tree, node, reason));
+            }
+        }
+
+        removable.sort((a, b) => a.timestamp - b.timestamp);
+        protectedItems.sort((a, b) => a.timestamp - b.timestamp);
+        return {
+            removable,
+            protected: protectedItems,
+            all: [...removable.map((item) => ({ ...item, status: 'remove' as const })), ...protectedItems.map((item) => ({ ...item, status: 'keep' as const }))].sort((a, b) => a.timestamp - b.timestamp),
+        };
+    }
+
     exportState(): SerializedUndoTreeState {
         const trees: Record<string, SerializedUndoTree> = {};
         for (const [key, tree] of this.trees) {
@@ -856,6 +942,256 @@ export class UndoTreeManager implements vscode.Disposable {
             this.onRefresh?.();
         }
         return toDelete.size;
+    }
+
+    hardCompactWithOverrides(tree: UndoTree, maxAgeDays: number, overrides: Map<number, 'remove' | 'keep'>): CompactApplyResult {
+        const toDelete = this.collectHardCompactNodeIds(tree, maxAgeDays, overrides);
+        const skipped = Array.from(overrides.entries()).filter(([id, action]) =>
+            action === 'remove' && tree.nodes.has(id) && !toDelete.has(id)
+        ).length;
+
+        for (const nodeId of toDelete) {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { continue; }
+            for (const parentId of node.parents) {
+                const parent = tree.nodes.get(parentId);
+                if (parent) {
+                    parent.children = parent.children.filter(id => id !== nodeId);
+                }
+            }
+            tree.nodes.delete(nodeId);
+            if (tree.hashMap.get(node.hash) === nodeId) {
+                tree.hashMap.delete(node.hash);
+            }
+        }
+
+        if (toDelete.size > 0) {
+            this.onRefresh?.();
+        }
+        return { removed: toDelete.size, skipped };
+    }
+
+    previewHardCompact(tree: UndoTree, maxAgeDays: number): number {
+        return this.hardCompact(this.cloneTree(tree), maxAgeDays);
+    }
+
+    previewHardCompactDetailed(tree: UndoTree, maxAgeDays: number): CompactPreviewResult {
+        const removableIds = this.collectHardCompactNodeIds(tree, maxAgeDays);
+        const removable: CompactPreviewItem[] = [];
+        const protectedItems: CompactPreviewItem[] = [];
+
+        for (const [, node] of tree.nodes) {
+            if (node.id === tree.rootId) {
+                protectedItems.push(this.toCompactPreviewItem(tree, node, 'root node'));
+                continue;
+            }
+            if (removableIds.has(node.id)) {
+                removable.push(this.toCompactPreviewItem(tree, node, `older than ${maxAgeDays} day(s)`));
+            } else {
+                protectedItems.push(this.toCompactPreviewItem(tree, node, this.getHardCompactProtectReason(tree, node, maxAgeDays)));
+            }
+        }
+
+        removable.sort((a, b) => a.timestamp - b.timestamp);
+        protectedItems.sort((a, b) => a.timestamp - b.timestamp);
+        return {
+            removable,
+            protected: protectedItems,
+            all: [...removable.map((item) => ({ ...item, status: 'remove' as const })), ...protectedItems.map((item) => ({ ...item, status: 'keep' as const }))].sort((a, b) => a.timestamp - b.timestamp),
+        };
+    }
+
+    private toCompactPreviewItem(tree: UndoTree, node: UndoNode, reason: string): CompactPreviewItem {
+        const manualRemoveReason = this.getManualRemoveBlockReason(tree, node);
+        return {
+            id: node.id,
+            label: node.label,
+            timestamp: node.timestamp,
+            note: node.note,
+            reason,
+            storageKind: node.storage.kind,
+            parents: [...node.parents],
+            children: [...node.children],
+            ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
+            ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
+            manualRemoveAllowed: manualRemoveReason === undefined,
+            ...(manualRemoveReason ? { manualRemoveReason } : {}),
+        };
+    }
+
+    private getCompactBlockReason(tree: UndoTree, node: UndoNode): string | undefined {
+        if (node.id === tree.currentId) { return 'current node'; }
+        if (node.note) { return 'has note'; }
+        if (node.parents.length !== 1) { return 'branch or root connection'; }
+        if (node.children.length !== 1) { return 'branch point or leaf'; }
+        const kind = this.classifyNode(node);
+        if (kind === 'mixed') { return 'mixed edit'; }
+        const parent = tree.nodes.get(node.parents[0]);
+        const child = tree.nodes.get(node.children[0]);
+        if (!parent || !child) { return 'missing neighbor'; }
+        if (this.classifyNode(parent) !== kind || this.classifyNode(child) !== kind) {
+            return 'different edit kind around node';
+        }
+        return undefined;
+    }
+
+    private collectCurrentAncestors(tree: UndoTree): Set<number> {
+        const currentAncestors = new Set<number>();
+        let id: number | undefined = tree.currentId;
+        while (id !== undefined) {
+            currentAncestors.add(id);
+            const node = tree.nodes.get(id);
+            id = node && node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
+        }
+        return currentAncestors;
+    }
+
+    private collectNotedAncestors(tree: UndoTree): Set<number> {
+        const hasNotedAncestor = new Set<number>();
+        for (const [nodeId, node] of tree.nodes) {
+            if (!node.note) { continue; }
+            let aid: number | undefined = nodeId;
+            while (aid !== undefined) {
+                if (hasNotedAncestor.has(aid)) { break; }
+                hasNotedAncestor.add(aid);
+                const anode = tree.nodes.get(aid);
+                aid = anode && anode.parents.length > 0 ? anode.parents[anode.parents.length - 1] : undefined;
+            }
+        }
+        return hasNotedAncestor;
+    }
+
+    private canManuallyRemove(tree: UndoTree, node: UndoNode): boolean {
+        return this.getManualRemoveBlockReason(tree, node) === undefined;
+    }
+
+    private getManualRemoveBlockReason(tree: UndoTree, node: UndoNode): string | undefined {
+        if (node.id === tree.rootId) {
+            return 'root node cannot be removed';
+        }
+        if (node.id === tree.currentId) {
+            return 'current node cannot be removed';
+        }
+        if (node.parents.length !== 1) {
+            return 'requires exactly one parent';
+        }
+        if (node.children.length !== 1) {
+            return 'requires exactly one child';
+        }
+        return undefined;
+    }
+
+    private collectHardCompactNodeIds(tree: UndoTree, maxAgeDays: number, overrides?: Map<number, 'remove' | 'keep'>): Set<number> {
+        const thresholdMs = maxAgeDays * 86_400_000;
+        const now = Date.now();
+        const currentAncestors = this.collectCurrentAncestors(tree);
+        const hasNotedAncestor = this.collectNotedAncestors(tree);
+        const keptAncestors = new Set<number>();
+        if (overrides) {
+            for (const [nodeId, action] of overrides) {
+                if (action !== 'keep' || !tree.nodes.has(nodeId)) { continue; }
+                let aid: number | undefined = nodeId;
+                while (aid !== undefined) {
+                    if (keptAncestors.has(aid)) { break; }
+                    keptAncestors.add(aid);
+                    const anode = tree.nodes.get(aid);
+                    aid = anode && anode.parents.length > 0 ? anode.parents[anode.parents.length - 1] : undefined;
+                }
+            }
+        }
+        const toDelete = new Set<number>();
+
+        const markSubtree = (nodeId: number) => {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { return; }
+            toDelete.add(nodeId);
+            for (const childId of node.children) {
+                markSubtree(childId);
+            }
+        };
+
+        const dfs = (nodeId: number) => {
+            const node = tree.nodes.get(nodeId);
+            if (!node) { return; }
+
+            if (currentAncestors.has(nodeId)) {
+                for (const childId of node.children) {
+                    dfs(childId);
+                }
+                return;
+            }
+
+            if (overrides?.get(nodeId) === 'remove' && nodeId !== tree.rootId) {
+                markSubtree(nodeId);
+                return;
+            }
+
+            const isExpired = (now - node.timestamp) > thresholdMs;
+            const isProtected = node.note || hasNotedAncestor.has(nodeId) || keptAncestors.has(nodeId);
+
+            if (isExpired && !isProtected) {
+                markSubtree(nodeId);
+            } else {
+                for (const childId of node.children) {
+                    dfs(childId);
+                }
+            }
+        };
+
+        dfs(tree.rootId);
+        return toDelete;
+    }
+
+    private getHardCompactProtectReason(tree: UndoTree, node: UndoNode, maxAgeDays: number): string {
+        const thresholdMs = maxAgeDays * 86_400_000;
+        const ageMs = Date.now() - node.timestamp;
+        const currentAncestors = this.collectCurrentAncestors(tree);
+        const hasNotedAncestor = this.collectNotedAncestors(tree);
+        if (node.id === tree.currentId) {
+            return 'current node';
+        }
+        if (currentAncestors.has(node.id)) {
+            return 'current path';
+        }
+        if (node.note) {
+            return 'has note';
+        }
+        if (hasNotedAncestor.has(node.id)) {
+            return 'ancestor of noted node';
+        }
+        if (ageMs <= thresholdMs) {
+            return 'still within retention window';
+        }
+        return 'kept by traversal';
+    }
+
+    private cloneTree(tree: UndoTree): UndoTree {
+        return {
+            nodes: new Map(
+                Array.from(tree.nodes.entries()).map(([id, node]) => [
+                    id,
+                    {
+                        ...node,
+                        parents: [...node.parents],
+                        children: [...node.children],
+                        storage:
+                            node.storage.kind === 'full'
+                                ? { kind: 'full', content: node.storage.content }
+                                : node.storage.kind === 'checkpoint'
+                                    ? { kind: 'checkpoint', contentHash: node.storage.contentHash }
+                                    : {
+                                        kind: 'delta',
+                                        diffs: node.storage.diffs.map((eventDiffs: Diff[]) =>
+                                            eventDiffs.map((diff: Diff) => ({ ...diff }))
+                                        ),
+                                    },
+                    },
+                ])
+            ),
+            rootId: tree.rootId,
+            currentId: tree.currentId,
+            hashMap: new Map(tree.hashMap),
+        };
     }
 
     dispose() {

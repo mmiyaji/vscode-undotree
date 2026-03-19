@@ -47,6 +47,10 @@
         "title": "%commands.compact.title%"
       },
       {
+        "command": "undotree.compactDryRun",
+        "title": "%commands.compactDryRun.title%"
+      },
+      {
         "command": "undotree.savePersistedState",
         "title": "%commands.savePersistedState.title%"
       },
@@ -61,6 +65,10 @@
       {
         "command": "undotree.hardCompact",
         "title": "%commands.hardCompact.title%"
+      },
+      {
+        "command": "undotree.hardCompactDryRun",
+        "title": "%commands.hardCompactDryRun.title%"
       }
     ],
     "configuration": {

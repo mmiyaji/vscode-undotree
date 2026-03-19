@@ -11,31 +11,37 @@ import { gzip as gzipCb, gunzip as gunzipCb, gunzipSync } from 'zlib';
 const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
 import { UndoTreeProvider } from './undoTreeProvider';
-import { UndoTreeManager } from './undoTreeManager';
+import { CompactPreviewItem, CompactPreviewResult, UndoTreeManager } from './undoTreeManager';
 
 // バーチャルドキュメント（差分表示用）
 class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
-    private contents = new Map<number, string>();
-    private counter = 0;
+    private contents = new Map<string, string>();
+    private readonly onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
 
-    prepare(content: string, ext: string): vscode.Uri {
-        const id = this.counter++;
-        this.contents.set(id, content);
-        // 拡張子をURIに含めることでVS Codeが言語を正しく認識する
-        return vscode.Uri.parse(`undotree:///node_${id}${ext}`);
+    readonly onDidChange = this.onDidChangeEmitter.event;
+
+    prepare(content: string, ext: string, key?: string): vscode.Uri {
+        const normalizedExt = ext.startsWith('.') ? ext : `.${ext}`;
+        const id = key ?? `node_${this.contents.size}`;
+        const uri = vscode.Uri.parse(`undotree:/${encodeURIComponent(id)}${normalizedExt}`);
+        this.contents.set(uri.toString(), content);
+        this.onDidChangeEmitter.fire(uri);
+        return uri;
     }
 
     provideTextDocumentContent(uri: vscode.Uri): string {
-        const match = uri.path.match(/\/node_(\d+)/);
-        const id = match ? parseInt(match[1]) : -1;
-        return this.contents.get(id) ?? '';
+        return this.contents.get(uri.toString()) ?? '';
     }
 }
 
 let manager: UndoTreeManager | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
+let statusBarEditor: vscode.TextEditor | undefined;
 let persistTimer: ReturnType<typeof setTimeout> | undefined;
 const PERSIST_DEBOUNCE_MS = 1000;
+let compactPreviewPanel: vscode.WebviewPanel | undefined;
+let compactPreviewOverrides = new Map<number, 'remove' | 'keep'>();
+let compactPreviewTargetUri: string | undefined;
 
 type PersistedManifest = {
     version: number;
@@ -47,6 +53,256 @@ type PersistedManifest = {
 
 function makeTreeFileName(uri: string): string {
     return `${crypto.createHash('sha1').update(uri).digest('hex')}.json`;
+}
+
+function escHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function formatPreviewTimestamp(timestamp: number): string {
+    return new Date(timestamp).toLocaleString('sv-SE').replace('T', ' ');
+}
+
+function formatPreviewCount(value: number): string {
+    return new Intl.NumberFormat().format(value);
+}
+
+function formatPreviewBytes(bytes: number): string {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = bytes;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex++;
+    }
+    const maximumFractionDigits = unitIndex === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value)} ${units[unitIndex]}`;
+}
+
+function formatPreviewMetrics(item: CompactPreviewItem): string {
+    const parts = [
+        formatPreviewTimestamp(item.timestamp),
+        item.storageKind.toUpperCase(),
+    ];
+    if (typeof item.lineCount === 'number') {
+        parts.push(`${formatPreviewCount(item.lineCount)} L`);
+    }
+    if (typeof item.byteCount === 'number') {
+        parts.push(formatPreviewBytes(item.byteCount));
+    }
+    if (item.note) {
+        parts.push(escHtml(item.note));
+    }
+    return parts.join(' · ');
+}
+
+function buildCompactPreviewHtml(
+    fileName: string,
+    mode: 'compact' | 'hard',
+    result: CompactPreviewResult,
+    hardDays: number,
+    overrides: Map<number, 'remove' | 'keep'>,
+    activeTab: 'removable' | 'protected' | 'all'
+): string {
+    const t = vscode.l10n.t;
+    const localizeReason = (reason: string) => t(reason);
+    const title = mode === 'compact' ? t('Compact Preview') : t('Hard Compact Preview');
+    const summarizeReasons = (items: CompactPreviewResult['removable']) => Object.entries(
+        items.reduce<Record<string, number>>((acc, item) => {
+            acc[item.reason] = (acc[item.reason] ?? 0) + 1;
+            return acc;
+        }, {})
+    );
+    const removableReasonChips = summarizeReasons(result.removable)
+        .map(([reason, count]) => `<span class="chip chip-remove">${escHtml(localizeReason(reason))} · ${count}</span>`)
+        .join('');
+    const protectedReasonChips = summarizeReasons(result.protected)
+        .map(([reason, count]) => `<span class="chip chip-keep">${escHtml(localizeReason(reason))} · ${count}</span>`)
+        .join('');
+    const removableRows = result.removable.length === 0
+        ? `<div class="empty">${t('No removable nodes.')}</div>`
+        : result.removable.map((item) => `
+            <div class="row removable">
+              <div class="row-main">
+                <div class="row-title">#${item.id} ${escHtml(item.label)}</div>
+                <div class="row-meta">${formatPreviewMetrics(item)}</div>
+              </div>
+              <span class="reason remove">${escHtml(localizeReason(item.reason))}</span>
+            </div>
+        `).join('');
+    const protectedRows = result.protected.length === 0
+        ? `<div class="empty">${t('No protected nodes.')}</div>`
+        : result.protected.map((item) => `
+            <div class="row">
+              <div class="row-main">
+                <div class="row-title">#${item.id} ${escHtml(item.label)}</div>
+                <div class="row-meta">${formatPreviewMetrics(item)}</div>
+              </div>
+              <span class="reason keep">${escHtml(localizeReason(item.reason))}</span>
+            </div>
+        `).join('');
+    const allRows = result.all.length === 0
+        ? `<div class="empty">${t('No nodes.')}</div>`
+        : (() => {
+            const byId = new Map(result.all.map((item) => [item.id, item]));
+            const renderTreeRow = (item: CompactPreviewItem, prefix: string[], isLast: boolean): string => {
+                const effectiveStatus = overrides.get(item.id) ?? item.status;
+                const isManual = overrides.has(item.id);
+                const statusLabel = isManual
+                    ? (effectiveStatus === 'remove' ? t('manual remove') : t('manual keep'))
+                    : (effectiveStatus === 'remove' ? t('auto remove') : t('auto keep'));
+                const removeDisabled = item.manualRemoveAllowed ? '' : 'disabled';
+                const manualHint = item.manualRemoveAllowed
+                    ? ''
+                    : `<div class="row-hint">${t('Manual remove unavailable: {0}', escHtml(localizeReason(item.manualRemoveReason ?? 'unsupported node shape')))}</div>`;
+                const connectors = prefix.map((part) => `<span class="tree-seg">${part}</span>`).join('')
+                    + `<span class="tree-seg">${isLast ? '└─' : '├─'}</span>`;
+                const childIds = item.children.filter((id) => byId.has(id));
+                const row = `
+            <div class="row ${effectiveStatus === 'remove' ? 'removable' : ''}">
+              <div class="row-main">
+                <div class="row-title"><span class="tree-prefix">${connectors}</span>#${item.id} ${escHtml(item.label)}</div>
+                <div class="row-meta">${formatPreviewMetrics(item)}</div>
+                ${manualHint}
+              </div>
+              <div class="row-actions">
+                <span class="reason ${effectiveStatus === 'remove' ? 'remove' : 'keep'}${isManual ? ' manual' : ''}">${statusLabel}</span>
+                <button class="mini secondary" onclick="send('overrideKeep', ${item.id})">${t('Keep')}</button>
+                <button class="mini" onclick="send('overrideRemove', ${item.id})" ${removeDisabled}>${t('Remove')}</button>
+                <button class="mini secondary" onclick="send('clearOverride', ${item.id})">${t('Auto')}</button>
+              </div>
+            </div>`;
+                const nextPrefix = [...prefix, isLast ? '&nbsp;&nbsp;&nbsp;' : '│&nbsp; '];
+                return row + childIds.map((childId, index) =>
+                    renderTreeRow(byId.get(childId)!, nextPrefix, index === childIds.length - 1)
+                ).join('');
+            };
+            const roots = result.all.filter((item) => item.parents.length === 0 || !byId.has(item.parents[item.parents.length - 1]));
+            return roots.map((item, index) => renderTreeRow(item, [], index === roots.length - 1)).join('');
+        })();
+    const hardHint = mode === 'hard'
+        ? `<div class="hint">${t('Retention window: {0}', hardDays > 0 ? t('{0} day(s)', hardDays) : t('disabled'))}</div>`
+        : '';
+    const hardActionDisabled = mode === 'hard' && hardDays <= 0 ? 'disabled' : '';
+    const removableTabActive = activeTab === 'removable';
+    const protectedTabActive = activeTab === 'protected';
+    const allTabActive = activeTab === 'all';
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
+  .header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+  .title { font-size: 16px; font-weight: 600; }
+  .subtitle { opacity: 0.7; font-size: 12px; margin-top: 4px; }
+  .hint { margin-top: 6px; font-size: 12px; opacity: 0.75; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; padding: 6px 10px; cursor: pointer; }
+  button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  button.active { outline: 1px solid var(--vscode-focusBorder); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .reason-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .chip { font-size: 11px; padding: 4px 10px; border-radius: 999px; border: 1px solid currentColor; opacity: 0.9; display: inline-flex; align-items: center; justify-content: center; line-height: 1.2; min-height: 28px; box-sizing: border-box; }
+  .chip-remove { color: var(--vscode-errorForeground); }
+  .chip-keep { color: var(--vscode-focusBorder); }
+  .card { padding: 12px; border: 1px solid var(--vscode-panel-border); border-radius: 8px; background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent); }
+  .card-label { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .section { margin-top: 18px; }
+  .section h2 { font-size: 13px; margin: 0 0 8px; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 10px 12px; border: 1px solid var(--vscode-panel-border); border-radius: 8px; }
+  .row.removable { border-color: color-mix(in srgb, var(--vscode-errorForeground) 30%, var(--vscode-panel-border)); }
+  .row-main { min-width: 0; }
+  .row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .row-title { font-size: 12px; font-weight: 600; }
+  .tree-prefix { display: inline-flex; color: var(--vscode-editorLineNumber-foreground); margin-right: 4px; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+  .tree-seg { width: 18px; display: inline-block; text-align: center; }
+  .row-meta { font-size: 11px; opacity: 0.7; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-hint { font-size: 11px; opacity: 0.8; color: var(--vscode-descriptionForeground); margin-top: 5px; }
+  .reason { flex-shrink: 0; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .reason.remove { color: var(--vscode-errorForeground); }
+  .reason.keep { color: var(--vscode-focusBorder); }
+  .reason.manual { font-weight: 700; box-shadow: inset 0 0 0 1px currentColor; }
+  .mini { padding: 3px 8px; font-size: 11px; }
+  .empty { padding: 10px 0; opacity: 0.6; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="title">${title}</div>
+      <div class="subtitle">${escHtml(fileName)}</div>
+      ${hardHint}
+    </div>
+  </div>
+  <div class="actions">
+    <button class="${mode === 'compact' ? 'active' : 'secondary'}" onclick="send('showCompact')">${t('Compact')}</button>
+    <button class="${mode === 'hard' ? 'active' : 'secondary'}" onclick="send('showHard')" ${hardActionDisabled}>${t('Hard Compact')}</button>
+    <button class="secondary" onclick="send('refresh')">${t('Refresh')}</button>
+    <button onclick="send('runCompact')">${t('Run Compact')}</button>
+    <button onclick="send('runHard')" ${hardActionDisabled}>${t('Run Hard Compact')}</button>
+    ${mode === 'hard' && hardDays <= 0 ? `<button class="secondary" onclick="send('openSettings')">${t('Open Settings')}</button>` : ''}
+  </div>
+  <div class="summary">
+    <div class="card">
+      <div class="card-label">${t('Would Remove')}</div>
+      <div class="card-value">${result.removable.length}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">${t('Kept')}</div>
+      <div class="card-value">${result.protected.length}</div>
+    </div>
+  </div>
+  <div class="section">
+    <h2>${t('Reason Summary')}</h2>
+    <div class="reason-summary">
+      ${removableReasonChips || `<span class="empty">${t('No removable reasons.')}</span>`}
+      ${protectedReasonChips || `<span class="empty">${t('No protected reasons.')}</span>`}
+    </div>
+  </div>
+  <div class="tabs">
+    <button id="tab-removable" class="${removableTabActive ? 'active' : 'secondary'}" onclick="showTab('removable')">${t('Removable')}</button>
+    <button id="tab-protected" class="${protectedTabActive ? 'active' : 'secondary'}" onclick="showTab('protected')">${t('Protected')}</button>
+    <button id="tab-all" class="${allTabActive ? 'active' : 'secondary'}" onclick="showTab('all')">${t('All')}</button>
+  </div>
+  <div id="panel-removable" class="tab-panel ${removableTabActive ? 'active' : ''}">
+    <div class="section">
+      <h2>${t('Removable Nodes')}</h2>
+      <div class="list">${removableRows}</div>
+    </div>
+  </div>
+  <div id="panel-protected" class="tab-panel ${protectedTabActive ? 'active' : ''}">
+    <div class="section">
+      <h2>${t('Protected Nodes')}</h2>
+      <div class="list">${protectedRows}</div>
+    </div>
+  </div>
+  <div id="panel-all" class="tab-panel ${allTabActive ? 'active' : ''}">
+    <div class="section">
+      <h2>${t('All Nodes')}</h2>
+      <div class="list">${allRows}</div>
+    </div>
+  </div>
+  <script>
+    const vscode = acquireVsCodeApi();
+    function send(command, nodeId, tab) { vscode.postMessage({ command, nodeId, tab }); }
+    function showTab(tab) {
+      send('setTab', undefined, tab);
+    }
+  </script>
+</body>
+</html>`;
 }
 
 function getPersistedContentHashes(
@@ -411,6 +667,25 @@ function schedulePersistState(context: vscode.ExtensionContext) {
     }, PERSIST_DEBOUNCE_MS);
 }
 
+async function flushPersistState(context: vscode.ExtensionContext) {
+    if (!manager || getPersistenceMode() !== 'auto') {
+        return;
+    }
+
+    if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = undefined;
+    }
+
+    const dirtyUris = manager.getDirtyUris();
+    if (dirtyUris.size === 0) {
+        return;
+    }
+
+    await persistStateToDisk(context, manager.exportState(), manager.paused, dirtyUris);
+    manager.clearDirty(dirtyUris);
+}
+
 function matchesGlob(filename: string, pattern: string): boolean {
     const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
     return new RegExp(`^${escaped}$`, 'i').test(filename);
@@ -429,11 +704,35 @@ function isTracked(document: vscode.TextDocument): boolean {
     return getEnabledExtensions().map((e) => e.toLowerCase()).includes(ext);
 }
 
+function describeEditor(editor: vscode.TextEditor | undefined): string {
+    if (!editor) {
+        return 'none';
+    }
+    const { document } = editor;
+    return JSON.stringify({
+        scheme: document.uri.scheme,
+        uri: document.uri.toString(),
+        fileName: document.fileName,
+        isUntitled: document.isUntitled,
+    });
+}
+
 function updateStatusBar(editor: vscode.TextEditor | undefined) {
     if (!statusBarItem || !manager) {
         return;
     }
-    if (!editor || editor.document.isUntitled) {
+    const isRealFileEditor = !!editor &&
+        !editor.document.isUntitled &&
+        editor.document.uri.scheme === 'file';
+    if (isRealFileEditor) {
+        statusBarEditor = editor;
+    }
+    const targetEditor = isRealFileEditor ? editor : statusBarEditor;
+    manager.debugLog?.(
+        `[statusBar] input=${describeEditor(editor)} target=${describeEditor(targetEditor)} realFile=${isRealFileEditor}`
+    );
+    if (!targetEditor || targetEditor.document.isUntitled || targetEditor.document.uri.scheme !== 'file') {
+        manager.debugLog?.('[statusBar] hiding item because no real file editor is available');
         statusBarItem.hide();
         return;
     }
@@ -441,13 +740,17 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         statusBarItem.text = vscode.l10n.t('$(debug-pause) Undo Tree: PAUSED');
         statusBarItem.tooltip = vscode.l10n.t('Undo Tree is paused. Click to resume.');
         statusBarItem.command = 'undotree.togglePause';
+        manager.debugLog?.('[statusBar] showing paused state');
         statusBarItem.show();
         return;
     }
-    const ext = path.extname(editor.document.fileName).toLowerCase() || '(none)';
+    const ext = path.extname(targetEditor.document.fileName).toLowerCase() || '(none)';
     const enabled = getEnabledExtensions();
-    const excluded = isExcluded(editor.document);
+    const excluded = isExcluded(targetEditor.document);
     const tracked = !excluded && enabled.map(e => e.toLowerCase()).includes(ext);
+    manager.debugLog?.(
+        `[statusBar] computed tracked=${tracked} ext=${ext} excluded=${excluded} enabled=${enabled.join(',')}`
+    );
     statusBarItem.text = tracked
         ? vscode.l10n.t('$(history) Undo Tree: ON')
         : vscode.l10n.t('$(circle-slash) Undo Tree: OFF');
@@ -462,11 +765,48 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
     statusBarItem.show();
 }
 
+function getTrackedContextEditor(editor: vscode.TextEditor | undefined): vscode.TextEditor | undefined {
+    const candidate = editor && !editor.document.isUntitled && editor.document.uri.scheme === 'file'
+        ? editor
+        : statusBarEditor;
+    if (!candidate || candidate.document.isUntitled || candidate.document.uri.scheme !== 'file') {
+        return undefined;
+    }
+    return candidate;
+}
+
+function getCompactPreviewContextEditor(editor: vscode.TextEditor | undefined): vscode.TextEditor | undefined {
+    if (compactPreviewTargetUri) {
+        const visible = vscode.window.visibleTextEditors.find((candidate) =>
+            candidate.document.uri.toString() === compactPreviewTargetUri &&
+            !candidate.document.isUntitled &&
+            candidate.document.uri.scheme === 'file'
+        );
+        if (visible) {
+            return visible;
+        }
+        const openDoc = vscode.workspace.textDocuments.find((candidate) =>
+            candidate.uri.toString() === compactPreviewTargetUri &&
+            !candidate.isUntitled &&
+            candidate.uri.scheme === 'file'
+        );
+        if (openDoc) {
+            return {
+                document: openDoc,
+                viewColumn: vscode.window.activeTextEditor?.viewColumn,
+            } as vscode.TextEditor;
+        }
+    }
+    return getTrackedContextEditor(editor);
+}
+
 export async function activate(context: vscode.ExtensionContext) {
     manager = new UndoTreeManager();
     const provider = new UndoTreeProvider(context, manager);
     const contentProvider = new UndoTreeDocumentContentProvider();
     const persistedManifest = await readPersistedManifest(context);
+    let compactPreviewMode: 'compact' | 'hard' = 'compact';
+    let compactPreviewTab: 'removable' | 'protected' | 'all' = 'all';
 
     const outputChannel = vscode.window.createOutputChannel('Undo Tree');
     context.subscriptions.push(outputChannel);
@@ -499,6 +839,9 @@ export async function activate(context: vscode.ExtensionContext) {
     manager.onRefresh = () => {
         provider.refresh();
         schedulePersistState(context);
+        if (compactPreviewPanel) {
+            void renderCompactPreviewPanel();
+        }
     };
     manager.onCheckpointLoadStart = () => {
         provider.showCheckpointLoading();
@@ -518,6 +861,103 @@ export async function activate(context: vscode.ExtensionContext) {
             // ロード失敗は無視して新規ツリーで継続
         }
     }
+
+    const renderCompactPreviewPanel = async () => {
+        if (!compactPreviewPanel || !manager) {
+            return;
+        }
+        const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
+        if (!editor || !isTracked(editor.document)) {
+            compactPreviewPanel.webview.html = `<!DOCTYPE html><html><body style="font-family:var(--vscode-font-family);padding:16px;color:var(--vscode-foreground);opacity:0.7;">${vscode.l10n.t('Undo Tree preview is only available for tracked text files.')}</body></html>`;
+            return;
+        }
+        await ensureTreeLoaded(context, manager, editor.document).catch(() => {});
+        const tree = manager.getTree(editor.document.uri, editor.document.getText());
+        const days = getHardCompactAfterDays();
+        const result = compactPreviewMode === 'hard'
+            ? manager.previewHardCompactDetailed(tree, days)
+            : manager.previewCompactDetailed(tree);
+        compactPreviewPanel.title = compactPreviewMode === 'hard'
+            ? vscode.l10n.t('Undo Tree Hard Compact Preview')
+            : vscode.l10n.t('Undo Tree Compact Preview');
+        compactPreviewPanel.webview.html = buildCompactPreviewHtml(
+            path.basename(editor.document.fileName) || editor.document.uri.toString(),
+            compactPreviewMode,
+            result,
+            days,
+            compactPreviewOverrides,
+            compactPreviewTab
+        );
+    };
+
+    const showCompactPreviewPanel = async (mode: 'compact' | 'hard') => {
+        const sourceEditor = getTrackedContextEditor(vscode.window.activeTextEditor);
+        if (sourceEditor) {
+            compactPreviewTargetUri = sourceEditor.document.uri.toString();
+        }
+        compactPreviewMode = mode;
+        compactPreviewOverrides.clear();
+        compactPreviewTab = 'all';
+        if (!compactPreviewPanel) {
+            compactPreviewPanel = vscode.window.createWebviewPanel(
+                'undotreeCompactPreview',
+                vscode.l10n.t('Undo Tree Compact Preview'),
+                vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active,
+                { enableScripts: true, retainContextWhenHidden: true }
+            );
+            compactPreviewPanel.onDidDispose(() => {
+                compactPreviewPanel = undefined;
+                compactPreviewTargetUri = undefined;
+            });
+            compactPreviewPanel.webview.onDidReceiveMessage(async (message) => {
+                switch (message.command) {
+                    case 'showCompact':
+                        compactPreviewMode = 'compact';
+                        break;
+                    case 'showHard':
+                        compactPreviewMode = 'hard';
+                        break;
+                    case 'refresh':
+                        break;
+                    case 'setTab':
+                        if (message.tab === 'removable' || message.tab === 'protected' || message.tab === 'all') {
+                            compactPreviewTab = message.tab;
+                        }
+                        break;
+                    case 'overrideKeep':
+                        if (typeof message.nodeId === 'number') {
+                            compactPreviewOverrides.set(message.nodeId, 'keep');
+                        }
+                        break;
+                    case 'overrideRemove':
+                        if (typeof message.nodeId === 'number') {
+                            compactPreviewOverrides.set(message.nodeId, 'remove');
+                        }
+                        break;
+                    case 'clearOverride':
+                        if (typeof message.nodeId === 'number') {
+                            compactPreviewOverrides.delete(message.nodeId);
+                        }
+                        break;
+                    case 'runCompact':
+                        await vscode.commands.executeCommand('undotree.compact');
+                        break;
+                    case 'runHard':
+                        await vscode.commands.executeCommand('undotree.hardCompact');
+                        break;
+                    case 'openSettings':
+                        await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree.hardCompactAfterDays');
+                        return;
+                    default:
+                        return;
+                }
+                await renderCompactPreviewPanel();
+            });
+        } else {
+            compactPreviewPanel.reveal(undefined, true);
+        }
+        await renderCompactPreviewPanel();
+    };
 
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     updateStatusBar(vscode.window.activeTextEditor);
@@ -615,6 +1055,16 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: isCurrentTracked ? 'undotree.compact' : undefined,
                 },
                 {
+                    label: vscode.l10n.t('$(eye) Compact History Preview'),
+                    description: vscode.l10n.t('Open the compact preview with removable and protected nodes'),
+                    command: isCurrentTracked ? 'undotree.compactDryRun' : undefined,
+                },
+                {
+                    label: vscode.l10n.t('$(eye) Hard Compact Preview'),
+                    description: vscode.l10n.t('Open the hard compact preview with retention details'),
+                    command: isCurrentTracked ? 'undotree.hardCompactDryRun' : undefined,
+                },
+                {
                     label: manager?.paused
                         ? vscode.l10n.t('$(debug-start) Resume Tracking')
                         : vscode.l10n.t('$(debug-pause) Pause Tracking'),
@@ -679,6 +1129,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             const tree = manager.getTree(editor.document.uri);
             const ext = path.extname(editor.document.fileName) || '.txt';
+            const diffKeyBase = crypto.createHash('sha1').update(editor.document.uri.toString()).digest('hex');
 
             const targetContent = manager.reconstructContent(tree, targetNodeId);
             const currentContent = editor.document.getText();
@@ -688,8 +1139,8 @@ export async function activate(context: vscode.ExtensionContext) {
             const targetLabel = targetNode ? `node${targetNodeId} (${targetNode.label})` : `node${targetNodeId}`;
             const currentLabel = currentNode ? `current (${currentNode.label})` : 'current';
 
-            const targetUri = contentProvider.prepare(targetContent, ext);
-            const currentUri = contentProvider.prepare(currentContent, ext);
+            const targetUri = contentProvider.prepare(targetContent, ext, `diff-${diffKeyBase}-target`);
+            const currentUri = contentProvider.prepare(currentContent, ext, `diff-${diffKeyBase}-current`);
 
             await vscode.commands.executeCommand(
                 'vscode.diff',
@@ -704,22 +1155,44 @@ export async function activate(context: vscode.ExtensionContext) {
             );
         }),
 
-        vscode.commands.registerCommand('undotree.compact', () => {
-            const editor = vscode.window.activeTextEditor;
+        vscode.commands.registerCommand('undotree.compact', async () => {
+            const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
             if (!editor || !manager) {
                 return;
             }
             const tree = manager.getTree(editor.document.uri);
-            const removed = manager.compact(tree);
+            const { removed, skipped } = compactPreviewOverrides.size > 0
+                ? manager.compactWithOverrides(tree, compactPreviewOverrides)
+                : { removed: manager.compact(tree), skipped: 0 };
             if (removed > 0) {
                 manager.markDirty(editor.document.uri);
             }
+            compactPreviewOverrides.clear();
             provider.refresh();
-            vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: compacted {0} node(s)', removed));
+            if (removed > 0) {
+                try {
+                    await flushPersistState(context);
+                } catch {
+                    vscode.window.showWarningMessage(vscode.l10n.t('Undo Tree: compact succeeded, but persisted state could not be updated.'));
+                }
+            }
+            vscode.window.showInformationMessage(
+                skipped > 0
+                    ? vscode.l10n.t('Undo Tree: compacted {0} node(s), skipped {1} marked node(s)', removed, skipped)
+                    : vscode.l10n.t('Undo Tree: compacted {0} node(s)', removed)
+            );
+        }),
+
+        vscode.commands.registerCommand('undotree.compactDryRun', () => {
+            const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
+            if (!editor || !manager) {
+                return;
+            }
+            void showCompactPreviewPanel('compact');
         }),
 
         vscode.commands.registerCommand('undotree.hardCompact', async () => {
-            const editor = vscode.window.activeTextEditor;
+            const editor = getTrackedContextEditor(vscode.window.activeTextEditor);
             if (!editor || !manager) {
                 return;
             }
@@ -740,15 +1213,39 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
             const tree = manager.getTree(editor.document.uri);
-            const removed = manager.hardCompact(tree, days);
+            const { removed, skipped } = compactPreviewOverrides.size > 0
+                ? manager.hardCompactWithOverrides(tree, days, compactPreviewOverrides)
+                : { removed: manager.hardCompact(tree, days), skipped: 0 };
             if (removed > 0) {
                 manager.markDirty(editor.document.uri);
             }
+            compactPreviewOverrides.clear();
             provider.refresh();
-            schedulePersistState(context);
+            if (removed > 0) {
+                try {
+                    await flushPersistState(context);
+                } catch {
+                    vscode.window.showWarningMessage(vscode.l10n.t('Undo Tree: hard compact succeeded, but persisted state could not be updated.'));
+                }
+            }
             vscode.window.showInformationMessage(
-                vscode.l10n.t('Undo Tree: hard compacted {0} node(s) older than {1} day(s)', removed, days)
+                skipped > 0
+                    ? vscode.l10n.t('Undo Tree: hard compacted {0} node(s) older than {1} day(s), skipped {2} marked node(s)', removed, days, skipped)
+                    : vscode.l10n.t('Undo Tree: hard compacted {0} node(s) older than {1} day(s)', removed, days)
             );
+        }),
+
+        vscode.commands.registerCommand('undotree.hardCompactDryRun', () => {
+            const editor = getTrackedContextEditor(vscode.window.activeTextEditor);
+            if (!editor || !manager) {
+                return;
+            }
+            const days = getHardCompactAfterDays();
+            if (days <= 0) {
+                void showCompactPreviewPanel('hard');
+            } else {
+                void showCompactPreviewPanel('hard');
+            }
         }),
 
         vscode.commands.registerCommand('undotree.togglePause', () => {
@@ -789,9 +1286,13 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.window.onDidChangeActiveTextEditor((e) => {
+            manager?.debugLog?.(`[activeEditor] changed to ${describeEditor(e)}`);
             provider.setActiveEditor(e);
             manager?.onDidChangeActiveEditor(e);
             updateStatusBar(e);
+            if (compactPreviewPanel) {
+                void renderCompactPreviewPanel();
+            }
             if (e && isTracked(e.document) && manager && !manager.hasTree(e.document.uri)) {
                 // 未ロードのファイル: ローディング表示してから非同期ロード
                 const loadingToken = provider.beginLoading(e.document.uri);
