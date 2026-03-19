@@ -1253,10 +1253,11 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.l10n.t('Undo Tree Diff: {0}', path.basename(editor.document.fileName)),
                 {
                     preview: true,
-                    preserveFocus: true,
+                    preserveFocus: false,
                     viewColumn: editor.viewColumn ?? vscode.ViewColumn.Active,
                 }
             );
+            await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
         }),
 
         vscode.commands.registerCommand('undotree.compact', async () => {
