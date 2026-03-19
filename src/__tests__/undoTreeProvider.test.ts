@@ -144,7 +144,7 @@ describe('UndoTreeProvider initialization', () => {
             'dateTime',
             'yyyy-MM-dd HH:mm:ss'
         )).toBe('2026-03-18 09:41:22');
-        expect(html).toContain('const timeFormatCustom = "YYYY-MM-DD HH:mm:ss";');
+        expect(html).toContain('let timeFormatCustom = "YYYY-MM-DD HH:mm:ss";');
     });
 
     it('supports custom timestamp formatting', () => {
@@ -158,7 +158,7 @@ describe('UndoTreeProvider initialization', () => {
             'custom',
             'dd/MM/yyyy HH:mm'
         )).toBe('18/03/2026 09:41');
-        expect(html).toContain('const timeFormatCustom = "DD/MM/YYYY HH:mm";');
+        expect(html).toContain('let timeFormatCustom = "DD/MM/YYYY HH:mm";');
     });
 
     it('falls back to the default dateTime pattern for invalid custom formats', () => {
@@ -178,8 +178,8 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'lines', 'current', false);
 
-        expect(html).toContain('const nodeSizeMetric = "lines";');
-        expect(html).toContain('const nodeSizeMetricBase = "current";');
+        expect(html).toContain('let nodeSizeMetric = "lines";');
+        expect(html).toContain('let nodeSizeMetricBase = "current";');
         expect(html).toContain("function formatSizeDiff(node, refNode) {");
         expect(html).toContain("if (nodeSizeMetric === 'none') { return ''; }");
         expect(html).toContain("const sign = delta > 0 ? '+' : delta < 0 ? '-' : '±';");
@@ -204,7 +204,7 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
-        expect(html).toContain('const nodeSizeMetric = "none";');
+        expect(html).toContain('let nodeSizeMetric = "none";');
         expect(html).toContain("if (nodeSizeMetric === 'none') { return ''; }");
     });
 
@@ -238,7 +238,8 @@ describe('UndoTreeProvider initialization', () => {
 
         expect(view.webview.html).toContain('is not tracked');
         expect(view.webview.html).toContain('Open Settings');
-        expect(view.webview.html).toContain('Enable tracking for .js');
+        expect(view.webview.html).toContain('enableTrackingWithExt');
+        expect(view.webview.html).toContain('".js"');
     });
 
     it('shows a text-editor-only message when there is no active text editor', () => {
@@ -269,7 +270,15 @@ describe('UndoTreeProvider initialization', () => {
         provider.refresh();
 
         expect(view.webview.html).not.toContain('</head><body>Loading...</body></html>');
-        expect(view.webview.html).toContain('other file');
+        expect(view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            command: 'renderState',
+            state: expect.objectContaining({
+                view: 'tree',
+                nodes: expect.arrayContaining([
+                    expect.objectContaining({ label: 'initial' }),
+                ]),
+            }),
+        }));
     });
 
     it('keeps the latest loading request when an older one finishes', () => {
@@ -289,8 +298,31 @@ describe('UndoTreeProvider initialization', () => {
         vscode.window.activeTextEditor = { document: secondDocument };
         provider.refresh();
 
-        expect(view.webview.html).toContain('Loading...');
+        expect(view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            command: 'renderState',
+            state: expect.objectContaining({ view: 'loading' }),
+        }));
         expect(provider.endLoading(secondDocument.uri, secondToken)).toBe(true);
+    });
+
+    it('keeps the initial shell HTML and pushes later renders via postMessage', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const document = makeDocument('initial content');
+
+        vscode.window.activeTextEditor = { document };
+
+        provider.resolveWebviewView(view);
+        const firstHtml = view.webview.html;
+
+        provider.refresh();
+
+        expect(view.webview.html).toBe(firstHtml);
+        expect(view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            command: 'renderState',
+        }));
     });
 
     it('renders the note edit button with a stable HTML entity icon', () => {

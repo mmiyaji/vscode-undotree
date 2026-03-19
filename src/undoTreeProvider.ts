@@ -15,6 +15,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private lastEditorUri?: string;
     private loadingRequest?: { uri: string; token: number };
     private loadingToken = 0;
+    private webviewInitialized = false;
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
         const nextUri = editor?.document.uri.toString();
@@ -56,6 +57,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     resolveWebviewView(webviewView: vscode.WebviewView) {
         this.view = webviewView;
+        this.webviewInitialized = false;
         webviewView.webview.options = { enableScripts: true };
         this.render();
 
@@ -140,27 +142,100 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         const editor = vscode.window.activeTextEditor;
         const isLoadingCurrentEditor = !!editor &&
             this.loadingRequest?.uri === editor.document.uri.toString();
-
-        if (isLoadingCurrentEditor) {
-            this.view.webview.html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);opacity:0.6;}</style>
-</head><body>${vscode.l10n.t('Loading...')}</body></html>`;
-            return;
-        }
         const timeFormat = this.getTimeFormat();
         const timeFormatCustom = this.getTimeFormatCustom();
         const nodeSizeMetric = this.getNodeSizeMetric();
         const nodeSizeMetricBase = this.getNodeSizeMetricBase();
         const showStorageKind = this.getShowStorageKind();
-        if (!editor) {
-            this.view.webview.html = this.buildHtml(null, -1, this.manager.paused, this.mode, timeFormat, timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind);
+        const state = this.getRenderState(
+            editor,
+            isLoadingCurrentEditor,
+            timeFormat,
+            timeFormatCustom,
+            nodeSizeMetric,
+            nodeSizeMetricBase,
+            showStorageKind
+        );
+
+        if (!this.webviewInitialized) {
+            this.view.webview.html = this.buildHtml(
+                state.nodes,
+                state.currentId,
+                state.paused,
+                state.mode,
+                state.timeFormat,
+                state.timeFormatCustom,
+                state.nodeSizeMetric,
+                state.nodeSizeMetricBase,
+                state.showStorageKind,
+                state.view,
+                state.notTrackedExt
+            );
+            this.webviewInitialized = true;
             return;
+        }
+
+        void this.view.webview.postMessage({
+            command: 'renderState',
+            state,
+        });
+    }
+
+    private getRenderState(
+        editor: vscode.TextEditor | undefined,
+        isLoadingCurrentEditor: boolean,
+        timeFormat: 'none' | 'time' | 'dateTime' | 'custom',
+        timeFormatCustom: string,
+        nodeSizeMetric: 'none' | 'lines' | 'bytes',
+        nodeSizeMetricBase: 'current' | 'initial',
+        showStorageKind: boolean
+    ) {
+        if (isLoadingCurrentEditor) {
+            return {
+                view: 'loading' as const,
+                nodes: null,
+                currentId: -1,
+                paused: this.manager.paused,
+                mode: this.mode,
+                timeFormat,
+                timeFormatCustom,
+                nodeSizeMetric,
+                nodeSizeMetricBase,
+                showStorageKind,
+                notTrackedExt: '',
+            };
+        }
+        if (!editor) {
+            return {
+                view: 'empty' as const,
+                nodes: null,
+                currentId: -1,
+                paused: this.manager.paused,
+                mode: this.mode,
+                timeFormat,
+                timeFormatCustom,
+                nodeSizeMetric,
+                nodeSizeMetricBase,
+                showStorageKind,
+                notTrackedExt: '',
+            };
         }
         if (!this.isTrackedDocument(editor.document)) {
             const fileName = editor.document.isUntitled ? '' : editor.document.fileName.replace(/.*[\\/]/, '');
             const ext = fileName.match(/\.[^.]+$/)?.[0] ?? '';
-            this.view.webview.html = this.buildNotTrackedHtml(ext, fileName);
-            return;
+            return {
+                view: 'notTracked' as const,
+                nodes: null,
+                currentId: -1,
+                paused: this.manager.paused,
+                mode: this.mode,
+                timeFormat,
+                timeFormatCustom,
+                nodeSizeMetric,
+                nodeSizeMetricBase,
+                showStorageKind,
+                notTrackedExt: ext,
+            };
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
         const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
@@ -168,17 +243,19 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             formattedTime: this.formatTimestamp(node.timestamp, timeFormat, timeFormatCustom),
             isEmpty: this.manager.isNodeEmpty(tree, node.id),
         }));
-        this.view.webview.html = this.buildHtml(
-            displayNodes,
-            tree.currentId,
-            this.manager.paused,
-            this.mode,
+        return {
+            view: 'tree' as const,
+            nodes: displayNodes,
+            currentId: tree.currentId,
+            paused: this.manager.paused,
+            mode: this.mode,
             timeFormat,
             timeFormatCustom,
             nodeSizeMetric,
             nodeSizeMetricBase,
-            showStorageKind
-        );
+            showStorageKind,
+            notTrackedExt: '',
+        };
     }
 
     private getContextEditor(): vscode.TextEditor | undefined {
@@ -301,7 +378,9 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial',
-        showStorageKind: boolean
+        showStorageKind: boolean,
+        initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
+        initialNotTrackedExt = ''
     ): string {
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
@@ -358,6 +437,10 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
   .pinned-link:hover { background: var(--vscode-list-hoverBackground); }
   .pinned-link .pin-mark { opacity: 0.85; }
   .pinned-link .pinned-label { opacity: 0.8; }
+  .msg { opacity: 0.7; margin-bottom: 8px; }
+  .hint { opacity: 0.45; font-size: 11px; margin-bottom: 12px; }
+  .btn { display: block; margin-bottom: 6px; background: none; border: none; padding: 0; color: var(--vscode-textLink-foreground); font-size: 12px; cursor: pointer; text-decoration: underline; text-align: left; }
+  .btn:hover { color: var(--vscode-textLink-activeForeground); background: none; }
 </style>
 </head>
 <body>
@@ -374,21 +457,34 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
 <div id="tree"></div>
 <script>
   const vscode = acquireVsCodeApi();
-  const nodes = ${nodesJson};
-  const currentId = ${currentId};
-  const mode = ${JSON.stringify(mode)};
-  const timeFormat = ${JSON.stringify(timeFormat)};
-  const timeFormatCustom = ${JSON.stringify(timeFormatCustom)};
-  const nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
-  const nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
-  const showStorageKind = ${JSON.stringify(showStorageKind)};
+  let nodes = ${nodesJson};
+  let currentId = ${currentId};
+  let mode = ${JSON.stringify(mode)};
+  let timeFormat = ${JSON.stringify(timeFormat)};
+  let timeFormatCustom = ${JSON.stringify(timeFormatCustom)};
+  let nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
+  let nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
+  let showStorageKind = ${JSON.stringify(showStorageKind)};
   const i18n = {
     noteClickToEdit: ${JSON.stringify(vscode.l10n.t(' (click to edit)'))},
     noteAdd: ${JSON.stringify(vscode.l10n.t('Add note'))},
     pinNode: ${JSON.stringify(vscode.l10n.t('Pin node'))},
     unpinNode: ${JSON.stringify(vscode.l10n.t('Unpin node'))},
     pinnedNodes: ${JSON.stringify(vscode.l10n.t('Pinned'))},
+    loading: ${JSON.stringify(vscode.l10n.t('Loading...'))},
+    textEditorsOnly: ${JSON.stringify(vscode.l10n.t('Undo Tree is only available for text editors.'))},
+    notTrackedWithExt: ${JSON.stringify(vscode.l10n.t('Undo Tree: {0} is not tracked', '{ext}'))},
+    notTrackedGeneric: ${JSON.stringify(vscode.l10n.t('Undo Tree: this file is not tracked'))},
+    notTrackedHintWithExt: ${JSON.stringify(vscode.l10n.t('To enable tracking for {0} files, click the status bar item or open Settings.', '{ext}'))},
+    notTrackedHintGeneric: ${JSON.stringify(vscode.l10n.t('To enable tracking for this file, click the status bar item or open Settings.'))},
+    enableTrackingWithExt: ${JSON.stringify(vscode.l10n.t('Enable tracking for {0}', '{ext}'))},
+    enableTrackingGeneric: ${JSON.stringify(vscode.l10n.t('Enable tracking for this file'))},
+    openSettings: ${JSON.stringify(vscode.l10n.t('Open Settings'))},
   };
+
+  function replaceExt(template, ext) {
+    return template.replace('{ext}', ext);
+  }
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
 
@@ -400,9 +496,11 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         const ov = document.createElement('div');
         ov.id = 'jump-overlay';
         ov.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;opacity:0.7;pointer-events:none;';
-        ov.textContent = ${JSON.stringify(vscode.l10n.t('Loading...'))};
+        ov.textContent = i18n.loading;
         document.body.appendChild(ov);
       }
+    } else if (event.data?.command === 'renderState' && event.data.state) {
+      renderState(event.data.state);
     }
   });
   function escHtml(str) { return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -539,7 +637,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
-      document.getElementById('tree').innerHTML = '<div class="empty">${vscode.l10n.t('Undo Tree is only available for text editors.')}</div>';
+      document.getElementById('tree').innerHTML = '<div class="empty">' + i18n.textEditorsOnly + '</div>';
       return;
     }
 
@@ -674,7 +772,98 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     setFocused(nodeIds.indexOf(currentId));
   }
 
-  buildTree(nodes, currentId);
+  function renderNotTracked(ext) {
+    const treeEl = document.getElementById('tree');
+    const pinnedEl = document.getElementById('pinned');
+    if (pinnedEl) { pinnedEl.innerHTML = ''; }
+    treeEl.innerHTML =
+      '<div class="msg">' + escHtml(ext ? replaceExt(i18n.notTrackedWithExt, ext) : i18n.notTrackedGeneric) + '</div>' +
+      '<div class="hint">' + escHtml(ext ? replaceExt(i18n.notTrackedHintWithExt, ext) : i18n.notTrackedHintGeneric) + '</div>' +
+      '<button class="btn" onclick="send(\\'toggleTracking\\')">' + escHtml(ext ? replaceExt(i18n.enableTrackingWithExt, ext) : i18n.enableTrackingGeneric) + '</button>' +
+      '<button class="btn" onclick="send(\\'openSettings\\')">' + escHtml(i18n.openSettings) + '</button>';
+    nodeEls = [];
+    nodeIds = [];
+    treeMap = {};
+  }
+
+  function renderState(state) {
+    nodes = state.nodes;
+    currentId = state.currentId;
+    mode = state.mode;
+    timeFormat = state.timeFormat;
+    timeFormatCustom = state.timeFormatCustom;
+    nodeSizeMetric = state.nodeSizeMetric;
+    nodeSizeMetricBase = state.nodeSizeMetricBase;
+    showStorageKind = state.showStorageKind;
+
+    document.querySelector('.btn-pause').textContent = state.paused ? ${JSON.stringify(vscode.l10n.t('Resume'))} : ${JSON.stringify(vscode.l10n.t('Pause'))};
+    document.querySelector('.btn-pause').title = state.paused ? ${JSON.stringify(vscode.l10n.t('Resume tracking'))} : ${JSON.stringify(vscode.l10n.t('Pause tracking'))};
+    document.querySelector('.btn-mode').textContent = mode === 'navigate' ? ${JSON.stringify(vscode.l10n.t('Diff'))} : ${JSON.stringify(vscode.l10n.t('Nav'))};
+    document.querySelector('.btn-mode').title = mode === 'navigate' ? ${JSON.stringify(vscode.l10n.t('Switch to Diff mode'))} : ${JSON.stringify(vscode.l10n.t('Switch to Navigate mode'))};
+    document.querySelector('.btn-mode').classList.toggle('active', mode === 'diff');
+
+    let pausedBadge = document.querySelector('.paused-badge');
+    if (state.paused) {
+      if (!pausedBadge) {
+        pausedBadge = document.createElement('div');
+        pausedBadge.className = 'paused-badge';
+        document.querySelector('.actions').insertAdjacentElement('afterend', pausedBadge);
+      }
+      pausedBadge.textContent = ${JSON.stringify(vscode.l10n.t('Tracking paused - history is frozen'))};
+    } else if (pausedBadge) {
+      pausedBadge.remove();
+    }
+
+    let diffBadge = document.querySelector('.diff-badge');
+    if (mode === 'diff') {
+      if (!diffBadge) {
+        diffBadge = document.createElement('div');
+        diffBadge.className = 'diff-badge';
+        const anchor = document.querySelector('.paused-badge');
+        if (anchor) {
+          anchor.insertAdjacentElement('afterend', diffBadge);
+        } else {
+          document.querySelector('.actions').insertAdjacentElement('afterend', diffBadge);
+        }
+      }
+      diffBadge.textContent = ${JSON.stringify(vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing'))};
+    } else if (diffBadge) {
+      diffBadge.remove();
+    }
+
+    const overlay = document.getElementById('jump-overlay');
+    if (overlay) { overlay.remove(); }
+    const treeEl = document.getElementById('tree');
+    if (treeEl) { treeEl.style.opacity = '1'; treeEl.style.pointerEvents = ''; }
+
+    if (state.view === 'loading') {
+      document.getElementById('pinned').innerHTML = '';
+      document.getElementById('tree').innerHTML = '<div class="empty">' + i18n.loading + '</div>';
+      nodeEls = [];
+      nodeIds = [];
+      treeMap = {};
+      return;
+    }
+    if (state.view === 'notTracked') {
+      renderNotTracked(state.notTrackedExt || '');
+      return;
+    }
+    buildTree(state.nodes, state.currentId);
+  }
+
+  renderState({
+    view: ${JSON.stringify(initialView)},
+    nodes,
+    currentId,
+    paused: ${JSON.stringify(paused)},
+    mode,
+    timeFormat,
+    timeFormatCustom,
+    nodeSizeMetric,
+    nodeSizeMetricBase,
+    showStorageKind,
+    notTrackedExt: ${JSON.stringify(initialNotTrackedExt)}
+  });
 </script>
 </body>
 </html>`;
