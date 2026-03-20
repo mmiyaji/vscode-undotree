@@ -73,8 +73,21 @@
       {
         "command": "undotree.hardCompactDryRun",
         "title": "%commands.hardCompactDryRun.title%"
+      },
+      {
+        "command": "undotree.openDiagnostics",
+        "title": "%commands.openDiagnostics.title%",
+        "enablement": "undotree.diagnosticsEnabled"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "undotree.openDiagnostics",
+          "when": "undotree.diagnosticsEnabled"
+        }
+      ]
+    },
     "configuration": [
       {
         "title": "%config.general.title%",
@@ -123,6 +136,12 @@
             "minimum": 0,
             "order": 50,
             "markdownDescription": "%config.hardCompactAfterDays.description%"
+          },
+          "undotree.warnOnMultiWindowConflict": {
+            "type": "boolean",
+            "default": true,
+            "order": 60,
+            "markdownDescription": "%config.warnOnMultiWindowConflict.description%"
           }
         }
       },
@@ -179,6 +198,12 @@
       {
         "title": "%config.performance.title%",
         "properties": {
+          "undotree.enableDiagnostics": {
+            "type": "boolean",
+            "default": false,
+            "order": 5,
+            "markdownDescription": "%config.enableDiagnostics.description%"
+          },
           "undotree.compressionThresholdKB": {
             "type": "number",
             "default": 100,

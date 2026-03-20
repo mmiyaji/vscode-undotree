@@ -96,6 +96,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private trees = new Map<string, UndoTree>();
     private diffBuffer = new Map<string, Diff[][]>();
     private dirtyTrees = new Set<string>();
+    private lastAccessAt = new Map<string, number>();
     private nextId = 1;
     private autosaveTimer: ReturnType<typeof setInterval> | undefined;
     private autosaveIntervalMs = DEFAULT_AUTOSAVE_INTERVAL_MS;
@@ -256,6 +257,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 Object.assign(root, this.computeSizeMetrics(initialContent));
             }
         }
+        this.lastAccessAt.set(key, Date.now());
         return this.trees.get(key)!;
     }
 
@@ -277,10 +279,24 @@ export class UndoTreeManager implements vscode.Disposable {
         }
     }
 
+    getResidentUris(): string[] {
+        return Array.from(this.trees.keys());
+    }
+
+    getLastAccessAt(uri: vscode.Uri): number | undefined {
+        return this.lastAccessAt.get(uri.toString());
+    }
+
+    hasPendingDiffs(uri: vscode.Uri): boolean {
+        const diffs = this.diffBuffer.get(uri.toString());
+        return !!diffs && diffs.length > 0;
+    }
+
     resetAll(): void {
         this.trees.clear();
         this.diffBuffer.clear();
         this.dirtyTrees.clear();
+        this.lastAccessAt.clear();
         this.contentCache.clear();
         this.contentCacheBytes = 0;
         this.nextId = 1;
@@ -292,6 +308,7 @@ export class UndoTreeManager implements vscode.Disposable {
         this.trees.delete(key);
         this.diffBuffer.delete(key);
         this.dirtyTrees.delete(key);
+        this.lastAccessAt.delete(key);
         this.onRefresh?.();
     }
 
@@ -705,6 +722,7 @@ export class UndoTreeManager implements vscode.Disposable {
     importState(state: SerializedUndoTreeState) {
         this.trees.clear();
         this.diffBuffer.clear();
+        this.lastAccessAt.clear();
 
         for (const [key, tree] of Object.entries(state.trees)) {
             this.trees.set(key, {
@@ -734,6 +752,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 currentId: tree.currentId,
                 rootId: tree.rootId,
             });
+            this.lastAccessAt.set(key, Date.now());
         }
 
         this.nextId = Math.max(
@@ -772,6 +791,7 @@ export class UndoTreeManager implements vscode.Disposable {
             currentId: tree.currentId,
             rootId: tree.rootId,
         });
+        this.lastAccessAt.set(uri, Date.now());
 
         if (typeof nextId === 'number') {
             this.nextId = Math.max(this.nextId, nextId);
@@ -1304,6 +1324,7 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         this.trees.clear();
         this.diffBuffer.clear();
+        this.lastAccessAt.clear();
         this.contentCache.clear();
         this.contentCacheBytes = 0;
     }
