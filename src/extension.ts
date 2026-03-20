@@ -1127,12 +1127,18 @@ async function ensureTreeLoaded(
         }
         if (persisted) {
             const beforeSyncNodeCount = persisted.tree.nodes.length;
-            treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-            const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
-            treeManager.debugLog?.(
-                `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
-            );
-            return;
+            try {
+                treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
+                const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+                treeManager.debugLog?.(
+                    `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
+                );
+                return;
+            } catch (error) {
+                treeManager.debugLog?.(
+                    `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted-import-failed error=${String(error)}`
+                );
+            }
         }
     }
 
@@ -1153,12 +1159,22 @@ async function restoreTreeForDocument(
     }
 
     const beforeSyncNodeCount = persisted.tree.nodes.length;
-    treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-    const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
-    treeManager.debugLog?.(
-        `[restore] uri=${document.uri.toString()} beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
-    );
-    return true;
+    try {
+        treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
+        const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+        treeManager.debugLog?.(
+            `[restore] uri=${document.uri.toString()} beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
+        );
+        return true;
+    } catch (error) {
+        treeManager.debugLog?.(
+            `[restore] uri=${document.uri.toString()} source=persisted-import-failed error=${String(error)}`
+        );
+        void vscode.window.showWarningMessage(
+            vscode.l10n.t('Undo Tree: saved history for this file could not be restored. A new tree will be created from the current document.')
+        );
+        return false;
+    }
 }
 
 async function removePersistedState(context: vscode.ExtensionContext) {
@@ -1695,6 +1711,43 @@ function getDiffKeyBase(uri: vscode.Uri): string {
     return `diff-${crypto.createHash('sha1').update(uri.toString()).digest('hex')}`;
 }
 
+async function resolveTrackedDocumentContext(sourceUri?: string): Promise<{ document: vscode.TextDocument; viewColumn?: vscode.ViewColumn } | undefined> {
+    if (sourceUri) {
+        const visible = vscode.window.visibleTextEditors.find((candidate) =>
+            candidate.document.uri.toString() === sourceUri &&
+            !candidate.document.isUntitled &&
+            candidate.document.uri.scheme === 'file' &&
+            isTracked(candidate.document)
+        );
+        if (visible) {
+            return { document: visible.document, viewColumn: visible.viewColumn };
+        }
+        const openDocument = vscode.workspace.textDocuments.find((candidate) =>
+            candidate.uri.toString() === sourceUri &&
+            !candidate.isUntitled &&
+            candidate.uri.scheme === 'file' &&
+            isTracked(candidate)
+        );
+        if (openDocument) {
+            return { document: openDocument, viewColumn: vscode.window.activeTextEditor?.viewColumn };
+        }
+        try {
+            const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(sourceUri));
+            if (!document.isUntitled && document.uri.scheme === 'file' && isTracked(document)) {
+                return { document, viewColumn: vscode.window.activeTextEditor?.viewColumn };
+            }
+        } catch {
+            // Fall back to the current tracked context below.
+        }
+    }
+
+    const fallbackEditor = getTrackedContextEditor(vscode.window.activeTextEditor);
+    if (!fallbackEditor || !isTracked(fallbackEditor.document)) {
+        return undefined;
+    }
+    return { document: fallbackEditor.document, viewColumn: fallbackEditor.viewColumn };
+}
+
 export async function activate(context: vscode.ExtensionContext) {
     manager = new UndoTreeManager();
     const provider = new UndoTreeProvider(context, manager);
@@ -2185,22 +2238,20 @@ export async function activate(context: vscode.ExtensionContext) {
             updateStatusBar(editor);
         }),
 
-        vscode.commands.registerCommand('undotree.diffWithNode', async (targetNodeId: number) => {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor || !manager) {
+        vscode.commands.registerCommand('undotree.diffWithNode', async (targetNodeId: number, sourceUri?: string) => {
+            if (!manager) {
                 return;
             }
-            const tree = manager.getTree(editor.document.uri);
-            const ext = path.extname(editor.document.fileName) || '.txt';
-            const diffKeyBase = getDiffKeyBase(editor.document.uri);
+            const contextDocument = await resolveTrackedDocumentContext(sourceUri);
+            if (!contextDocument) {
+                return;
+            }
+            const tree = manager.getTree(contextDocument.document.uri);
+            const ext = path.extname(contextDocument.document.fileName) || '.txt';
+            const diffKeyBase = getDiffKeyBase(contextDocument.document.uri);
 
             const targetContent = manager.reconstructContent(tree, targetNodeId);
-            const currentContent = editor.document.getText();
-
-            const targetNode = tree.nodes.get(targetNodeId);
-            const currentNode = tree.nodes.get(tree.currentId);
-            const targetLabel = targetNode ? `node${targetNodeId} (${targetNode.label})` : `node${targetNodeId}`;
-            const currentLabel = currentNode ? `current (${currentNode.label})` : 'current';
+            const currentContent = contextDocument.document.getText();
 
             const targetUri = contentProvider.prepare(targetContent, ext, `${diffKeyBase}-target`);
             const currentUri = contentProvider.prepare(currentContent, ext, `${diffKeyBase}-current`);
@@ -2209,11 +2260,41 @@ export async function activate(context: vscode.ExtensionContext) {
                 'vscode.diff',
                 targetUri,
                 currentUri,
-                vscode.l10n.t('Undo Tree Diff: {0}', path.basename(editor.document.fileName)),
+                vscode.l10n.t('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
                 {
                     preview: true,
                     preserveFocus: false,
-                    viewColumn: editor.viewColumn ?? vscode.ViewColumn.Active,
+                    viewColumn: contextDocument.viewColumn ?? vscode.ViewColumn.Active,
+                }
+            );
+            await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        }),
+
+        vscode.commands.registerCommand('undotree.diffBetweenNodes', async (leftNodeId: number, rightNodeId: number, sourceUri?: string) => {
+            if (!manager || leftNodeId === rightNodeId) {
+                return;
+            }
+            const contextDocument = await resolveTrackedDocumentContext(sourceUri);
+            if (!contextDocument) {
+                return;
+            }
+            const tree = manager.getTree(contextDocument.document.uri);
+            const ext = path.extname(contextDocument.document.fileName) || '.txt';
+            const diffKeyBase = getDiffKeyBase(contextDocument.document.uri);
+            const leftContent = manager.reconstructContent(tree, leftNodeId);
+            const rightContent = manager.reconstructContent(tree, rightNodeId);
+            const leftUri = contentProvider.prepare(leftContent, ext, `${diffKeyBase}-left`);
+            const rightUri = contentProvider.prepare(rightContent, ext, `${diffKeyBase}-right`);
+
+            await vscode.commands.executeCommand(
+                'vscode.diff',
+                leftUri,
+                rightUri,
+                vscode.l10n.t('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
+                {
+                    preview: true,
+                    preserveFocus: false,
+                    viewColumn: contextDocument.viewColumn ?? vscode.ViewColumn.Active,
                 }
             );
             await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');

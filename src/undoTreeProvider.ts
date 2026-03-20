@@ -106,7 +106,20 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                         break;
                     case 'diffWithNode':
                         if (typeof message.nodeId === 'number') {
-                            await vscode.commands.executeCommand('undotree.diffWithNode', message.nodeId);
+                            await vscode.commands.executeCommand('undotree.diffWithNode', message.nodeId, message.sourceUri);
+                        }
+                        break;
+                    case 'diffBetweenNodes':
+                        if (
+                            typeof message.leftNodeId === 'number' &&
+                            typeof message.rightNodeId === 'number'
+                        ) {
+                            await vscode.commands.executeCommand(
+                                'undotree.diffBetweenNodes',
+                                message.leftNodeId,
+                                message.rightNodeId,
+                                message.sourceUri
+                            );
                         }
                         break;
                     case 'editNote': {
@@ -183,7 +196,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 state.nodeSizeMetricBase,
                 state.showStorageKind,
                 state.view,
-                state.notTrackedExt
+                state.notTrackedExt,
+                state.sourceUri
             );
             this.webviewInitialized = true;
             return;
@@ -198,7 +212,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private getRenderState(
         editor: vscode.TextEditor | undefined,
         isLoadingCurrentEditor: boolean,
-        timeFormat: 'none' | 'time' | 'dateTime' | 'custom',
+        timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial',
@@ -217,6 +231,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetricBase,
                 showStorageKind,
                 notTrackedExt: '',
+                sourceUri: '',
             };
         }
         if (!editor) {
@@ -232,6 +247,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetricBase,
                 showStorageKind,
                 notTrackedExt: '',
+                sourceUri: '',
             };
         }
         if (!this.isTrackedDocument(editor.document)) {
@@ -249,6 +265,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetricBase,
                 showStorageKind,
                 notTrackedExt: ext,
+                sourceUri: editor.document.uri.toString(),
             };
         }
         const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
@@ -269,6 +286,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             nodeSizeMetricBase,
             showStorageKind,
             notTrackedExt: '',
+            sourceUri: editor.document.uri.toString(),
         };
     }
 
@@ -283,9 +301,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return active;
     }
 
-    private getTimeFormat(): 'none' | 'time' | 'dateTime' | 'custom' {
+    private getTimeFormat(): 'none' | 'time' | 'dateTime' | 'relative' | 'custom' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('timeFormat');
-        if (value === 'none' || value === 'dateTime' || value === 'custom') {
+        if (value === 'none' || value === 'dateTime' || value === 'relative' || value === 'custom') {
             return value;
         }
         return 'time';
@@ -339,10 +357,13 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     private formatTimestamp(
         timestamp: number,
-        timeFormat: 'none' | 'time' | 'dateTime' | 'custom',
+        timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string
     ): string {
         if (timeFormat === 'none') { return ''; }
+        if (timeFormat === 'relative') {
+            return this.formatRelativeTimestamp(timestamp);
+        }
         const pattern = timeFormat === 'time'
             ? 'HH:mm:ss'
             : timeFormat === 'dateTime'
@@ -354,6 +375,26 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         } catch {
             return formatDate(new Date(timestamp), 'yyyy-MM-dd HH:mm:ss');
         }
+    }
+
+    private formatRelativeTimestamp(timestamp: number): string {
+        const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+        if (deltaSeconds < 5) {
+            return vscode.l10n.t('just now');
+        }
+        if (deltaSeconds < 60) {
+            return vscode.l10n.t('{0}s ago', deltaSeconds);
+        }
+        const deltaMinutes = Math.floor(deltaSeconds / 60);
+        if (deltaMinutes < 60) {
+            return vscode.l10n.t('{0}m ago', deltaMinutes);
+        }
+        const deltaHours = Math.floor(deltaMinutes / 60);
+        if (deltaHours < 24) {
+            return vscode.l10n.t('{0}h ago', deltaHours);
+        }
+        const deltaDays = Math.floor(deltaHours / 24);
+        return vscode.l10n.t('{0}d ago', deltaDays);
     }
 
     private buildNotTrackedHtml(ext: string, _fileName: string): string {
@@ -395,13 +436,14 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         currentId: number,
         paused: boolean,
         mode: 'navigate' | 'diff',
-        timeFormat: 'none' | 'time' | 'dateTime' | 'custom',
+        timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial',
         showStorageKind: boolean,
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
-        initialNotTrackedExt = ''
+        initialNotTrackedExt = '',
+        initialSourceUri = ''
     ): string {
         const nonce = getNonce();
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
@@ -421,6 +463,8 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .node.diff-target .right-area { background: color-mix(in srgb, var(--vscode-focusBorder) 16%, var(--vscode-sideBar-background)); }
   .node.current.diff-target { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
   .diff-target-badge { font-size: 9px; color: var(--vscode-focusBorder); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
+  .diff-base { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)) 70%, transparent); }
+  .diff-base-badge { font-size: 9px; color: var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
@@ -443,6 +487,12 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
   .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
+  .diff-tools { display: none; align-items: center; gap: 4px; margin: 0 0 8px; position: sticky; top: 37px; z-index: 1; background: var(--vscode-sideBar-background); padding: 0 0 6px; }
+  .diff-tools.visible { display: flex; flex-wrap: wrap; }
+  .btn-compare { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .btn-compare:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .btn-compare.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .diff-base-label { font-size: 10px; opacity: 0.7; margin-left: 4px; }
   .empty-badge { font-size: 9px; opacity: 0.45; font-style: italic; flex-shrink: 0; }
   .size-diff { font-size: 9px; flex-shrink: 0; opacity: 0.7; }
   .size-diff.plus { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
@@ -464,6 +514,18 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .hint { opacity: 0.45; font-size: 11px; margin-bottom: 12px; }
   .btn { display: block; margin-bottom: 6px; background: none; border: none; padding: 0; color: var(--vscode-textLink-foreground); font-size: 12px; cursor: pointer; text-decoration: underline; text-align: left; }
   .btn:hover { color: var(--vscode-textLink-activeForeground); background: none; }
+  .help-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 10; }
+  .help-overlay.visible { display: flex; }
+  .help-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.35); }
+  .help-card { position: relative; width: min(420px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background)); border-radius: 6px; padding: 12px; box-shadow: 0 8px 28px rgba(0,0,0,0.28); }
+  .help-close { position: absolute; top: 8px; right: 8px; background: transparent; color: var(--vscode-foreground); opacity: 0.7; padding: 2px 6px; }
+  .help-close:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
+  .help-title { font-size: 12px; font-weight: 600; margin-bottom: 10px; }
+  .help-section { margin-top: 10px; }
+  .help-section-title { font-size: 10px; opacity: 0.65; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .shortcut-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+  .shortcut-key { min-width: 88px; font-family: var(--vscode-editor-font-family, var(--vscode-font-family)); color: var(--vscode-textPreformat-foreground, var(--vscode-foreground)); }
+  .shortcut-desc { opacity: 0.82; }
 </style>
 </head>
 <body>
@@ -475,9 +537,39 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   <button class="btn-settings" id="btn-settings" title="${vscode.l10n.t('Open Undo Tree menu')}">&#9881;</button>
 </div>
 ${paused ? `<div class="paused-badge">${vscode.l10n.t('Tracking paused - history is frozen')}</div>` : ''}
+<div id="diff-tools" class="diff-tools${mode === 'diff' ? ' visible' : ''}">
+  <button class="btn-compare active" id="btn-diff-current">${vscode.l10n.t('vs Current')}</button>
+  <button class="btn-compare" id="btn-diff-pair">${vscode.l10n.t('Pair Diff')}</button>
+  <span class="diff-base-label" id="diff-base-label"></span>
+</div>
 ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
 <div id="pinned"></div>
 <div id="tree"></div>
+<div id="help-overlay" class="help-overlay" aria-hidden="true">
+  <div class="help-backdrop" id="help-backdrop"></div>
+  <div class="help-card" role="dialog" aria-modal="true" aria-label="${vscode.l10n.t('Undo Tree shortcuts')}">
+    <button class="help-close" id="help-close" title="${vscode.l10n.t('Close help')}">×</button>
+    <div class="help-title">${vscode.l10n.t('Undo Tree shortcuts')}</div>
+    <div class="help-section">
+      <div class="help-section-title">${vscode.l10n.t('Navigation')}</div>
+      <div class="shortcut-row"><span class="shortcut-key">↑ / ↓, j / k</span><span class="shortcut-desc">${vscode.l10n.t('Move focus')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Enter / Space</span><span class="shortcut-desc">${vscode.l10n.t('Jump or preview diff')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">← / →</span><span class="shortcut-desc">${vscode.l10n.t('Move to parent or child')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Tab / Shift+Tab</span><span class="shortcut-desc">${vscode.l10n.t('Move across siblings')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">n / N</span><span class="shortcut-desc">${vscode.l10n.t('Jump to next or previous noted node')}</span></div>
+    </div>
+    <div class="help-section">
+      <div class="help-section-title">${vscode.l10n.t('Actions')}</div>
+      <div class="shortcut-row"><span class="shortcut-key">u / r</span><span class="shortcut-desc">${vscode.l10n.t('Undo / Redo')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">d</span><span class="shortcut-desc">${vscode.l10n.t('Toggle Diff mode')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">p</span><span class="shortcut-desc">${vscode.l10n.t('Pause or resume tracking')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">b</span><span class="shortcut-desc">${vscode.l10n.t('Set the focused node as the Pair Diff base')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">c</span><span class="shortcut-desc">${vscode.l10n.t('Switch Pair Diff back to current comparison')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">?</span><span class="shortcut-desc">${vscode.l10n.t('Toggle this help')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Esc</span><span class="shortcut-desc">${vscode.l10n.t('Close help or exit Diff mode')}</span></div>
+    </div>
+  </div>
+</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   let nodes = ${nodesJson};
@@ -488,6 +580,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   let nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
   let nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
   let showStorageKind = ${JSON.stringify(showStorageKind)};
+  let sourceUri = ${JSON.stringify(initialSourceUri)};
+  let diffCompareMode = 'current';
+  let diffBaseNodeId = null;
   const i18n = {
     noteClickToEdit: ${JSON.stringify(vscode.l10n.t(' (click to edit)'))},
     noteAdd: ${JSON.stringify(vscode.l10n.t('Add note'))},
@@ -503,6 +598,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     enableTrackingWithExt: ${JSON.stringify(vscode.l10n.t('Enable tracking for {0}', '{ext}'))},
     enableTrackingGeneric: ${JSON.stringify(vscode.l10n.t('Enable tracking for this file'))},
     openSettings: ${JSON.stringify(vscode.l10n.t('Open Settings'))},
+    basePrefix: ${JSON.stringify(vscode.l10n.t('Base: '))},
+    pairDiffNeedsBase: ${JSON.stringify(vscode.l10n.t('Select a base node first with Set Base or B.'))},
   };
 
   function replaceExt(template, ext) {
@@ -521,6 +618,18 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   if (modeButton) { modeButton.addEventListener('click', () => send('toggleMode')); }
   const settingsButton = document.getElementById('btn-settings');
   if (settingsButton) { settingsButton.addEventListener('click', () => send('showMenu')); }
+  const diffCurrentButton = document.getElementById('btn-diff-current');
+  const diffPairButton = document.getElementById('btn-diff-pair');
+  if (diffCurrentButton) { diffCurrentButton.addEventListener('click', () => setDiffCompareMode('current')); }
+  if (diffPairButton) {
+    diffPairButton.addEventListener('click', () => {
+      setDiffCompareMode('pair');
+    });
+  }
+  const helpBackdrop = document.getElementById('help-backdrop');
+  if (helpBackdrop) { helpBackdrop.addEventListener('click', () => setHelpVisible(false)); }
+  const helpClose = document.getElementById('help-close');
+  if (helpClose) { helpClose.addEventListener('click', () => setHelpVisible(false)); }
 
   window.addEventListener('message', (event) => {
     if (event.data?.command === 'showJumpLoading') {
@@ -573,11 +682,79 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   let nodeIds = [];
   let treeMap = {};
 
+  function isHelpVisible() {
+    return document.getElementById('help-overlay')?.classList.contains('visible') === true;
+  }
+
+  function setHelpVisible(visible) {
+    const overlay = document.getElementById('help-overlay');
+    if (!overlay) { return; }
+    overlay.classList.toggle('visible', visible);
+    overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+
+  function getNodeDisplayLabel(nodeId) {
+    const node = treeMap[nodeId];
+    if (!node) { return ''; }
+    return node.note || node.label;
+  }
+
+  function renderDiffTools() {
+    const tools = document.getElementById('diff-tools');
+    const currentButton = document.getElementById('btn-diff-current');
+    const pairButton = document.getElementById('btn-diff-pair');
+    const baseLabel = document.getElementById('diff-base-label');
+    if (!tools || !currentButton || !pairButton || !baseLabel) { return; }
+    tools.classList.toggle('visible', mode === 'diff');
+    currentButton.classList.toggle('active', diffCompareMode === 'current');
+    pairButton.classList.toggle('active', diffCompareMode === 'pair');
+    if (mode !== 'diff') {
+      baseLabel.textContent = '';
+      return;
+    }
+    if (diffCompareMode === 'pair') {
+      if (diffBaseNodeId !== null && treeMap[diffBaseNodeId]) {
+        baseLabel.textContent = i18n.basePrefix + getNodeDisplayLabel(diffBaseNodeId);
+      } else {
+        baseLabel.textContent = i18n.pairDiffNeedsBase;
+      }
+      return;
+    }
+    baseLabel.textContent = '';
+  }
+
+  function setDiffCompareMode(nextMode) {
+    diffCompareMode = nextMode;
+    if (nextMode === 'current') {
+      diffBaseNodeId = null;
+    }
+    renderDiffTools();
+    if (focusedIndex >= 0) {
+      setFocused(focusedIndex);
+    }
+  }
+
+  function setDiffBaseNode(nodeId) {
+    if (nodeId === undefined || nodeId === null) { return; }
+    diffBaseNodeId = nodeId;
+    diffCompareMode = 'pair';
+    renderDiffTools();
+    if (focusedIndex >= 0) {
+      setFocused(focusedIndex);
+    }
+  }
+
   function previewDiffForFocused() {
-    if (mode !== 'diff' || focusedIndex < 0) { return; }
+    if (mode !== 'diff' || focusedIndex < 0 || !sourceUri) { return; }
     const nodeId = nodeIds[focusedIndex];
-    if (nodeId === undefined || nodeId === currentId) { return; }
-    send('diffWithNode', { nodeId });
+    if (nodeId === undefined) { return; }
+    if (diffCompareMode === 'pair') {
+      if (diffBaseNodeId === null || nodeId === diffBaseNodeId) { return; }
+      send('diffBetweenNodes', { leftNodeId: diffBaseNodeId, rightNodeId: nodeId, sourceUri });
+      return;
+    }
+    if (nodeId === currentId) { return; }
+    send('diffWithNode', { nodeId, sourceUri });
   }
 
   function setFocused(idx) {
@@ -585,7 +762,16 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       const isFocused = i === idx;
       const nodeId = nodeIds[i];
       el.classList.toggle('focused', isFocused);
-      el.classList.toggle('diff-target', mode === 'diff' && isFocused && nodeId !== currentId);
+      el.classList.toggle('diff-base', mode === 'diff' && diffCompareMode === 'pair' && nodeId === diffBaseNodeId);
+      el.classList.toggle(
+        'diff-target',
+        mode === 'diff' &&
+          isFocused &&
+          (
+            (diffCompareMode === 'current' && nodeId !== currentId) ||
+            (diffCompareMode === 'pair' && diffBaseNodeId !== null && nodeId !== diffBaseNodeId)
+          )
+      );
     });
     focusedIndex = idx;
     if (idx >= 0 && nodeEls[idx]) { nodeEls[idx].scrollIntoView({ block: 'nearest' }); }
@@ -595,7 +781,17 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   function jumpFocused() {
     if (focusedIndex < 0) { return; }
     const nodeId = nodeIds[focusedIndex];
-    if (mode === 'diff') { send('diffWithNode', { nodeId }); }
+    if (mode === 'diff') {
+      if (diffCompareMode === 'pair') {
+        if (diffBaseNodeId === null || nodeId === diffBaseNodeId) {
+          setDiffBaseNode(nodeId);
+        } else {
+          send('diffBetweenNodes', { leftNodeId: diffBaseNodeId, rightNodeId: nodeId, sourceUri });
+        }
+      } else {
+        send('diffWithNode', { nodeId, sourceUri });
+      }
+    }
     else { send('jumpToNode', { nodeId, focusEditor: true }); }
   }
 
@@ -622,7 +818,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
 
   document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') { return; }
-    if (e.key === 'Escape' && mode === 'diff') {
+    if (e.key === '?') {
+      e.preventDefault();
+      setHelpVisible(!isHelpVisible());
+    } else if (e.key === 'Escape' && isHelpVisible()) {
+      e.preventDefault();
+      setHelpVisible(false);
+    } else if (e.key === 'Escape' && mode === 'diff') {
       e.preventDefault(); send('toggleMode');
     } else if (e.key === 'ArrowDown' || e.key === 'j') {
       e.preventDefault();
@@ -660,6 +862,11 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       e.preventDefault(); send('redo');
     } else if (e.key === 'd') {
       e.preventDefault(); send('toggleMode');
+    } else if (e.key === 'b') {
+      e.preventDefault();
+      if (focusedIndex >= 0) { setDiffBaseNode(nodeIds[focusedIndex]); }
+    } else if (e.key === 'c') {
+      e.preventDefault(); setDiffCompareMode('current');
     } else if (e.key === 'p') {
       e.preventDefault(); send('togglePause');
     } else if (e.key === 'n') {
@@ -709,9 +916,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
           row.addEventListener('click', () => {
             const idx = nodeIds.indexOf(node.id);
             if (idx >= 0) { setFocused(idx); }
-            if (mode === 'diff') {
-              send('diffWithNode', { nodeId: node.id });
-            } else {
+            if (mode !== 'diff') {
               send('jumpToNode', { nodeId: node.id });
             }
           });
@@ -769,7 +974,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
         labelHtml +
-        (mode === 'diff' && !isCurrent ? '<span class="diff-target-badge">Diff</span>' : '') +
+        (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">Base</span>' : '') +
+        (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">Diff</span>' : '') +
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
@@ -793,7 +999,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         if (idx >= 0) { setFocused(idx); }
         if (!isCurrent) {
           if (mode === 'diff') {
-            send('diffWithNode', { nodeId: node.id });
+            if (diffCompareMode === 'pair' && diffBaseNodeId === null) {
+              setDiffBaseNode(node.id);
+            } else if (diffCompareMode === 'pair' && diffBaseNodeId !== node.id) {
+              send('diffBetweenNodes', { leftNodeId: diffBaseNodeId, rightNodeId: node.id, sourceUri });
+            } else {
+              send('diffWithNode', { nodeId: node.id, sourceUri });
+            }
           } else {
             send('jumpToNode', { nodeId: node.id });
           }
@@ -818,6 +1030,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     const currentEl = container.querySelector('.node.current');
     if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
     setFocused(nodeIds.indexOf(currentId));
+    renderDiffTools();
   }
 
   function renderNotTracked(ext) {
@@ -851,6 +1064,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     nodeSizeMetric = state.nodeSizeMetric;
     nodeSizeMetricBase = state.nodeSizeMetricBase;
     showStorageKind = state.showStorageKind;
+    sourceUri = state.sourceUri || '';
+
+    if (diffBaseNodeId !== null && !state.nodes?.some((node) => node.id === diffBaseNodeId)) {
+      diffBaseNodeId = null;
+      if (diffCompareMode === 'pair') {
+        diffCompareMode = 'current';
+      }
+    }
 
     document.querySelector('.btn-pause').textContent = state.paused ? ${JSON.stringify(vscode.l10n.t('Resume'))} : ${JSON.stringify(vscode.l10n.t('Pause'))};
     document.querySelector('.btn-pause').title = state.paused ? ${JSON.stringify(vscode.l10n.t('Resume tracking'))} : ${JSON.stringify(vscode.l10n.t('Pause tracking'))};
@@ -886,6 +1107,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     } else if (diffBadge) {
       diffBadge.remove();
     }
+    renderDiffTools();
 
     const overlay = document.getElementById('jump-overlay');
     if (overlay) { overlay.remove(); }
@@ -918,7 +1140,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     nodeSizeMetric,
     nodeSizeMetricBase,
     showStorageKind,
-    notTrackedExt: ${JSON.stringify(initialNotTrackedExt)}
+    notTrackedExt: ${JSON.stringify(initialNotTrackedExt)},
+    sourceUri
   });
 </script>
 </body>

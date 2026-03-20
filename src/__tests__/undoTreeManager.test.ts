@@ -97,10 +97,10 @@ describe('persisted state validation', () => {
         } as any)).toThrow('references missing child');
     });
 
-    it('rejects trees whose parent and child references disagree', () => {
+    it('repairs trees whose parent and child references disagree', () => {
         const manager = new UndoTreeManager();
 
-        expect(() => manager.importTree('file:///broken-links.md', {
+        manager.importTree('file:///broken-links.md', {
             nodes: [
                 {
                     id: 0,
@@ -124,7 +124,11 @@ describe('persisted state validation', () => {
             hashMap: [['root', 0], ['child', 1]],
             currentId: 1,
             rootId: 0,
-        })).toThrow('back-reference');
+        });
+
+        const tree = manager.getTree(makeUri('file:///broken-links.md'));
+        expect(tree.nodes.get(0)?.children).toContain(1);
+        expect(tree.nodes.get(1)?.parents).toContain(0);
     });
 });
 

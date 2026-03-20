@@ -154,6 +154,7 @@
               "none",
               "time",
               "dateTime",
+              "relative",
               "custom"
             ],
             "default": "time",

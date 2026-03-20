@@ -29,15 +29,27 @@ describe('UndoTreeProvider diff mode', () => {
         );
 
         expect(html).toContain('function previewDiffForFocused() {');
-        expect(html).toContain("if (mode !== 'diff' || focusedIndex < 0) { return; }");
-        expect(html).toContain("send('diffWithNode', { nodeId });");
+        expect(html).toContain("if (mode !== 'diff' || focusedIndex < 0 || !sourceUri) { return; }");
+        expect(html).toContain("send('diffWithNode', { nodeId, sourceUri });");
+        expect(html).toContain("send('diffBetweenNodes', { leftNodeId: diffBaseNodeId, rightNodeId: nodeId, sourceUri });");
         expect(html).toContain('previewDiffForFocused();');
-        expect(html).toContain("el.classList.toggle('diff-target', mode === 'diff' && isFocused && nodeId !== currentId);");
+        expect(html).toContain("el.classList.toggle('diff-base', mode === 'diff' && diffCompareMode === 'pair' && nodeId === diffBaseNodeId);");
+        expect(html).toContain("el.classList.toggle(");
         expect(html).toContain('<span class="diff-target-badge">Diff</span>');
         expect(html).toContain('Diff mode - select a node to compare');
         expect(html).toContain('setFocused(nodeIds.indexOf(currentId));');
         expect(html).toContain("if (e.key === 'Escape' && mode === 'diff') {");
         expect(html).toContain("e.preventDefault(); send('toggleMode');");
+        expect(html).toContain('Pair Diff');
+        expect(html).not.toContain('id="btn-diff-set-base"');
+        expect(html).not.toContain("diffBaseNodeId = nodeIds[focusedIndex] ?? null;");
+        expect(html).toContain('Undo Tree shortcuts');
+        expect(html).toContain('id="help-close"');
+        expect(html).toContain('Close help');
+        expect(html).toContain("if (e.key === '?') {");
+        expect(html).toContain("} else if (e.key === 'b') {");
+        expect(html).toContain("} else if (e.key === 'c') {");
+        expect(html).toContain('diff-base-badge');
     });
 
     it('cancels diff mode when switching to another file', () => {

@@ -872,7 +872,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 }
                 const parent = nodes.get(parentId)!;
                 if (!parent.children.includes(node.id)) {
-                    throw new Error(`Node ${node.id} is missing back-reference from parent ${parentId}`);
+                    parent.children.push(node.id);
                 }
             }
             for (const childId of node.children) {
@@ -881,7 +881,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 }
                 const child = nodes.get(childId)!;
                 if (!child.parents.includes(node.id)) {
-                    throw new Error(`Node ${node.id} is missing back-reference from child ${childId}`);
+                    child.parents.push(node.id);
                 }
             }
         }

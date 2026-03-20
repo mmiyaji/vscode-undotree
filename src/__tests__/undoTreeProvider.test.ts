@@ -151,6 +151,18 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain('let timeFormatCustom = "YYYY-MM-DD HH:mm:ss";');
     });
 
+    it('supports relative timestamp formatting', () => {
+        jest.setSystemTime(new Date('2026-03-20T12:00:00Z'));
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        expect((provider as any).formatTimestamp(
+            new Date('2026-03-20T11:55:00Z').getTime(),
+            'relative',
+            'yyyy-MM-dd HH:mm:ss'
+        )).toBe('5m ago');
+    });
+
     it('supports custom timestamp formatting', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
