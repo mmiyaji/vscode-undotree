@@ -95,10 +95,10 @@ describe('persisted state validation', () => {
         })).toThrow('Invalid delta node diffs');
     });
 
-    it('stops on malformed imported state', () => {
+    it('drops missing references in malformed imported state and keeps loading', () => {
         const manager = new UndoTreeManager();
 
-        expect(() => manager.importState({
+        manager.importState({
             nextId: 2,
             trees: {
                 'file:///broken.md': {
@@ -118,7 +118,11 @@ describe('persisted state validation', () => {
                     rootId: 0,
                 },
             },
-        } as any)).toThrow('references missing child');
+        } as any);
+
+        const tree = manager.getTree(makeUri('file:///broken.md'));
+        expect(tree.nodes.size).toBe(1);
+        expect(tree.nodes.get(0)?.children).toEqual([]);
     });
 
     it('repairs trees whose parent and child references disagree', () => {
@@ -1174,6 +1178,81 @@ describe('persisted tree reconciliation', () => {
         expect(restoreNode.label).toBe('restore');
         expect(restoreNode.parents).toEqual([2]);
         expect(restored.reconstructContent(tree, tree.currentId)).toBe('disk version');
+    });
+
+    it('repairs a cyclic persisted tree by choosing a safe parent and preserving all nodes', () => {
+        const restored = new UndoTreeManager();
+        restored.importTree('file:///broken-cycle.md', {
+            nodes: [
+                {
+                    id: 0,
+                    parents: [],
+                    children: [1],
+                    timestamp: 1,
+                    label: 'initial',
+                    hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                    lineCount: 1,
+                    byteCount: 4,
+                },
+                {
+                    id: 1,
+                    parents: [0],
+                    children: [2],
+                    timestamp: 2,
+                    label: 'save',
+                    hash: 'h1',
+                    storage: { kind: 'delta', diffs: [[{ offset: 4, removeLength: 0, inserted: 'x' }]] },
+                    lineCount: 1,
+                    byteCount: 5,
+                },
+                {
+                    id: 2,
+                    parents: [21],
+                    children: [],
+                    timestamp: 100,
+                    label: 'restore',
+                    hash: 'h21',
+                    storage: { kind: 'full', content: 'latest' },
+                    lineCount: 1,
+                    byteCount: 6,
+                },
+                {
+                    id: 3,
+                    parents: [2],
+                    children: [21],
+                    timestamp: 3,
+                    label: 'save',
+                    hash: 'h3',
+                    storage: { kind: 'delta', diffs: [[{ offset: 5, removeLength: 0, inserted: 'y' }]] },
+                    lineCount: 1,
+                    byteCount: 6,
+                },
+                {
+                    id: 21,
+                    parents: [3],
+                    children: [2],
+                    timestamp: 4,
+                    label: 'save',
+                    hash: 'h21',
+                    storage: { kind: 'delta', diffs: [[{ offset: 6, removeLength: 0, inserted: 'z' }]] },
+                    lineCount: 1,
+                    byteCount: 7,
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h3', 3], ['h21', 2]],
+            currentId: 2,
+            rootId: 0,
+        });
+
+        const tree = restored.getTree(makeUri('file:///broken-cycle.md'));
+
+        expect(tree.nodes.size).toBe(5);
+        expect(tree.nodes.get(2)?.parents).toEqual([1]);
+        expect(tree.nodes.get(1)?.children).toContain(2);
+        expect(tree.nodes.get(2)?.children).toContain(3);
+        expect(tree.nodes.get(21)?.children).not.toContain(2);
+        expect(restored.reconstructContent(tree, 2)).toBe('latest');
     });
 });
 

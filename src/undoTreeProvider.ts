@@ -509,7 +509,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .tree-header .right-area { background: var(--vscode-sideBar-background); position: sticky; right: 4px; padding-left: 6px; }
   .tree-header .size-diff, .tree-header .size-total, .tree-header .time { opacity: 0.7; }
   .time { text-align: right; white-space: nowrap; justify-self: end; }
-  .note { font-style: italic; opacity: 0.55; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
+  .note { font-weight: 600; opacity: 0.72; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
   .node:hover .note-edit:hover { opacity: 1; }
@@ -604,7 +604,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   let diffCompareMode = 'current';
   let diffBaseNodeId = null;
   const i18n = {
-    noteClickToEdit: ${JSON.stringify(vscode.l10n.t(' (click to edit)'))},
+    noteDoubleClickToEdit: ${JSON.stringify(vscode.l10n.t(' (double-click to edit)'))},
     noteAdd: ${JSON.stringify(vscode.l10n.t('Add note'))},
     pinNode: ${JSON.stringify(vscode.l10n.t('Pin node'))},
     unpinNode: ${JSON.stringify(vscode.l10n.t('Unpin node'))},
@@ -1121,7 +1121,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? i18n.titleClickDiff : i18n.titleClickJump;
       const noteHtml = node.note
-        ? '<span class="note note-action" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteClickToEdit + '">' + escHtml(node.note) + '</span>'
+        ? '<span class="note note-text" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteDoubleClickToEdit + '">' + escHtml(node.note) + '</span>' +
+          '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.contextEditNote + '">&#9998;</span>'
         : '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.noteAdd + '">&#9998;</span>';
       const pinHtml = '<span class="pin-btn pin-action' + (node.pinned ? ' active' : '') + '" data-node-id="' + node.id + '" title="' + (node.pinned ? i18n.unpinNode : i18n.pinNode) + '">&#128204;</span>';
       const parentId = node.parents?.length ? node.parents[node.parents.length - 1] : undefined;
@@ -1147,6 +1148,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       const noteAction = div.querySelector('.note-action');
       if (noteAction) {
         noteAction.addEventListener('click', (event) => {
+          event.stopPropagation();
+          send('editNote', { nodeId: node.id });
+        });
+      }
+      const noteText = div.querySelector('.note-text');
+      if (noteText) {
+        noteText.addEventListener('dblclick', (event) => {
           event.stopPropagation();
           send('editNote', { nodeId: node.id });
         });

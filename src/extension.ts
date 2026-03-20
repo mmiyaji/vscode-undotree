@@ -853,6 +853,52 @@ async function readPersistedContentHashesFromTreeFile(
     );
 }
 
+async function writeFileSafely(
+    filePath: string,
+    data: string | Buffer,
+    encoding?: BufferEncoding
+): Promise<void> {
+    const dir = path.dirname(filePath);
+    await fs.mkdir(dir, { recursive: true });
+    const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const backupPath = `${filePath}.bak-write`;
+    const hasEncoding = typeof data === 'string' && encoding;
+
+    try {
+        if (hasEncoding) {
+            await fs.writeFile(tempPath, data, encoding);
+        } else {
+            await fs.writeFile(tempPath, data);
+        }
+
+        await fs.rm(backupPath, { force: true }).catch(() => undefined);
+        let movedOriginal = false;
+        try {
+            await fs.rename(filePath, backupPath);
+            movedOriginal = true;
+        } catch (error: unknown) {
+            const nodeError = error as NodeJS.ErrnoException;
+            if (nodeError?.code !== 'ENOENT') {
+                throw error;
+            }
+        }
+
+        try {
+            await fs.rename(tempPath, filePath);
+            if (movedOriginal) {
+                await fs.rm(backupPath, { force: true }).catch(() => undefined);
+            }
+        } catch (error) {
+            if (movedOriginal) {
+                await fs.rename(backupPath, filePath).catch(() => undefined);
+            }
+            throw error;
+        }
+    } finally {
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    }
+}
+
 async function persistStateToDisk(
     context: vscode.ExtensionContext,
     state: ReturnType<UndoTreeManager['exportState']>,
@@ -944,7 +990,7 @@ async function persistStateToDisk(
                 } catch {
                     const content = manager?.getCheckpointContent(hash) ?? '';
                     const compressed = await gzip(Buffer.from(content, 'utf8'));
-                    await fs.writeFile(filePath, compressed);
+                    await writeFileSafely(filePath, compressed);
                 }
             }));
         }
@@ -954,15 +1000,15 @@ async function persistStateToDisk(
 
         if (useCompression) {
             const compressed = await gzip(Buffer.from(json, 'utf8'));
-            await fs.writeFile(filePath, compressed);
+            await writeFileSafely(filePath, compressed);
         } else {
-            await fs.writeFile(filePath, json, 'utf8');
+            await writeFileSafely(filePath, json, 'utf8');
         }
     }));
 
     const manifestJson = JSON.stringify(manifest, null, 2);
-    await fs.writeFile(path.join(treesDir, 'manifest.json'), manifestJson, 'utf8');
-    await fs.writeFile(path.join(treesDir, 'manifest.json.bak'), manifestJson, 'utf8');
+    await writeFileSafely(path.join(treesDir, 'manifest.json'), manifestJson, 'utf8');
+    await writeFileSafely(path.join(treesDir, 'manifest.json.bak'), manifestJson, 'utf8');
 
     // マニフェストにないツリーファイルのみ削除（保存済みツリーは保持）
     if (canPruneTreeFiles) {
@@ -1380,16 +1426,16 @@ async function simulateManifestBackupFallback(
             trees: [],
         };
     const raw = JSON.stringify(fallbackManifest, null, 2);
-    await fs.writeFile(backupPath, raw, 'utf8');
-    await fs.writeFile(manifestPath, '{', 'utf8');
+    await writeFileSafely(backupPath, raw, 'utf8');
+    await writeFileSafely(manifestPath, '{', 'utf8');
 }
 
 async function simulateManifestInvalid(context: vscode.ExtensionContext): Promise<void> {
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     await fs.mkdir(treesDir, { recursive: true });
     await Promise.all([
-        fs.writeFile(path.join(treesDir, 'manifest.json'), '{', 'utf8'),
-        fs.writeFile(path.join(treesDir, 'manifest.json.bak'), '{', 'utf8'),
+        writeFileSafely(path.join(treesDir, 'manifest.json'), '{', 'utf8'),
+        writeFileSafely(path.join(treesDir, 'manifest.json.bak'), '{', 'utf8'),
     ]);
 }
 
@@ -1455,8 +1501,8 @@ async function rebuildPersistedManifestFromTreeFiles(
         trees,
     };
     const raw = JSON.stringify(manifest, null, 2);
-    await fs.writeFile(path.join(treesDir, 'manifest.json'), raw, 'utf8');
-    await fs.writeFile(path.join(treesDir, 'manifest.json.bak'), raw, 'utf8');
+    await writeFileSafely(path.join(treesDir, 'manifest.json'), raw, 'utf8');
+    await writeFileSafely(path.join(treesDir, 'manifest.json.bak'), raw, 'utf8');
 
     return { rebuilt: trees.length };
 }

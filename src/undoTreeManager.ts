@@ -851,6 +851,177 @@ export class UndoTreeManager implements vscode.Disposable {
         return result;
     }
 
+    private wouldCreateParentCycle(
+        childId: number,
+        parentId: number,
+        chosenParents: Map<number, number>
+    ): boolean {
+        let current: number | undefined = parentId;
+        const visited = new Set<number>();
+        while (current !== undefined) {
+            if (current === childId) {
+                return true;
+            }
+            if (visited.has(current)) {
+                return true;
+            }
+            visited.add(current);
+            current = chosenParents.get(current);
+        }
+        return false;
+    }
+
+    private needsTopologyRepair(
+        nodes: Map<number, UndoNode>,
+        rootId: number
+    ): boolean {
+        const seenChildEdges = new Set<string>();
+
+        for (const node of nodes.values()) {
+            if (node.id === rootId) {
+                if (node.parents.length !== 0) {
+                    return true;
+                }
+            } else if (node.parents.length !== 1) {
+                return true;
+            }
+
+            const localChildren = new Set<number>();
+            for (const childId of node.children) {
+                if (!nodes.has(childId) || childId === node.id || localChildren.has(childId)) {
+                    return true;
+                }
+                localChildren.add(childId);
+                seenChildEdges.add(`${node.id}->${childId}`);
+            }
+        }
+
+        const visited = new Set<number>();
+        const active = new Set<number>();
+        const hasCycle = (nodeId: number): boolean => {
+            if (active.has(nodeId)) {
+                return true;
+            }
+            if (visited.has(nodeId)) {
+                return false;
+            }
+            visited.add(nodeId);
+            active.add(nodeId);
+            const node = nodes.get(nodeId);
+            if (node) {
+                for (const childId of node.children) {
+                    if (hasCycle(childId)) {
+                        return true;
+                    }
+                }
+            }
+            active.delete(nodeId);
+            return false;
+        };
+
+        if (hasCycle(rootId)) {
+            return true;
+        }
+
+        for (const node of nodes.values()) {
+            if (!visited.has(node.id)) {
+                return true;
+            }
+            if (node.id !== rootId) {
+                const parentId = node.parents[0];
+                if (parentId === undefined || !nodes.has(parentId) || parentId === node.id) {
+                    return true;
+                }
+                if (!seenChildEdges.has(`${parentId}->${node.id}`)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private repairTreeTopology(
+        nodes: Map<number, UndoNode>,
+        rootId: number
+    ): void {
+        const inboundParents = new Map<number, Set<number>>();
+        for (const node of nodes.values()) {
+            for (const parentId of node.parents) {
+                if (nodes.has(parentId) && parentId !== node.id) {
+                    if (!inboundParents.has(node.id)) {
+                        inboundParents.set(node.id, new Set<number>());
+                    }
+                    inboundParents.get(node.id)!.add(parentId);
+                }
+            }
+            for (const childId of node.children) {
+                if (nodes.has(childId) && childId !== node.id) {
+                    if (!inboundParents.has(childId)) {
+                        inboundParents.set(childId, new Set<number>());
+                    }
+                    inboundParents.get(childId)!.add(node.id);
+                }
+            }
+        }
+
+        const chosenParents = new Map<number, number>();
+        const orderedNodes = Array.from(nodes.values()).sort((a, b) =>
+            a.timestamp === b.timestamp ? a.id - b.id : a.timestamp - b.timestamp
+        );
+
+        for (const node of orderedNodes) {
+            if (node.id === rootId) {
+                continue;
+            }
+
+            const explicitParents = node.parents.filter((parentId) => nodes.has(parentId) && parentId !== node.id);
+            const inferredParents = Array.from(inboundParents.get(node.id) ?? []).filter((parentId) =>
+                parentId !== node.id && !explicitParents.includes(parentId)
+            );
+            const candidates = [...explicitParents, ...inferredParents];
+
+            let selectedParent: number | undefined;
+            for (const candidateParentId of candidates) {
+                if (!this.wouldCreateParentCycle(node.id, candidateParentId, chosenParents)) {
+                    selectedParent = candidateParentId;
+                    break;
+                }
+            }
+
+            if (selectedParent === undefined && rootId !== node.id) {
+                selectedParent = rootId;
+            }
+
+            if (selectedParent !== undefined) {
+                chosenParents.set(node.id, selectedParent);
+            }
+        }
+
+        for (const node of nodes.values()) {
+            node.children = [];
+        }
+
+        for (const node of nodes.values()) {
+            if (node.id === rootId) {
+                node.parents = [];
+                continue;
+            }
+            const parentId = chosenParents.get(node.id);
+            node.parents = parentId !== undefined ? [parentId] : [];
+        }
+
+        for (const node of nodes.values()) {
+            const parentId = node.parents[0];
+            if (parentId !== undefined) {
+                const parent = nodes.get(parentId);
+                if (parent && !parent.children.includes(node.id)) {
+                    parent.children.push(node.id);
+                }
+            }
+        }
+    }
+
     private deserializeTree(tree: unknown): UndoTree {
         if (!tree || typeof tree !== 'object') {
             throw new Error('Invalid undo tree');
@@ -878,6 +1049,10 @@ export class UndoTreeManager implements vscode.Disposable {
 
         if (!nodes.has(candidate.currentId) || !nodes.has(candidate.rootId)) {
             throw new Error('Undo tree references missing root or current node');
+        }
+
+        if (this.needsTopologyRepair(nodes, candidate.rootId)) {
+            this.repairTreeTopology(nodes, candidate.rootId);
         }
 
         for (const node of nodes.values()) {
