@@ -27,6 +27,30 @@ function makeChangeEvent(doc: any, changes: Array<{ offset: number; removeLength
     } as any;
 }
 
+function makeEditor(initialContent: string, uriStr = 'file:///test.md') {
+    let content = initialContent;
+    const document = {
+        getText: () => content,
+        uri: makeUri(uriStr),
+        isUntitled: false,
+        positionAt: (offset: number) => offset,
+    } as any;
+    return {
+        document,
+        setContent(next: string) {
+            content = next;
+        },
+        edit: async (callback: (editBuilder: { replace: (_range: unknown, text: string) => void }) => void) => {
+            callback({
+                replace: (_range, text) => {
+                    content = text;
+                },
+            });
+            return true;
+        },
+    } as any;
+}
+
 // -----------------------------------------------
 // 基本動作
 // -----------------------------------------------
@@ -159,6 +183,43 @@ describe('保存時のノード追加', () => {
         manager.onDidSaveTextDocument(doc2);
         const tree = manager.getTree(makeUri());
         expect(tree.nodes.size).toBe(3);
+    });
+
+    it('jumpToNode直後のautosave相当ではノードを追加しない', async () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri('file:///jump-save.md');
+        manager.onDidSaveTextDocument(makeDocument('A', 'file:///jump-save.md'));
+        manager.onDidSaveTextDocument(makeDocument('B', 'file:///jump-save.md'));
+
+        const tree = manager.getTree(uri);
+        const editor = makeEditor('B', 'file:///jump-save.md');
+
+        await manager.jumpToNode(1, editor, tree);
+        manager.onDidSaveTextDocument(editor.document);
+
+        expect(tree.currentId).toBe(1);
+        expect(tree.nodes.size).toBe(3);
+    });
+
+    it('jumpToNode後に実編集が入れば次のsaveでノードを追加する', async () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri('file:///jump-edit.md');
+        manager.onDidSaveTextDocument(makeDocument('A', 'file:///jump-edit.md'));
+        manager.onDidSaveTextDocument(makeDocument('B', 'file:///jump-edit.md'));
+
+        const tree = manager.getTree(uri);
+        const editor = makeEditor('B', 'file:///jump-edit.md');
+
+        await manager.jumpToNode(1, editor, tree);
+        editor.setContent('A!');
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(editor.document, [{ offset: 1, removeLength: 0, text: '!' }])
+        );
+        manager.onDidSaveTextDocument(editor.document);
+
+        expect(tree.nodes.size).toBe(4);
+        expect(tree.currentId).not.toBe(1);
+        expect(tree.nodes.get(tree.currentId)?.parents).toContain(1);
     });
 });
 

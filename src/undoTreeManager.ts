@@ -97,6 +97,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private diffBuffer = new Map<string, Diff[][]>();
     private dirtyTrees = new Set<string>();
     private lastAccessAt = new Map<string, number>();
+    private jumpSuppressedHashes = new Map<string, string>();
     private nextId = 1;
     private autosaveTimer: ReturnType<typeof setInterval> | undefined;
     private autosaveIntervalMs = DEFAULT_AUTOSAVE_INTERVAL_MS;
@@ -311,6 +312,7 @@ export class UndoTreeManager implements vscode.Disposable {
         this.diffBuffer.clear();
         this.dirtyTrees.clear();
         this.lastAccessAt.clear();
+        this.jumpSuppressedHashes.clear();
         this.contentCache.clear();
         this.contentCacheBytes = 0;
         this.nextId = 1;
@@ -323,6 +325,7 @@ export class UndoTreeManager implements vscode.Disposable {
         this.diffBuffer.delete(key);
         this.dirtyTrees.delete(key);
         this.lastAccessAt.delete(key);
+        this.jumpSuppressedHashes.delete(key);
         this.onRefresh?.();
     }
 
@@ -331,6 +334,7 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
         const key = e.document.uri.toString();
+        this.jumpSuppressedHashes.delete(key);
         const buffer = this.diffBuffer.get(key) ?? [];
         const eventDiffs: Diff[] = e.contentChanges.map(c => ({
             offset: c.rangeOffset,
@@ -351,6 +355,7 @@ export class UndoTreeManager implements vscode.Disposable {
     onDidCloseTextDocument(document: vscode.TextDocument) {
         const key = document.uri.toString();
         this.diffBuffer.delete(key);
+        this.jumpSuppressedHashes.delete(key);
     }
 
     onDidChangeActiveEditor(_editor: vscode.TextEditor | undefined) {}
@@ -375,9 +380,18 @@ export class UndoTreeManager implements vscode.Disposable {
         const tree = this.getTree(document.uri);
         const key = document.uri.toString();
         const currentNode = tree.nodes.get(tree.currentId)!;
+        const suppressedHash = this.jumpSuppressedHashes.get(key);
+
+        if (suppressedHash === hash && (this.diffBuffer.get(key)?.length ?? 0) === 0) {
+            return;
+        }
+        if (suppressedHash && suppressedHash !== hash) {
+            this.jumpSuppressedHashes.delete(key);
+        }
 
         if (currentNode.hash === hash) {
             this.diffBuffer.delete(key);
+            this.jumpSuppressedHashes.delete(key);
             return;
         }
 
@@ -616,6 +630,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
         const uriStr = editor.document.uri.toString();
         this.diffBuffer.delete(uriStr);
+        this.jumpSuppressedHashes.set(uriStr, node.hash);
         this.dirtyTrees.add(uriStr);
         this.onRefresh?.();
     }
@@ -1472,6 +1487,7 @@ export class UndoTreeManager implements vscode.Disposable {
         this.trees.clear();
         this.diffBuffer.clear();
         this.lastAccessAt.clear();
+        this.jumpSuppressedHashes.clear();
         this.contentCache.clear();
         this.contentCacheBytes = 0;
     }

@@ -188,9 +188,10 @@
             "type": "string",
             "enum": [
               "current",
-              "initial"
+              "initial",
+              "parent"
             ],
-            "default": "current",
+            "default": "parent",
             "order": 50,
             "markdownDescription": "%config.nodeSizeMetricBase.description%"
           }

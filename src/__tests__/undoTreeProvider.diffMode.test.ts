@@ -46,7 +46,14 @@ describe('UndoTreeProvider diff mode', () => {
         expect(html).toContain('Undo Tree shortcuts');
         expect(html).toContain('id="help-close"');
         expect(html).toContain('Close help');
+        expect(html).toContain('id="context-menu"');
+        expect(html).toContain("div.addEventListener('contextmenu', (event) => {");
+        expect(html).toContain("row.addEventListener('contextmenu', (event) => {");
+        expect(html).toContain("data-action=\"set-base\"");
+        expect(html).toContain('Compare with Current');
+        expect(html).toContain('Set Pair Diff Base');
         expect(html).toContain("if (e.key === '?') {");
+        expect(html).toContain("} else if (e.key === 'Escape' && contextMenuNodeId !== null) {");
         expect(html).toContain("} else if (e.key === 'b') {");
         expect(html).toContain("} else if (e.key === 'c') {");
         expect(html).toContain('diff-base-badge');

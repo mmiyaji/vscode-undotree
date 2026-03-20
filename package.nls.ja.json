@@ -26,7 +26,7 @@
   "config.timeFormatCustom.description": "Undo Tree ビューのカスタム時刻書式です。`undotree.timeFormat` が `custom` のときだけ使われます。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) 互換です。例: `yyyy-MM-dd HH:mm:ss`。",
   "config.showStorageKind.description": "Undo Tree ビューの各ノードにストレージ種別バッジ（F/D）を表示します。",
   "config.nodeSizeMetric.description": "参照ノードとの差分として表示するサイズ指標です。`none` は非表示、`lines` は行数差分、`bytes` はバイト差分です。",
-  "config.nodeSizeMetricBase.description": "サイズ差分の参照ノードです。`current` は現在ノード基準、`initial` は初期（root）ノード基準です。",
+  "config.nodeSizeMetricBase.description": "サイズ差分の基準にするノードを指定します。 `current` は現在ノード基準、`initial` は初期（ルート）ノード基準、`parent` は直前の親ノード基準です。各保存でどれくらい変更したかを見たい場合は `parent` が適しています。",
   "config.enableDiagnostics.description": "高度なトラブルシューティング用設定です。永続化ストレージや manifest を確認する開発用の診断パネルを有効にします。Undo Tree 自体を調査するとき以外は無効のままを推奨します。",
   "config.compressionThresholdKB.description": "高度なパフォーマンス調整用の設定です。保存された tree ファイルを gzip 圧縮する full ノード総サイズ（KB）の閾値です。特に計測していなければ既定値のままを推奨します。推奨値: `100`。",
   "config.checkpointThresholdKB.description": "高度なパフォーマンス調整用の設定です。persist 時に full ノード内容を別 checkpoint ファイルに分離する full ノード総サイズ（KB）の閾値です。大きい履歴の永続化を調整する場合以外は既定値を推奨します。推奨値: `1000`。`compressionThresholdKB` 以上を推奨します。",

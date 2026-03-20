@@ -197,8 +197,18 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain('let nodeSizeMetric = "lines";');
         expect(html).toContain('let nodeSizeMetricBase = "current";');
         expect(html).toContain("function formatSizeDiff(node, refNode) {");
-        expect(html).toContain("if (nodeSizeMetric === 'none') { return ''; }");
+        expect(html).toContain("if (nodeSizeMetric === 'none') {");
+        expect(html).toContain("diffHtml: '<span class=\"meta-col size-diff empty\"></span>'");
+        expect(html).toContain("totalHtml: '<span class=\"meta-col size-total empty\"></span>'");
+        expect(html).toContain("const totalStr = nodeSizeMetric === 'lines' ? fmtLines(val) : fmtBytes(val);");
         expect(html).toContain("const sign = delta > 0 ? '+' : delta < 0 ? '-' : '±';");
+        expect(html).toContain("const parentId = node.parents?.length ? node.parents[node.parents.length - 1] : undefined;");
+        expect(html).toContain("const diffHtml = '<span class=\"meta-col size-diff ' + cls + '\">' + sign + diffValue + '</span>';");
+        expect(html).toContain("headerNode");
+        expect(html).toContain("headerDiff");
+        expect(html).toContain("headerLines");
+        expect(html).toContain("headerSize");
+        expect(html).toContain("headerTime");
     });
 
     it('formats size units with a space before the unit', () => {
@@ -211,7 +221,8 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain("return (b / (1024 * 1024)).toFixed(1) + ' MB';");
         expect(html).toContain("return (b / 1024).toFixed(1) + ' KB';");
         expect(html).toContain("return b + ' B';");
-        expect(html).toContain("const str = delta !== 0 ? fmtBytes(Math.abs(delta)) : '0 B';");
+        expect(html).toContain("const diffValue = nodeSizeMetric === 'lines'");
+        expect(html).toContain(": (delta !== 0 ? fmtBytes(Math.abs(delta)) : '0 B');");
     });
 
     it('hides size diff when nodeSizeMetric is none', () => {
@@ -221,7 +232,9 @@ describe('UndoTreeProvider initialization', () => {
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).toContain('let nodeSizeMetric = "none";');
-        expect(html).toContain("if (nodeSizeMetric === 'none') { return ''; }");
+        expect(html).toContain("if (nodeSizeMetric === 'none') {");
+        expect(html).toContain("diffHtml: '<span class=\"meta-col size-diff empty\"></span>'");
+        expect(html).toContain("totalHtml: '<span class=\"meta-col size-total empty\"></span>'");
     });
 
     it('creates a restore node when the loaded file content differs', () => {

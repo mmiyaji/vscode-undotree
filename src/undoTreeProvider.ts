@@ -215,7 +215,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
-        nodeSizeMetricBase: 'current' | 'initial',
+        nodeSizeMetricBase: 'current' | 'initial' | 'parent',
         showStorageKind: boolean
     ) {
         if (isLoadingCurrentEditor) {
@@ -326,9 +326,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return vscode.workspace.getConfiguration('undotree').get<boolean>('showStorageKind') === true;
     }
 
-    private getNodeSizeMetricBase(): 'current' | 'initial' {
+    private getNodeSizeMetricBase(): 'current' | 'initial' | 'parent' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeSizeMetricBase');
-        return value === 'initial' ? 'initial' : 'current';
+        if (value === 'initial' || value === 'parent') {
+            return value;
+        }
+        return 'parent';
     }
 
     private getEnabledExtensions(): string[] {
@@ -439,7 +442,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
-        nodeSizeMetricBase: 'current' | 'initial',
+        nodeSizeMetricBase: 'current' | 'initial' | 'parent',
         showStorageKind: boolean,
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
         initialNotTrackedExt = '',
@@ -469,7 +472,8 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
   .label { opacity: 0.8; }
-  .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding-left: 6px; position: sticky; right: 4px; background: var(--vscode-sideBar-background); }
+  .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-left: 6px; position: sticky; right: 4px; background: var(--vscode-sideBar-background); }
+  .metrics { display: inline-grid; grid-template-columns: var(--diff-col-width, auto) var(--total-col-width, auto) var(--time-col-width, auto); align-items: center; justify-content: end; justify-items: end; column-gap: 6px; flex: 0 0 auto; }
   .node.current .right-area { background: var(--vscode-list-activeSelectionBackground); }
   .time { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
   .time.latest { opacity: 0.9; color: var(--vscode-charts-green, #89d185); }
@@ -494,9 +498,17 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .btn-compare.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .diff-base-label { font-size: 10px; opacity: 0.7; margin-left: 4px; }
   .empty-badge { font-size: 9px; opacity: 0.45; font-style: italic; flex-shrink: 0; }
-  .size-diff { font-size: 9px; flex-shrink: 0; opacity: 0.7; }
+  .meta-col { text-align: right; font-size: 9px; opacity: 0.7; white-space: nowrap; justify-self: end; }
+  .size-diff { flex-shrink: 0; }
+  .size-total { flex-shrink: 0; }
+  .meta-col.empty, .time.empty { visibility: hidden; }
   .size-diff.plus { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
   .size-diff.minus { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+  .tree-header { display: flex; align-items: center; gap: 4px; padding: 0 4px 6px; font-size: 10px; opacity: 0.55; white-space: nowrap; }
+  .tree-header .label-col { min-width: 0; }
+  .tree-header .right-area { background: var(--vscode-sideBar-background); position: sticky; right: 4px; padding-left: 6px; }
+  .tree-header .size-diff, .tree-header .size-total, .tree-header .time { opacity: 0.7; }
+  .time { text-align: right; white-space: nowrap; justify-self: end; }
   .note { font-style: italic; opacity: 0.55; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
@@ -526,6 +538,13 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .shortcut-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
   .shortcut-key { min-width: 88px; font-family: var(--vscode-editor-font-family, var(--vscode-font-family)); color: var(--vscode-textPreformat-foreground, var(--vscode-foreground)); }
   .shortcut-desc { opacity: 0.82; }
+  .context-menu { position: fixed; display: none; min-width: 180px; max-width: min(240px, calc(100vw - 16px)); padding: 4px; border-radius: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background))); box-shadow: 0 8px 28px rgba(0,0,0,0.28); z-index: 12; }
+  .context-menu.visible { display: block; }
+  .context-menu-title { font-size: 10px; opacity: 0.6; padding: 4px 8px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .context-menu-item { width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 8px; background: transparent; color: var(--vscode-menu-foreground, var(--vscode-foreground)); text-align: left; border-radius: 4px; padding: 5px 8px; }
+  .context-menu-item:hover:not(:disabled) { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); }
+  .context-menu-item:disabled { opacity: 0.45; cursor: default; }
+  .context-menu-sep { height: 1px; margin: 4px 0; background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
 </style>
 </head>
 <body>
@@ -570,6 +589,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     </div>
   </div>
 </div>
+<div id="context-menu" class="context-menu" aria-hidden="true"></div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   let nodes = ${nodesJson};
@@ -599,7 +619,23 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     enableTrackingGeneric: ${JSON.stringify(vscode.l10n.t('Enable tracking for this file'))},
     openSettings: ${JSON.stringify(vscode.l10n.t('Open Settings'))},
     basePrefix: ${JSON.stringify(vscode.l10n.t('Base: '))},
-    pairDiffNeedsBase: ${JSON.stringify(vscode.l10n.t('Select a base node first with Set Base or B.'))},
+    pairDiffNeedsBase: ${JSON.stringify(vscode.l10n.t('Select a base node first or press B.'))},
+    contextJump: ${JSON.stringify(vscode.l10n.t('Jump'))},
+    contextDiffCurrent: ${JSON.stringify(vscode.l10n.t('Compare with Current'))},
+    contextSetBase: ${JSON.stringify(vscode.l10n.t('Set Pair Diff Base'))},
+    contextPin: ${JSON.stringify(vscode.l10n.t('Pin'))},
+    contextUnpin: ${JSON.stringify(vscode.l10n.t('Unpin'))},
+    contextEditNote: ${JSON.stringify(vscode.l10n.t('Edit Note'))},
+    contextMenuFor: ${JSON.stringify(vscode.l10n.t('Node: '))},
+    titleClickDiff: ${JSON.stringify(vscode.l10n.t('Click to compare with current'))},
+    titleClickJump: ${JSON.stringify(vscode.l10n.t('Click to jump to this node'))},
+    badgeBase: ${JSON.stringify(vscode.l10n.t('Base'))},
+    badgeDiff: ${JSON.stringify(vscode.l10n.t('Diff'))},
+    headerNode: ${JSON.stringify(vscode.l10n.t('Node'))},
+    headerDiff: ${JSON.stringify(vscode.l10n.t('Diff'))},
+    headerLines: ${JSON.stringify(vscode.l10n.t('Lines'))},
+    headerSize: ${JSON.stringify(vscode.l10n.t('Size'))},
+    headerTime: ${JSON.stringify(vscode.l10n.t('Time'))},
   };
 
   function replaceExt(template, ext) {
@@ -657,30 +693,63 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     return b + ' B';
   }
   function formatSizeDiff(node, refNode) {
-    if (nodeSizeMetric === 'none') { return ''; }
+    if (nodeSizeMetric === 'none') {
+      return {
+        diffHtml: '<span class="meta-col size-diff empty"></span>',
+        totalHtml: '<span class="meta-col size-total empty"></span>',
+      };
+    }
     const val = nodeSizeMetric === 'lines' ? node.lineCount : node.byteCount;
-    if (val === undefined || val === null) { return ''; }
+    if (val === undefined || val === null) {
+      return {
+        diffHtml: '<span class="meta-col size-diff empty"></span>',
+        totalHtml: '<span class="meta-col size-total empty"></span>',
+      };
+    }
+    const totalStr = nodeSizeMetric === 'lines' ? fmtLines(val) : fmtBytes(val);
+    const totalHtml = '<span class="meta-col size-total">' + totalStr + '</span>';
     // 蝓ｺ貅悶ヮ繝ｼ繝芽・霄ｫ or 蝓ｺ貅悶′蜿悶ｌ縺ｪ縺・ｴ蜷・ 邨ｶ蟇ｾ蛟､繧定｡ｨ遉ｺ
     if (!refNode || node.id === refNode.id) {
-      const str = nodeSizeMetric === 'lines' ? fmtLines(val) : fmtBytes(val);
-      return '<span class="size-diff">' + str + '</span>';
+      return { diffHtml: '<span class="meta-col size-diff empty"></span>', totalHtml };
     }
     const ref = nodeSizeMetric === 'lines' ? refNode.lineCount : refNode.byteCount;
-    if (ref === undefined || ref === null) { return ''; }
+    if (ref === undefined || ref === null) {
+      return { diffHtml: '<span class="meta-col size-diff empty"></span>', totalHtml };
+    }
     const delta = val - ref;
     const cls = delta > 0 ? 'plus' : delta < 0 ? 'minus' : '';
     const sign = delta > 0 ? '+' : delta < 0 ? '-' : '±';
-    if (nodeSizeMetric === 'lines') {
-      return '<span class="size-diff ' + cls + '">' + sign + fmtLines(Math.abs(delta)) + '</span>';
-    }
-    const str = delta !== 0 ? fmtBytes(Math.abs(delta)) : '0 B';
-    return '<span class="size-diff ' + cls + '">' + sign + str + '</span>';
+    const diffValue = nodeSizeMetric === 'lines'
+      ? fmtLines(Math.abs(delta))
+      : (delta !== 0 ? fmtBytes(Math.abs(delta)) : '0 B');
+    const diffHtml = '<span class="meta-col size-diff ' + cls + '">' + sign + diffValue + '</span>';
+    return { diffHtml, totalHtml };
   }
 
   let focusedIndex = -1;
   let nodeEls = [];
   let nodeIds = [];
   let treeMap = {};
+  let contextMenuNodeId = null;
+
+  function syncMetricColumnWidths() {
+    const root = document.documentElement;
+    if (!root) { return; }
+    const measure = (selector) => {
+      let max = 0;
+      document.querySelectorAll(selector).forEach((el) => {
+        const width = el instanceof HTMLElement ? Math.ceil(el.scrollWidth) : 0;
+        if (width > max) { max = width; }
+      });
+      return max;
+    };
+    const diffWidth = measure('.size-diff');
+    const totalWidth = measure('.size-total');
+    const timeWidth = measure('.time');
+    root.style.setProperty('--diff-col-width', diffWidth > 0 ? diffWidth + 'px' : 'auto');
+    root.style.setProperty('--total-col-width', totalWidth > 0 ? totalWidth + 'px' : 'auto');
+    root.style.setProperty('--time-col-width', timeWidth > 0 ? timeWidth + 'px' : 'auto');
+  }
 
   function isHelpVisible() {
     return document.getElementById('help-overlay')?.classList.contains('visible') === true;
@@ -691,6 +760,43 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     if (!overlay) { return; }
     overlay.classList.toggle('visible', visible);
     overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+
+  function hideContextMenu() {
+    const menu = document.getElementById('context-menu');
+    if (!menu) { return; }
+    menu.classList.remove('visible');
+    menu.setAttribute('aria-hidden', 'true');
+    menu.innerHTML = '';
+    contextMenuNodeId = null;
+  }
+
+  function showContextMenu(nodeId, clientX, clientY) {
+    const node = treeMap[nodeId];
+    const menu = document.getElementById('context-menu');
+    if (!node || !menu) { return; }
+    contextMenuNodeId = nodeId;
+    const canDiffWithCurrent = !!sourceUri && nodeId !== currentId;
+    const pinLabel = node.pinned ? i18n.contextUnpin : i18n.contextPin;
+    menu.innerHTML =
+      '<div class="context-menu-title">' + escHtml(i18n.contextMenuFor + getNodeDisplayLabel(nodeId)) + '</div>' +
+      '<button class="context-menu-item" data-action="jump">' + escHtml(i18n.contextJump) + '</button>' +
+      '<button class="context-menu-item" data-action="diff-current"' + (canDiffWithCurrent ? '' : ' disabled') + '>' + escHtml(i18n.contextDiffCurrent) + '</button>' +
+      '<button class="context-menu-item" data-action="set-base">' + escHtml(i18n.contextSetBase) + '</button>' +
+      '<div class="context-menu-sep"></div>' +
+      '<button class="context-menu-item" data-action="toggle-pin">' + escHtml(pinLabel) + '</button>' +
+      '<button class="context-menu-item" data-action="edit-note">' + escHtml(i18n.contextEditNote) + '</button>';
+    menu.classList.add('visible');
+    menu.setAttribute('aria-hidden', 'false');
+    menu.style.left = '0px';
+    menu.style.top = '0px';
+    const padding = 8;
+    const menuWidth = menu.offsetWidth || 180;
+    const menuHeight = menu.offsetHeight || 160;
+    const left = Math.min(clientX, Math.max(padding, window.innerWidth - menuWidth - padding));
+    const top = Math.min(clientY, Math.max(padding, window.innerHeight - menuHeight - padding));
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
   }
 
   function getNodeDisplayLabel(nodeId) {
@@ -821,6 +927,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     if (e.key === '?') {
       e.preventDefault();
       setHelpVisible(!isHelpVisible());
+    } else if (e.key === 'Escape' && contextMenuNodeId !== null) {
+      e.preventDefault();
+      hideContextMenu();
     } else if (e.key === 'Escape' && isHelpVisible()) {
       e.preventDefault();
       setHelpVisible(false);
@@ -875,6 +984,36 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       e.preventDefault(); moveToNoted(-1);
     }
   });
+  document.addEventListener('click', (event) => {
+    const menu = document.getElementById('context-menu');
+    if (!menu) { return; }
+    if (!menu.contains(event.target)) {
+      hideContextMenu();
+    }
+  });
+  document.addEventListener('scroll', () => hideContextMenu(), true);
+  window.addEventListener('resize', () => hideContextMenu());
+  const contextMenu = document.getElementById('context-menu');
+  if (contextMenu) {
+    contextMenu.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target.closest('[data-action]') : null;
+      if (!target || contextMenuNodeId === null) { return; }
+      const nodeId = contextMenuNodeId;
+      const action = target.getAttribute('data-action');
+      hideContextMenu();
+      if (action === 'jump') {
+        send('jumpToNode', { nodeId });
+      } else if (action === 'diff-current' && nodeId !== currentId && sourceUri) {
+        send('diffWithNode', { nodeId, sourceUri });
+      } else if (action === 'set-base') {
+        setDiffBaseNode(nodeId);
+      } else if (action === 'toggle-pin') {
+        send('togglePin', { nodeId });
+      } else if (action === 'edit-note') {
+        send('editNote', { nodeId });
+      }
+    });
+  }
 
   function buildTree(nodes, currentId) {
     if (!nodes) {
@@ -897,6 +1036,19 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     document.getElementById('btn-undo').disabled = !cur || cur.parents.length === 0;
     document.getElementById('btn-redo').disabled = !cur || cur.children.length === 0;
 
+    if (nodeSizeMetric !== 'none' || nodes.some((node) => node.formattedTime)) {
+        const header = document.createElement('div');
+        header.className = 'tree-header';
+        header.innerHTML =
+          '<span class="label-col">' + escHtml(i18n.headerNode) + '</span>' +
+          '<span class="right-area"><span class="metrics">' +
+          (nodeSizeMetric !== 'none' ? '<span class="meta-col size-diff">' + escHtml(i18n.headerDiff) + '</span>' : '<span class="meta-col size-diff empty"></span>') +
+          (nodeSizeMetric !== 'none' ? '<span class="meta-col size-total">' + escHtml(nodeSizeMetric === 'lines' ? i18n.headerLines : i18n.headerSize) + '</span>' : '<span class="meta-col size-total empty"></span>') +
+          (nodes.some((node) => node.formattedTime) ? '<span class="time">' + escHtml(i18n.headerTime) + '</span>' : '<span class="time empty"></span>') +
+          '</span></span>';
+      container.appendChild(header);
+    }
+
     const visitedNodes = new Set();
 
     const pinnedNodes = nodes.filter((node) => node.id !== 0 && node.pinned);
@@ -909,16 +1061,22 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         .forEach((node) => {
           const row = document.createElement('div');
           row.className = 'pinned-link';
-          row.innerHTML =
-            '<span class="pin-mark">&#128204;</span>' +
-            '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
-            (node.formattedTime ? '<span class="right-area"><span class="time">' + escHtml(node.formattedTime) + '</span></span>' : '');
+              row.innerHTML =
+                '<span class="pin-mark">&#128204;</span>' +
+                '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
+                (node.formattedTime ? '<span class="right-area"><span class="metrics"><span class="meta-col size-diff empty"></span><span class="meta-col size-total empty"></span><span class="time">' + escHtml(node.formattedTime) + '</span></span></span>' : '');
           row.addEventListener('click', () => {
             const idx = nodeIds.indexOf(node.id);
             if (idx >= 0) { setFocused(idx); }
             if (mode !== 'diff') {
               send('jumpToNode', { nodeId: node.id });
             }
+          });
+          row.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            const idx = nodeIds.indexOf(node.id);
+            if (idx >= 0) { setFocused(idx); }
+            showContextMenu(node.id, event.clientX, event.clientY);
           });
           wrap.appendChild(row);
         });
@@ -961,25 +1119,31 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
 
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
-      div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
+      div.title = mode === 'diff' ? i18n.titleClickDiff : i18n.titleClickJump;
       const noteHtml = node.note
         ? '<span class="note note-action" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteClickToEdit + '">' + escHtml(node.note) + '</span>'
         : '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.noteAdd + '">&#9998;</span>';
       const pinHtml = '<span class="pin-btn pin-action' + (node.pinned ? ' active' : '') + '" data-node-id="' + node.id + '" title="' + (node.pinned ? i18n.unpinNode : i18n.pinNode) + '">&#128204;</span>';
-      const refNode = (nodeSizeMetricBase === 'current' && isCurrent && node.id !== 0)
-        ? node
-        : nodeSizeMetricBase === 'initial' ? map[nodes[0].id] : map[currentId];
-      const sizeDiffHtml = formatSizeDiff(node, refNode);
+      const parentId = node.parents?.length ? node.parents[node.parents.length - 1] : undefined;
+      const refNode = nodeSizeMetricBase === 'current'
+        ? ((isCurrent && node.id !== 0) ? node : map[currentId])
+        : nodeSizeMetricBase === 'initial'
+          ? map[nodes[0].id]
+          : parentId !== undefined
+            ? map[parentId]
+            : null;
+      const sizeParts = formatSizeDiff(node, refNode);
       const labelHtml = node.note ? '' : '<span class="label">' + escHtml(node.label) + '</span>';
-      div.innerHTML =
-        (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
-        labelHtml +
-        (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">Base</span>' : '') +
-        (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">Diff</span>' : '') +
-        (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
-        noteHtml +
-        (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-        '<span class="right-area">' + pinHtml + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + escHtml(node.formattedTime) + '</span>' : '') + '</span>';
+          div.innerHTML =
+            (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
+            labelHtml +
+            (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">' + escHtml(i18n.badgeBase) + '</span>' : '') +
+            (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">' + escHtml(i18n.badgeDiff) + '</span>' : '') +
+            (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
+            noteHtml +
+            (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
+            pinHtml +
+            '<span class="right-area"><span class="metrics">' + sizeParts.diffHtml + sizeParts.totalHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + escHtml(node.formattedTime) + '</span>' : '<span class="time empty"></span>') + '</span></span>';
       const noteAction = div.querySelector('.note-action');
       if (noteAction) {
         noteAction.addEventListener('click', (event) => {
@@ -995,6 +1159,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         });
       }
       div.addEventListener('click', () => {
+        hideContextMenu();
         const idx = nodeIds.indexOf(node.id);
         if (idx >= 0) { setFocused(idx); }
         if (!isCurrent) {
@@ -1011,6 +1176,12 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
           }
         }
       });
+      div.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        const idx = nodeIds.indexOf(node.id);
+        if (idx >= 0) { setFocused(idx); }
+        showContextMenu(node.id, event.clientX, event.clientY);
+      });
       nodeEls.push(div);
       nodeIds.push(node.id);
       container.appendChild(div);
@@ -1025,13 +1196,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       });
     }
 
-    renderNode(0, [], false, 0);
+        renderNode(0, [], false, 0);
 
-    const currentEl = container.querySelector('.node.current');
-    if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
-    setFocused(nodeIds.indexOf(currentId));
-    renderDiffTools();
-  }
+        const currentEl = container.querySelector('.node.current');
+        if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
+        syncMetricColumnWidths();
+        setFocused(nodeIds.indexOf(currentId));
+        renderDiffTools();
+      }
 
   function renderNotTracked(ext) {
     const treeEl = document.getElementById('tree');
