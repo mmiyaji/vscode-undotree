@@ -86,6 +86,7 @@ const multiWindowLockUris = new Set<string>();
 const multiWindowWarnedUris = new Set<string>();
 let multiWindowLockWriteWarningShown = false;
 const persistedUris = new Set<string>();
+const pendingRenameOldUris = new Set<string>();
 let deactivateHandler: (() => Promise<void>) | undefined;
 
 function getSettingSearchQuery(settingId?: string): string {
@@ -1227,6 +1228,66 @@ async function restoreTreeForDocument(
 async function removePersistedState(context: vscode.ExtensionContext) {
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     await fs.rm(treesDir, { recursive: true, force: true });
+}
+
+async function migratePersistedTreeForRename(
+    context: vscode.ExtensionContext,
+    oldUri: vscode.Uri,
+    newUri: vscode.Uri
+): Promise<boolean> {
+    const oldUriStr = oldUri.toString();
+    const newUriStr = newUri.toString();
+    if (oldUriStr === newUriStr) {
+        return false;
+    }
+
+    const manifestResult = await readPersistedManifest(context);
+    const manifest = manifestResult.manifest;
+    if (!manifest) {
+        return false;
+    }
+
+    const entry = manifest.trees.find((treeEntry) => treeEntry.uri === oldUriStr);
+    if (!entry) {
+        return false;
+    }
+
+    const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
+    await fs.mkdir(treesDir, { recursive: true });
+
+    const oldFile = entry.file;
+    const newFile = makeTreeFileName(newUriStr);
+    const oldPath = path.join(treesDir, oldFile);
+    const newPath = path.join(treesDir, newFile);
+
+    if (oldFile !== newFile) {
+        try {
+            await fs.access(oldPath);
+            const buffer = await fs.readFile(oldPath);
+            await writeFileSafely(newPath, buffer);
+            await fs.rm(oldPath, { force: true });
+        } catch {
+            // persisted file migration is best-effort; manifest is still updated below
+        }
+    }
+
+    entry.uri = newUriStr;
+    entry.file = newFile;
+    const rawManifest = JSON.stringify(
+        {
+            version: 1,
+            savedAt: Date.now(),
+            nextId: manifest.nextId,
+            paused: manifest.paused,
+            trees: manifest.trees,
+        } satisfies PersistedManifest,
+        null,
+        2
+    );
+    await writeFileSafely(path.join(treesDir, 'manifest.json'), rawManifest, 'utf8');
+    await writeFileSafely(path.join(treesDir, 'manifest.json.bak'), rawManifest, 'utf8');
+    syncPersistedUris(manifest.trees.map((treeEntry) => treeEntry.uri));
+    return true;
 }
 
 async function openStorageFolder(context: vscode.ExtensionContext): Promise<void> {
@@ -2461,7 +2522,15 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }),
 
+        vscode.workspace.onWillRenameFiles((event) => {
+            for (const file of event.files) {
+                pendingRenameOldUris.add(file.oldUri.toString());
+                manager?.debugLog?.(`[willRenameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()}`);
+            }
+        }),
+
         vscode.workspace.onDidCloseTextDocument((doc) => {
+            manager?.debugLog?.(`[closeTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${manager?.hasTree(doc.uri) === true}`);
             manager?.onDidCloseTextDocument(doc);
             contentProvider.releaseByPrefix(getDiffKeyBase(doc.uri));
             multiWindowLockUris.delete(doc.uri.toString());
@@ -2469,6 +2538,10 @@ export async function activate(context: vscode.ExtensionContext) {
             void releaseMultiWindowLock(context, doc.uri.toString());
             void (async () => {
                 if (!manager || !isTracked(doc)) {
+                    return;
+                }
+                if (pendingRenameOldUris.has(doc.uri.toString())) {
+                    manager?.debugLog?.(`[closeTextDocument] skip-unload pendingRename uri=${doc.uri.toString()}`);
                     return;
                 }
                 if (getPersistenceMode() !== 'auto' || !manager.hasTree(doc.uri)) {
@@ -2484,6 +2557,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.workspace.onDidOpenTextDocument((doc) => {
+            manager?.debugLog?.(`[openTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${manager?.hasTree(doc.uri) === true}`);
             void (async () => {
                 if (isTracked(doc) && manager) {
                     await ensureTreeLoaded(context, manager, doc);
@@ -2576,6 +2650,40 @@ export async function activate(context: vscode.ExtensionContext) {
                     void renderDiagnosticsPanel();
                 }
             }
+        }),
+
+        vscode.workspace.onDidRenameFiles((event) => {
+            if (!manager) {
+                return;
+            }
+            void (async () => {
+                manager?.debugLog?.(`[renameFiles] count=${event.files.length} activeBefore=${vscode.window.activeTextEditor?.document.uri.toString() ?? 'none'}`);
+                for (const file of event.files) {
+                    manager?.debugLog?.(`[renameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()} oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
+                    manager?.renameTree(file.oldUri, file.newUri);
+                    persistedUris.delete(file.oldUri.toString());
+                    if (await migratePersistedTreeForRename(context, file.oldUri, file.newUri)) {
+                        persistedUris.add(file.newUri.toString());
+                    }
+                    pendingRenameOldUris.delete(file.oldUri.toString());
+                    manager?.debugLog?.(`[renameFiles] afterRename oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                for (const file of event.files) {
+                    const renamedDoc = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === file.newUri.toString());
+                    manager?.debugLog?.(`[renameFiles] postTick new=${file.newUri.toString()} docFound=${!!renamedDoc} activeAfterTick=${vscode.window.activeTextEditor?.document.uri.toString() ?? 'none'}`);
+                    if (renamedDoc && isTracked(renamedDoc)) {
+                        await ensureTreeLoaded(context, manager, renamedDoc).catch(() => {});
+                        await acquireMultiWindowLock(context, renamedDoc, outputChannel).catch(() => {});
+                        manager?.debugLog?.(`[renameFiles] ensured new=${file.newUri.toString()} hasTree=${manager?.hasTree(file.newUri) === true}`);
+                    }
+                }
+                const activeEditor = vscode.window.activeTextEditor;
+                provider.setActiveEditor(activeEditor);
+                manager?.debugLog?.(`[renameFiles] refresh activeFinal=${activeEditor?.document.uri.toString() ?? 'none'} activeHasTree=${activeEditor ? manager?.hasTree(activeEditor.document.uri) === true : false}`);
+                provider.refresh();
+                updateStatusBar(activeEditor);
+            })();
         })
     );
 

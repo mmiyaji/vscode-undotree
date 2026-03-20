@@ -329,6 +329,45 @@ export class UndoTreeManager implements vscode.Disposable {
         this.onRefresh?.();
     }
 
+    renameTree(oldUri: vscode.Uri, newUri: vscode.Uri): void {
+        const oldKey = oldUri.toString();
+        const newKey = newUri.toString();
+        if (oldKey === newKey) {
+            return;
+        }
+
+        const tree = this.trees.get(oldKey);
+        if (tree) {
+            this.trees.set(newKey, tree);
+            this.trees.delete(oldKey);
+        }
+
+        const diffBuffer = this.diffBuffer.get(oldKey);
+        if (diffBuffer) {
+            this.diffBuffer.set(newKey, diffBuffer);
+            this.diffBuffer.delete(oldKey);
+        }
+
+        if (this.dirtyTrees.has(oldKey)) {
+            this.dirtyTrees.delete(oldKey);
+            this.dirtyTrees.add(newKey);
+        }
+
+        const lastAccessAt = this.lastAccessAt.get(oldKey);
+        if (lastAccessAt !== undefined) {
+            this.lastAccessAt.set(newKey, lastAccessAt);
+            this.lastAccessAt.delete(oldKey);
+        }
+
+        const suppressedHash = this.jumpSuppressedHashes.get(oldKey);
+        if (suppressedHash !== undefined) {
+            this.jumpSuppressedHashes.set(newKey, suppressedHash);
+            this.jumpSuppressedHashes.delete(oldKey);
+        }
+
+        this.onRefresh?.();
+    }
+
     onDidChangeTextDocument(e: vscode.TextDocumentChangeEvent) {
         if (e.contentChanges.length === 0 || this.restoring || this.paused) {
             return;

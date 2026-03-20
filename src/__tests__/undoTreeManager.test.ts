@@ -723,6 +723,27 @@ describe('compact', () => {
     });
 });
 
+describe('renameTree', () => {
+    it('moves an in-memory tree to the new URI', () => {
+        const manager = new UndoTreeManager();
+        const oldUri = makeUri('file:///old-name.md');
+        const newUri = makeUri('file:///new-name.md');
+
+        manager.getTree(oldUri, 'hello');
+        manager.onDidSaveTextDocument(makeDocument('hello world', 'file:///old-name.md'));
+
+        expect(manager.hasTree(oldUri)).toBe(true);
+        expect(manager.hasTree(newUri)).toBe(false);
+
+        manager.renameTree(oldUri, newUri);
+
+        expect(manager.hasTree(oldUri)).toBe(false);
+        expect(manager.hasTree(newUri)).toBe(true);
+        const movedTree = manager.getTree(newUri);
+        expect(movedTree.nodes.size).toBe(2);
+    });
+});
+
 // -----------------------------------------------
 // ファイルを閉じたときのクリーンアップ
 // -----------------------------------------------
