@@ -22,6 +22,7 @@
   "config.persistenceMode.description": "Undo 履歴の永続化保存モードです。`manual` はコマンド実行時のみ保存し、`auto` は履歴変更後に自動保存します。",
   "config.autosaveInterval.description": "履歴スナップショットを自動取得する間隔（秒）です。`0` で無効化します。既定値: `30`。",
   "config.warnOnMultiWindowConflict.description": "`undotree.persistenceMode` が `auto` のとき、同じ tracked file が別の VS Code ウィンドウでも開かれている可能性を警告します。短命の lock heartbeat を使って競合候補を検出します。通常は有効のままを推奨します。",
+  "config.language.description": "Undo Tree の実行時 UI 言語を上書きします。`auto` は VS Code の表示言語に従い、`en` は英語、`ja` は日本語を強制します。ランタイムのパネル、通知、メニュー、Webview には即時反映されます。コマンドパレット名や設定画面の文言は VS Code の manifest ローカライズに従うため、ウィンドウ再読み込み後に反映される場合があります。",
   "config.timeFormat.description": "Undo Tree ビューで表示する時刻形式です。`none` は非表示です。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) 互換です。`time` は `HH:mm:ss`、`dateTime` は `yyyy-MM-dd HH:mm:ss`、`custom` は `undotree.timeFormatCustom` を使います。",
   "config.timeFormatCustom.description": "Undo Tree ビューのカスタム時刻書式です。`undotree.timeFormat` が `custom` のときだけ使われます。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) 互換です。例: `yyyy-MM-dd HH:mm:ss`。",
   "config.showStorageKind.description": "Undo Tree ビューの各ノードにストレージ種別バッジ（F/D）を表示します。",

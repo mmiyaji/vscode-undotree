@@ -3,6 +3,7 @@
 import * as vscode from 'vscode';
 import { format as formatDate } from 'date-fns';
 import { UndoTreeManager } from './undoTreeManager';
+import { t as tr } from './runtimeL10n';
 
 type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<number, infer T>
     ? T & { formattedTime: string; isEmpty: boolean }
@@ -39,6 +40,11 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     showCheckpointLoading() {
         this.view?.webview.postMessage({ command: 'showJumpLoading' });
+    }
+
+    resetShell() {
+        this.webviewInitialized = false;
+        this.render();
     }
 
     beginLoading(uri: vscode.Uri): number {
@@ -97,6 +103,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                     case 'openSettings':
                         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
                         break;
+                    case 'openDisplaySettings':
+                        await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree undotree.timeFormat');
+                        break;
                     case 'toggleTracking':
                         await vscode.commands.executeCommand('undotree.toggleTracking');
                         break;
@@ -151,7 +160,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 }
             } catch (error) {
                 this.manager.debugLog?.(`[provider] webview message failed: ${String(error)}`);
-                void vscode.window.showErrorMessage(vscode.l10n.t('Undo Tree: an action failed. See Output for details.'));
+                void vscode.window.showErrorMessage(tr('Undo Tree: an action failed. See Output for details.'));
             }
         });
     }
@@ -383,35 +392,35 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private formatRelativeTimestamp(timestamp: number): string {
         const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
         if (deltaSeconds < 5) {
-            return vscode.l10n.t('just now');
+            return tr('just now');
         }
         if (deltaSeconds < 60) {
-            return vscode.l10n.t('{0}s ago', deltaSeconds);
+            return tr('{0}s ago', deltaSeconds);
         }
         const deltaMinutes = Math.floor(deltaSeconds / 60);
         if (deltaMinutes < 60) {
-            return vscode.l10n.t('{0}m ago', deltaMinutes);
+            return tr('{0}m ago', deltaMinutes);
         }
         const deltaHours = Math.floor(deltaMinutes / 60);
         if (deltaHours < 24) {
-            return vscode.l10n.t('{0}h ago', deltaHours);
+            return tr('{0}h ago', deltaHours);
         }
         const deltaDays = Math.floor(deltaHours / 24);
-        return vscode.l10n.t('{0}d ago', deltaDays);
+        return tr('{0}d ago', deltaDays);
     }
 
     private buildNotTrackedHtml(ext: string, _fileName: string): string {
         const nonce = getNonce();
         const label = ext
-            ? vscode.l10n.t('Undo Tree: {0} is not tracked', ext)
-            : vscode.l10n.t('Undo Tree: this file is not tracked');
+            ? tr('Undo Tree: {0} is not tracked', ext)
+            : tr('Undo Tree: this file is not tracked');
         const hint = ext
-            ? vscode.l10n.t('To enable tracking for {0} files, click the status bar item or open Settings.', ext)
-            : vscode.l10n.t('To enable tracking for this file, click the status bar item or open Settings.');
+            ? tr('To enable tracking for {0} files, click the status bar item or open Settings.', ext)
+            : tr('To enable tracking for this file, click the status bar item or open Settings.');
         const enableLabel = ext
-            ? vscode.l10n.t('Enable tracking for {0}', ext)
-            : vscode.l10n.t('Enable tracking for this file');
-        const settingsLabel = vscode.l10n.t('Open Settings');
+            ? tr('Enable tracking for {0}', ext)
+            : tr('Enable tracking for this file');
+        const settingsLabel = tr('Open Settings');
         return `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <style nonce="${nonce}">
@@ -540,7 +549,8 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .shortcut-desc { opacity: 0.82; }
   .context-menu { position: fixed; display: none; min-width: 180px; max-width: min(240px, calc(100vw - 16px)); padding: 4px; border-radius: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background))); box-shadow: 0 8px 28px rgba(0,0,0,0.28); z-index: 12; }
   .context-menu.visible { display: block; }
-  .context-menu-title { font-size: 10px; opacity: 0.6; padding: 4px 8px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .context-menu-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; opacity: 0.9; padding: 6px 8px 8px; margin: -4px -4px 4px; border-radius: 6px 6px 0 0; background: color-mix(in srgb, var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background))) 82%, var(--vscode-foreground) 8%); border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .context-menu-title-icon { opacity: 0.7; flex-shrink: 0; }
   .context-menu-item { width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 8px; background: transparent; color: var(--vscode-menu-foreground, var(--vscode-foreground)); text-align: left; border-radius: 4px; padding: 5px 8px; }
   .context-menu-item:hover:not(:disabled) { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); }
   .context-menu-item:disabled { opacity: 0.45; cursor: default; }
@@ -549,43 +559,43 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 </head>
 <body>
 <div class="actions">
-  <button id="btn-undo">${vscode.l10n.t('Undo')}</button>
-  <button id="btn-redo">${vscode.l10n.t('Redo')}</button>
-  <button class="btn-pause" id="btn-pause" title="${paused ? vscode.l10n.t('Resume tracking') : vscode.l10n.t('Pause tracking')}">${paused ? vscode.l10n.t('Resume') : vscode.l10n.t('Pause')}</button>
-  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" id="btn-mode" title="${mode === 'navigate' ? vscode.l10n.t('Switch to Diff mode') : vscode.l10n.t('Switch to Navigate mode')}">${mode === 'navigate' ? vscode.l10n.t('Diff') : vscode.l10n.t('Nav')}</button>
-  <button class="btn-settings" id="btn-settings" title="${vscode.l10n.t('Open Undo Tree menu')}">&#9881;</button>
+  <button id="btn-undo">${tr('Undo')}</button>
+  <button id="btn-redo">${tr('Redo')}</button>
+  <button class="btn-pause" id="btn-pause" title="${paused ? tr('Resume tracking') : tr('Pause tracking')}">${paused ? tr('Resume') : tr('Pause')}</button>
+  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${mode === 'navigate' ? tr('Diff') : tr('Nav')}</button>
+  <button class="btn-settings" id="btn-settings" title="${tr('Open Undo Tree menu')}">&#9881;</button>
 </div>
-${paused ? `<div class="paused-badge">${vscode.l10n.t('Tracking paused - history is frozen')}</div>` : ''}
+${paused ? `<div class="paused-badge">${tr('Tracking paused - history is frozen')}</div>` : ''}
 <div id="diff-tools" class="diff-tools${mode === 'diff' ? ' visible' : ''}">
-  <button class="btn-compare active" id="btn-diff-current">${vscode.l10n.t('vs Current')}</button>
-  <button class="btn-compare" id="btn-diff-pair">${vscode.l10n.t('Pair Diff')}</button>
+  <button class="btn-compare active" id="btn-diff-current">${tr('vs Current')}</button>
+  <button class="btn-compare" id="btn-diff-pair">${tr('Pair Diff')}</button>
   <span class="diff-base-label" id="diff-base-label"></span>
 </div>
-${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
+${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
 <div id="pinned"></div>
 <div id="tree"></div>
 <div id="help-overlay" class="help-overlay" aria-hidden="true">
   <div class="help-backdrop" id="help-backdrop"></div>
-  <div class="help-card" role="dialog" aria-modal="true" aria-label="${vscode.l10n.t('Undo Tree shortcuts')}">
-    <button class="help-close" id="help-close" title="${vscode.l10n.t('Close help')}">×</button>
-    <div class="help-title">${vscode.l10n.t('Undo Tree shortcuts')}</div>
+  <div class="help-card" role="dialog" aria-modal="true" aria-label="${tr('Undo Tree shortcuts')}">
+    <button class="help-close" id="help-close" title="${tr('Close help')}">×</button>
+    <div class="help-title">${tr('Undo Tree shortcuts')}</div>
     <div class="help-section">
-      <div class="help-section-title">${vscode.l10n.t('Navigation')}</div>
-      <div class="shortcut-row"><span class="shortcut-key">↑ / ↓, j / k</span><span class="shortcut-desc">${vscode.l10n.t('Move focus')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">Enter / Space</span><span class="shortcut-desc">${vscode.l10n.t('Jump or preview diff')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">← / →</span><span class="shortcut-desc">${vscode.l10n.t('Move to parent or child')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">Tab / Shift+Tab</span><span class="shortcut-desc">${vscode.l10n.t('Move across siblings')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">n / N</span><span class="shortcut-desc">${vscode.l10n.t('Jump to next or previous noted node')}</span></div>
+      <div class="help-section-title">${tr('Navigation')}</div>
+      <div class="shortcut-row"><span class="shortcut-key">↑ / ↓, j / k</span><span class="shortcut-desc">${tr('Move focus')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Enter / Space</span><span class="shortcut-desc">${tr('Jump or preview diff')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">← / →</span><span class="shortcut-desc">${tr('Move to parent or child')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Tab / Shift+Tab</span><span class="shortcut-desc">${tr('Move across siblings')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">n / N</span><span class="shortcut-desc">${tr('Jump to next or previous noted node')}</span></div>
     </div>
     <div class="help-section">
-      <div class="help-section-title">${vscode.l10n.t('Actions')}</div>
-      <div class="shortcut-row"><span class="shortcut-key">u / r</span><span class="shortcut-desc">${vscode.l10n.t('Undo / Redo')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">d</span><span class="shortcut-desc">${vscode.l10n.t('Toggle Diff mode')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">p</span><span class="shortcut-desc">${vscode.l10n.t('Pause or resume tracking')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">b</span><span class="shortcut-desc">${vscode.l10n.t('Set the focused node as the Pair Diff base')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">c</span><span class="shortcut-desc">${vscode.l10n.t('Switch Pair Diff back to current comparison')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">?</span><span class="shortcut-desc">${vscode.l10n.t('Toggle this help')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">Esc</span><span class="shortcut-desc">${vscode.l10n.t('Close help or exit Diff mode')}</span></div>
+      <div class="help-section-title">${tr('Actions')}</div>
+      <div class="shortcut-row"><span class="shortcut-key">u / r</span><span class="shortcut-desc">${tr('Undo / Redo')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">d</span><span class="shortcut-desc">${tr('Toggle Diff mode')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">p</span><span class="shortcut-desc">${tr('Pause or resume tracking')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">b</span><span class="shortcut-desc">${tr('Set the focused node as the Pair Diff base')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">c</span><span class="shortcut-desc">${tr('Switch Pair Diff back to current comparison')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">?</span><span class="shortcut-desc">${tr('Toggle this help')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Esc</span><span class="shortcut-desc">${tr('Close help or exit Diff mode')}</span></div>
     </div>
   </div>
 </div>
@@ -604,38 +614,39 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   let diffCompareMode = 'current';
   let diffBaseNodeId = null;
   const i18n = {
-    noteDoubleClickToEdit: ${JSON.stringify(vscode.l10n.t(' (double-click to edit)'))},
-    noteAdd: ${JSON.stringify(vscode.l10n.t('Add note'))},
-    pinNode: ${JSON.stringify(vscode.l10n.t('Pin node'))},
-    unpinNode: ${JSON.stringify(vscode.l10n.t('Unpin node'))},
-    pinnedNodes: ${JSON.stringify(vscode.l10n.t('Pinned'))},
-    loading: ${JSON.stringify(vscode.l10n.t('Loading...'))},
-    textEditorsOnly: ${JSON.stringify(vscode.l10n.t('Undo Tree is only available for text editors.'))},
-    notTrackedWithExt: ${JSON.stringify(vscode.l10n.t('Undo Tree: {0} is not tracked', '{ext}'))},
-    notTrackedGeneric: ${JSON.stringify(vscode.l10n.t('Undo Tree: this file is not tracked'))},
-    notTrackedHintWithExt: ${JSON.stringify(vscode.l10n.t('To enable tracking for {0} files, click the status bar item or open Settings.', '{ext}'))},
-    notTrackedHintGeneric: ${JSON.stringify(vscode.l10n.t('To enable tracking for this file, click the status bar item or open Settings.'))},
-    enableTrackingWithExt: ${JSON.stringify(vscode.l10n.t('Enable tracking for {0}', '{ext}'))},
-    enableTrackingGeneric: ${JSON.stringify(vscode.l10n.t('Enable tracking for this file'))},
-    openSettings: ${JSON.stringify(vscode.l10n.t('Open Settings'))},
-    basePrefix: ${JSON.stringify(vscode.l10n.t('Base: '))},
-    pairDiffNeedsBase: ${JSON.stringify(vscode.l10n.t('Select a base node first or press B.'))},
-    contextJump: ${JSON.stringify(vscode.l10n.t('Jump'))},
-    contextDiffCurrent: ${JSON.stringify(vscode.l10n.t('Compare with Current'))},
-    contextSetBase: ${JSON.stringify(vscode.l10n.t('Set Pair Diff Base'))},
-    contextPin: ${JSON.stringify(vscode.l10n.t('Pin'))},
-    contextUnpin: ${JSON.stringify(vscode.l10n.t('Unpin'))},
-    contextEditNote: ${JSON.stringify(vscode.l10n.t('Edit Note'))},
-    contextMenuFor: ${JSON.stringify(vscode.l10n.t('Node: '))},
-    titleClickDiff: ${JSON.stringify(vscode.l10n.t('Click to compare with current'))},
-    titleClickJump: ${JSON.stringify(vscode.l10n.t('Click to jump to this node'))},
-    badgeBase: ${JSON.stringify(vscode.l10n.t('Base'))},
-    badgeDiff: ${JSON.stringify(vscode.l10n.t('Diff'))},
-    headerNode: ${JSON.stringify(vscode.l10n.t('Node'))},
-    headerDiff: ${JSON.stringify(vscode.l10n.t('Diff'))},
-    headerLines: ${JSON.stringify(vscode.l10n.t('Lines'))},
-    headerSize: ${JSON.stringify(vscode.l10n.t('Size'))},
-    headerTime: ${JSON.stringify(vscode.l10n.t('Time'))},
+    noteDoubleClickToEdit: ${JSON.stringify(tr(' (double-click to edit)'))},
+    noteAdd: ${JSON.stringify(tr('Add note'))},
+    pinNode: ${JSON.stringify(tr('Pin node'))},
+    unpinNode: ${JSON.stringify(tr('Unpin node'))},
+    pinnedNodes: ${JSON.stringify(tr('Pinned'))},
+    loading: ${JSON.stringify(tr('Loading...'))},
+    textEditorsOnly: ${JSON.stringify(tr('Undo Tree is only available for text editors.'))},
+    notTrackedWithExt: ${JSON.stringify(tr('Undo Tree: {0} is not tracked', '{ext}'))},
+    notTrackedGeneric: ${JSON.stringify(tr('Undo Tree: this file is not tracked'))},
+    notTrackedHintWithExt: ${JSON.stringify(tr('To enable tracking for {0} files, click the status bar item or open Settings.', '{ext}'))},
+    notTrackedHintGeneric: ${JSON.stringify(tr('To enable tracking for this file, click the status bar item or open Settings.'))},
+    enableTrackingWithExt: ${JSON.stringify(tr('Enable tracking for {0}', '{ext}'))},
+    enableTrackingGeneric: ${JSON.stringify(tr('Enable tracking for this file'))},
+    openSettings: ${JSON.stringify(tr('Open Settings'))},
+    basePrefix: ${JSON.stringify(tr('Base: '))},
+    pairDiffNeedsBase: ${JSON.stringify(tr('Select a base node first or press B.'))},
+    contextJump: ${JSON.stringify(tr('Jump'))},
+    contextDiffCurrent: ${JSON.stringify(tr('Compare with Current'))},
+    contextSetBase: ${JSON.stringify(tr('Set Pair Diff Base'))},
+    contextPin: ${JSON.stringify(tr('Pin'))},
+    contextUnpin: ${JSON.stringify(tr('Unpin'))},
+    contextEditNote: ${JSON.stringify(tr('Edit Note'))},
+    contextDisplaySettings: ${JSON.stringify(tr('Display Settings'))},
+    contextMenuFor: ${JSON.stringify(tr('Node: '))},
+    titleClickDiff: ${JSON.stringify(tr('Click to compare with current'))},
+    titleClickJump: ${JSON.stringify(tr('Click to jump to this node'))},
+    badgeBase: ${JSON.stringify(tr('Base'))},
+    badgeDiff: ${JSON.stringify(tr('Diff'))},
+    headerNode: ${JSON.stringify(tr('Node'))},
+    headerDiff: ${JSON.stringify(tr('Diff'))},
+    headerLines: ${JSON.stringify(tr('Lines'))},
+    headerSize: ${JSON.stringify(tr('Size'))},
+    headerTime: ${JSON.stringify(tr('Time'))},
   };
 
   function replaceExt(template, ext) {
@@ -779,13 +790,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     const canDiffWithCurrent = !!sourceUri && nodeId !== currentId;
     const pinLabel = node.pinned ? i18n.contextUnpin : i18n.contextPin;
     menu.innerHTML =
-      '<div class="context-menu-title">' + escHtml(i18n.contextMenuFor + getNodeDisplayLabel(nodeId)) + '</div>' +
+      '<div class="context-menu-title"><span class="context-menu-title-icon">&#9998;</span><span>' + escHtml(getNodeDisplayLabel(nodeId)) + '</span></div>' +
       '<button class="context-menu-item" data-action="jump">' + escHtml(i18n.contextJump) + '</button>' +
       '<button class="context-menu-item" data-action="diff-current"' + (canDiffWithCurrent ? '' : ' disabled') + '>' + escHtml(i18n.contextDiffCurrent) + '</button>' +
       '<button class="context-menu-item" data-action="set-base">' + escHtml(i18n.contextSetBase) + '</button>' +
       '<div class="context-menu-sep"></div>' +
       '<button class="context-menu-item" data-action="toggle-pin">' + escHtml(pinLabel) + '</button>' +
-      '<button class="context-menu-item" data-action="edit-note">' + escHtml(i18n.contextEditNote) + '</button>';
+      '<button class="context-menu-item" data-action="edit-note">' + escHtml(i18n.contextEditNote) + '</button>' +
+      '<button class="context-menu-item" data-action="display-settings">' + escHtml(i18n.contextDisplaySettings) + '</button>';
     menu.classList.add('visible');
     menu.setAttribute('aria-hidden', 'false');
     menu.style.left = '0px';
@@ -1011,6 +1023,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         send('togglePin', { nodeId });
       } else if (action === 'edit-note') {
         send('editNote', { nodeId });
+      } else if (action === 'display-settings') {
+        send('openDisplaySettings');
       }
     });
   }
@@ -1253,10 +1267,10 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       }
     }
 
-    document.querySelector('.btn-pause').textContent = state.paused ? ${JSON.stringify(vscode.l10n.t('Resume'))} : ${JSON.stringify(vscode.l10n.t('Pause'))};
-    document.querySelector('.btn-pause').title = state.paused ? ${JSON.stringify(vscode.l10n.t('Resume tracking'))} : ${JSON.stringify(vscode.l10n.t('Pause tracking'))};
-    document.querySelector('.btn-mode').textContent = mode === 'navigate' ? ${JSON.stringify(vscode.l10n.t('Diff'))} : ${JSON.stringify(vscode.l10n.t('Nav'))};
-    document.querySelector('.btn-mode').title = mode === 'navigate' ? ${JSON.stringify(vscode.l10n.t('Switch to Diff mode'))} : ${JSON.stringify(vscode.l10n.t('Switch to Navigate mode'))};
+    document.querySelector('.btn-pause').textContent = state.paused ? ${JSON.stringify(tr('Resume'))} : ${JSON.stringify(tr('Pause'))};
+    document.querySelector('.btn-pause').title = state.paused ? ${JSON.stringify(tr('Resume tracking'))} : ${JSON.stringify(tr('Pause tracking'))};
+    document.querySelector('.btn-mode').textContent = mode === 'navigate' ? ${JSON.stringify(tr('Diff'))} : ${JSON.stringify(tr('Nav'))};
+    document.querySelector('.btn-mode').title = mode === 'navigate' ? ${JSON.stringify(tr('Switch to Diff mode'))} : ${JSON.stringify(tr('Switch to Navigate mode'))};
     document.querySelector('.btn-mode').classList.toggle('active', mode === 'diff');
 
     let pausedBadge = document.querySelector('.paused-badge');
@@ -1266,7 +1280,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         pausedBadge.className = 'paused-badge';
         document.querySelector('.actions').insertAdjacentElement('afterend', pausedBadge);
       }
-      pausedBadge.textContent = ${JSON.stringify(vscode.l10n.t('Tracking paused - history is frozen'))};
+      pausedBadge.textContent = ${JSON.stringify(tr('Tracking paused - history is frozen'))};
     } else if (pausedBadge) {
       pausedBadge.remove();
     }
@@ -1283,7 +1297,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
           document.querySelector('.actions').insertAdjacentElement('afterend', diffBadge);
         }
       }
-      diffBadge.textContent = ${JSON.stringify(vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing'))};
+      diffBadge.textContent = ${JSON.stringify(tr('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing'))};
     } else if (diffBadge) {
       diffBadge.remove();
     }
@@ -1328,3 +1342,4 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
 </html>`;
     }
 }
+

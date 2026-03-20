@@ -64,4 +64,33 @@ describe('UndoTreeManager compact preview', () => {
         expect(currentItem?.manualRemoveReason).toBe('current node cannot be removed');
         manager.dispose();
     });
+
+    it('marks the latest timestamp node as protected in hard compact preview', () => {
+        const manager = new UndoTreeManager();
+        const document = makeDocument('');
+
+        manager.getTree(document.uri, '');
+        manager.onDidSaveTextDocument(makeDocument('base'));
+        const tree = manager.getTree(document.uri);
+        const baseId = tree.currentId;
+
+        manager.onDidSaveTextDocument(makeDocument('main'));
+        const mainId = tree.currentId;
+
+        tree.currentId = baseId;
+        manager.onDidSaveTextDocument(makeDocument('branch'));
+        const branchId = tree.currentId;
+
+        const now = Date.now();
+        tree.nodes.get(mainId)!.timestamp = now - 60 * 86_400_000;
+        tree.nodes.get(branchId)!.timestamp = now;
+        tree.currentId = mainId;
+
+        const detail = manager.previewHardCompactDetailed(tree, 30);
+        const branchItem = detail.protected.find((item) => item.id === branchId);
+
+        expect(branchItem).toBeDefined();
+        expect(branchItem?.reason).toBe('latest node');
+        manager.dispose();
+    });
 });

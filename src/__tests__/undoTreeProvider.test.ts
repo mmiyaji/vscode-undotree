@@ -284,30 +284,14 @@ describe('UndoTreeProvider initialization', () => {
         expect(view.webview.html).toContain('Undo Tree is only available for text editors.');
     });
 
-    it('escapes localized text in the legacy not-tracked HTML', () => {
+    it('escapes dynamic text in the legacy not-tracked HTML', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
-        const vscode = require('vscode');
-        const originalL10n = vscode.l10n;
-        vscode.l10n = {
-            ...originalL10n,
-            t: jest.fn((text: string) => {
-                if (text.includes('is not tracked')) {
-                    return '<b>tracked?</b>';
-                }
-                if (text.includes('Open Settings')) {
-                    return '"settings"';
-                }
-                return text;
-            }),
-        };
 
-        const html = (provider as any).buildNotTrackedHtml('.md', 'file.md');
+        const html = (provider as any).buildNotTrackedHtml('<b>.md</b>', 'file.md');
 
-        expect(html).toContain('&lt;b&gt;tracked?&lt;/b&gt;');
-        expect(html).toContain('&quot;settings&quot;');
-        expect(html).not.toContain('<b>tracked?</b>');
-        vscode.l10n = originalL10n;
+        expect(html).toContain('&lt;b&gt;.md&lt;/b&gt;');
+        expect(html).not.toContain('Undo Tree: <b>.md</b> is not tracked');
     });
 
     it('adds a nonce-based CSP to the webview shell', () => {

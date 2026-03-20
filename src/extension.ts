@@ -12,6 +12,7 @@ const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
 import { UndoTreeProvider } from './undoTreeProvider';
 import { CompactPreviewItem, CompactPreviewResult, UndoTreeManager } from './undoTreeManager';
+import { initializeRuntimeL10n, t as tr } from './runtimeL10n';
 
 // バーチャルドキュメント（差分表示用）
 export class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
@@ -164,14 +165,14 @@ async function notifyManifestReadStatus(
         return;
     }
 
-    const openStorageLabel = vscode.l10n.t('Open Storage Folder');
-    const resetLabel = vscode.l10n.t('Reset All State');
-    const openOutputLabel = vscode.l10n.t('Open Output');
+    const openStorageLabel = tr('Open Storage Folder');
+    const resetLabel = tr('Reset All State');
+    const openOutputLabel = tr('Open Output');
 
     if (status === 'backup') {
         outputChannel.appendLine('[manifest] primary manifest.json could not be used; fell back to manifest.json.bak. Pruning is disabled for this save cycle to protect persisted history.');
         const picked = await vscode.window.showWarningMessage(
-            vscode.l10n.t('Undo Tree recovered persisted history from manifest.json.bak. Automatic pruning is temporarily disabled to protect existing data.'),
+            tr('Undo Tree recovered persisted history from manifest.json.bak. Automatic pruning is temporarily disabled to protect existing data.'),
             openStorageLabel,
             openOutputLabel
         );
@@ -185,7 +186,7 @@ async function notifyManifestReadStatus(
 
     outputChannel.appendLine('[manifest] manifest.json and manifest.json.bak could not be read. Persisted history was not loaded, and pruning is disabled to avoid deleting orphaned data.');
     const picked = await vscode.window.showWarningMessage(
-        vscode.l10n.t('Undo Tree could not read persisted history metadata. Existing persisted files will be left untouched to avoid data loss. You can inspect the storage folder or run Reset All State if you want to discard broken metadata.'),
+        tr('Undo Tree could not read persisted history metadata. Existing persisted files will be left untouched to avoid data loss. You can inspect the storage folder or run Reset All State if you want to discard broken metadata.'),
         { modal: true },
         openStorageLabel,
         resetLabel,
@@ -1217,7 +1218,7 @@ async function restoreTreeForDocument(
             `[restore] uri=${document.uri.toString()} source=persisted-import-failed error=${String(error)}`
         );
         void vscode.window.showWarningMessage(
-            vscode.l10n.t('Undo Tree: saved history for this file could not be restored. A new tree will be created from the current document.')
+            tr('Undo Tree: saved history for this file could not be restored. A new tree will be created from the current document.')
         );
         return false;
     }
@@ -1282,7 +1283,7 @@ async function writeMultiWindowLock(
         if (!multiWindowLockWriteWarningShown) {
             multiWindowLockWriteWarningShown = true;
             void vscode.window.showWarningMessage(
-                vscode.l10n.t('Undo Tree could not acquire a multi-window lock. Concurrent auto persistence may overwrite another window.')
+                tr('Undo Tree could not acquire a multi-window lock. Concurrent auto persistence may overwrite another window.')
             );
         }
         return false;
@@ -1316,7 +1317,7 @@ async function acquireMultiWindowLock(
         multiWindowWarnedUris.add(uri);
         outputChannel.appendLine(`[multi-window-lock] detected live lock for ${uri} by session ${existing.sessionId}`);
         void vscode.window.showWarningMessage(
-            vscode.l10n.t('Undo Tree detected that this file is active in another VS Code window. Concurrent auto persistence may overwrite persisted history.')
+            tr('Undo Tree detected that this file is active in another VS Code window. Concurrent auto persistence may overwrite persisted history.')
         );
     }
 
@@ -1690,8 +1691,8 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         return;
     }
     if (manager.paused) {
-        statusBarItem.text = vscode.l10n.t('$(debug-pause) Undo Tree: PAUSED');
-        statusBarItem.tooltip = vscode.l10n.t('Undo Tree is paused. Click to resume.');
+        statusBarItem.text = tr('$(debug-pause) Undo Tree: PAUSED');
+        statusBarItem.tooltip = tr('Undo Tree is paused. Click to resume.');
         statusBarItem.command = 'undotree.togglePause';
         manager.debugLog?.('[statusBar] showing paused state');
         statusBarItem.show();
@@ -1705,14 +1706,14 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         `[statusBar] computed tracked=${tracked} ext=${ext} excluded=${excluded} enabled=${enabled.join(',')}`
     );
     statusBarItem.text = tracked
-        ? vscode.l10n.t('$(history) Undo Tree: ON')
-        : vscode.l10n.t('$(circle-slash) Undo Tree: OFF');
+        ? tr('$(history) Undo Tree: ON')
+        : tr('$(circle-slash) Undo Tree: OFF');
     statusBarItem.tooltip = [
         tracked
-            ? vscode.l10n.t('Tracking {0}. Click to disable.', ext)
-            : vscode.l10n.t('Not tracking {0}. Click to enable.', ext),
-        vscode.l10n.t('Enabled: {0}', enabled.join(', ') || '(none)'),
-        excluded ? vscode.l10n.t('Excluded by pattern') : '',
+            ? tr('Tracking {0}. Click to disable.', ext)
+            : tr('Not tracking {0}. Click to enable.', ext),
+        tr('Enabled: {0}', enabled.join(', ') || '(none)'),
+        excluded ? tr('Excluded by pattern') : '',
     ].filter(Boolean).join('\n');
     statusBarItem.command = 'undotree.toggleTracking';
     statusBarItem.show();
@@ -1795,6 +1796,7 @@ async function resolveTrackedDocumentContext(sourceUri?: string): Promise<{ docu
 }
 
 export async function activate(context: vscode.ExtensionContext) {
+    initializeRuntimeL10n(context);
     manager = new UndoTreeManager();
     const provider = new UndoTreeProvider(context, manager);
     const contentProvider = new UndoTreeDocumentContentProvider();
@@ -1873,7 +1875,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
         if (!editor || !isTracked(editor.document)) {
-            compactPreviewPanel.webview.html = `<!DOCTYPE html><html><body style="font-family:var(--vscode-font-family);padding:16px;color:var(--vscode-foreground);opacity:0.7;">${vscode.l10n.t('Undo Tree preview is only available for tracked text files.')}</body></html>`;
+            compactPreviewPanel.webview.html = `<!DOCTYPE html><html><body style="font-family:var(--vscode-font-family);padding:16px;color:var(--vscode-foreground);opacity:0.7;">${tr('Undo Tree preview is only available for tracked text files.')}</body></html>`;
             return;
         }
         await ensureTreeLoaded(context, manager, editor.document).catch(() => {});
@@ -1883,8 +1885,8 @@ export async function activate(context: vscode.ExtensionContext) {
             ? manager.previewHardCompactDetailed(tree, days)
             : manager.previewCompactDetailed(tree);
         compactPreviewPanel.title = compactPreviewMode === 'hard'
-            ? vscode.l10n.t('Undo Tree Hard Compact Preview')
-            : vscode.l10n.t('Undo Tree Compact Preview');
+            ? tr('Undo Tree Hard Compact Preview')
+            : tr('Undo Tree Compact Preview');
         compactPreviewPanel.webview.html = buildCompactPreviewHtml(
             path.basename(editor.document.fileName) || editor.document.uri.toString(),
             compactPreviewMode,
@@ -1906,7 +1908,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (!compactPreviewPanel) {
             compactPreviewPanel = vscode.window.createWebviewPanel(
                 'undotreeCompactPreview',
-                vscode.l10n.t('Undo Tree Compact Preview'),
+                tr('Undo Tree Compact Preview'),
                 vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active,
                 { enableScripts: true, retainContextWhenHidden: true }
             );
@@ -1960,7 +1962,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     await renderCompactPreviewPanel();
                 } catch (error) {
                     outputChannel.appendLine(`[compact-preview] command failed: ${String(error)}`);
-                    void vscode.window.showErrorMessage(vscode.l10n.t('Undo Tree: compact preview action failed. See Output for details.'));
+                    void vscode.window.showErrorMessage(tr('Undo Tree: compact preview action failed. See Output for details.'));
                 }
             });
         } else {
@@ -1979,13 +1981,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const showDiagnosticsPanel = async () => {
         if (!getDiagnosticsEnabled(context)) {
-            vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree diagnostics are disabled. Enable undotree.enableDiagnostics to use this panel.'));
+            vscode.window.showInformationMessage(tr('Undo Tree diagnostics are disabled. Enable undotree.enableDiagnostics to use this panel.'));
             return;
         }
         if (!diagnosticsPanel) {
             diagnosticsPanel = vscode.window.createWebviewPanel(
                 'undotreeDiagnostics',
-                vscode.l10n.t('Undo Tree Diagnostics'),
+                tr('Undo Tree Diagnostics'),
                 vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active,
                 { enableScripts: true, retainContextWhenHidden: true }
             );
@@ -2001,7 +2003,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         case 'pruneOrphans': {
                             const result = await pruneOrphanPersistedFiles(context);
                             vscode.window.showInformationMessage(
-                                vscode.l10n.t('Undo Tree: pruned {0} orphan tree file(s) and {1} orphan content file(s).', result.treeFiles, result.contentFiles)
+                                tr('Undo Tree: pruned {0} orphan tree file(s) and {1} orphan content file(s).', result.treeFiles, result.contentFiles)
                             );
                             break;
                         }
@@ -2009,7 +2011,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             const result = await rebuildPersistedManifestFromTreeFiles(context, manager?.paused === true);
                             syncPersistedUris((await readPersistedManifest(context)).manifest?.trees.map((entry) => entry.uri) ?? []);
                             vscode.window.showInformationMessage(
-                                vscode.l10n.t('Undo Tree: rebuilt manifest from {0} persisted tree file(s).', result.rebuilt)
+                                tr('Undo Tree: rebuilt manifest from {0} persisted tree file(s).', result.rebuilt)
                             );
                             break;
                         }
@@ -2036,7 +2038,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     await renderDiagnosticsPanel();
                 } catch (error) {
                     outputChannel.appendLine(`[diagnostics] command failed: ${String(error)}`);
-                    void vscode.window.showErrorMessage(vscode.l10n.t('Undo Tree: diagnostics action failed. See Output for details.'));
+                    void vscode.window.showErrorMessage(tr('Undo Tree: diagnostics action failed. See Output for details.'));
                 }
             });
         } else {
@@ -2087,7 +2089,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const result = await persistStateToDisk(context, state, manager.paused);
             syncPersistedUris(result.persistedUris);
             vscode.window.showInformationMessage(
-                vscode.l10n.t('Undo Tree: saved {0} tree(s) to {1}', result.treeCount, result.treesDir)
+                tr('Undo Tree: saved {0} tree(s) to {1}', result.treeCount, result.treesDir)
             );
         }),
 
@@ -2100,9 +2102,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            const resetLabel = vscode.l10n.t('Reset');
+            const resetLabel = tr('Reset');
             const confirmed = await vscode.window.showWarningMessage(
-                vscode.l10n.t(
+                tr(
                     'Undo Tree: delete all in-memory and persisted history for this workspace? This only resets Undo Tree history and does not roll back the current file contents. This cannot be undone.'
                 ),
                 { modal: true },
@@ -2143,7 +2145,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
             provider.refresh();
             updateStatusBar(vscode.window.activeTextEditor);
-            vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: all history has been reset.'));
+            vscode.window.showInformationMessage(tr('Undo Tree: all history has been reset.'));
         }),
 
         vscode.commands.registerCommand('undotree.restorePersistedState', async () => {
@@ -2152,18 +2154,18 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
             if (!isTracked(editor.document)) {
-                vscode.window.showWarningMessage(vscode.l10n.t('Undo Tree: current file is not tracked.'));
+                vscode.window.showWarningMessage(tr('Undo Tree: current file is not tracked.'));
                 return;
             }
 
             const restored = await restoreTreeForDocument(context, manager, editor.document);
             if (!restored) {
-                vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: no persisted state found for the current file.'));
+                vscode.window.showInformationMessage(tr('Undo Tree: no persisted state found for the current file.'));
                 return;
             }
 
             provider.refresh();
-            vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: restored persisted state for the current file.'));
+            vscode.window.showInformationMessage(tr('Undo Tree: restored persisted state for the current file.'));
         }),
 
         vscode.commands.registerCommand('undotree.showMenu', async () => {
@@ -2176,63 +2178,63 @@ export async function activate(context: vscode.ExtensionContext) {
                 settingId?: string;
             }> = [
                 {
-                    label: vscode.l10n.t('$(gear) Open Settings'),
-                    description: vscode.l10n.t('Open Undo Tree extension settings'),
+                    label: tr('$(gear) Open Settings'),
+                    description: tr('Open Undo Tree extension settings'),
                     command: 'workbench.action.openSettings',
                 },
                 {
-                    label: vscode.l10n.t('$(save) Save Persisted State'),
-                    description: vscode.l10n.t('Write tracked histories to extension storage'),
+                    label: tr('$(save) Save Persisted State'),
+                    description: tr('Write tracked histories to extension storage'),
                     command: 'undotree.savePersistedState',
                 },
                 {
-                    label: vscode.l10n.t('$(trash) Reset Undo Tree State'),
-                    description: vscode.l10n.t('Delete all in-memory and persisted Undo Tree history for this workspace'),
+                    label: tr('$(trash) Reset Undo Tree State'),
+                    description: tr('Delete all in-memory and persisted Undo Tree history for this workspace'),
                     command: 'undotree.resetAllState',
                 },
                 {
                     label: getPersistenceMode() === 'auto'
-                        ? vscode.l10n.t('$(sync-ignored) Auto Persist: On')
-                        : vscode.l10n.t('$(sync) Auto Persist: Off'),
-                    description: vscode.l10n.t('Open settings to change persistent save mode'),
+                        ? tr('$(sync-ignored) Auto Persist: On')
+                        : tr('$(sync) Auto Persist: Off'),
+                    description: tr('Open settings to change persistent save mode'),
                     command: 'workbench.action.openSettings',
                     settingId: 'undotree.persistenceMode',
                 },
                 {
-                    label: vscode.l10n.t('$(history) Restore Persisted State'),
-                    description: vscode.l10n.t('Reload saved history for the current file'),
+                    label: tr('$(history) Restore Persisted State'),
+                    description: tr('Reload saved history for the current file'),
                     command: isCurrentTracked ? 'undotree.restorePersistedState' : undefined,
                 },
                 {
-                    label: vscode.l10n.t('$(archive) Compact History'),
-                    description: vscode.l10n.t('Remove compressible intermediate nodes'),
+                    label: tr('$(archive) Compact History'),
+                    description: tr('Remove compressible intermediate nodes'),
                     command: isCurrentTracked ? 'undotree.compact' : undefined,
                 },
                 {
-                    label: vscode.l10n.t('$(eye) Compact History Preview'),
-                    description: vscode.l10n.t('Open the compact preview with removable and protected nodes'),
+                    label: tr('$(eye) Compact History Preview'),
+                    description: tr('Open the compact preview with removable and protected nodes'),
                     command: isCurrentTracked ? 'undotree.compactDryRun' : undefined,
                 },
                 {
-                    label: vscode.l10n.t('$(eye) Hard Compact Preview'),
-                    description: vscode.l10n.t('Open the hard compact preview with retention details'),
+                    label: tr('$(eye) Hard Compact Preview'),
+                    description: tr('Open the hard compact preview with retention details'),
                     command: isCurrentTracked ? 'undotree.hardCompactDryRun' : undefined,
                 },
                 {
                     label: manager?.paused
-                        ? vscode.l10n.t('$(debug-start) Resume Tracking')
-                        : vscode.l10n.t('$(debug-pause) Pause Tracking'),
-                    description: vscode.l10n.t('Temporarily disable or resume history capture'),
+                        ? tr('$(debug-start) Resume Tracking')
+                        : tr('$(debug-pause) Pause Tracking'),
+                    description: tr('Temporarily disable or resume history capture'),
                     command: 'undotree.togglePause',
                 },
                 {
-                    label: vscode.l10n.t('$(symbol-file) Toggle Tracking for This Extension'),
-                    description: vscode.l10n.t('Enable or disable tracking for the current file extension'),
+                    label: tr('$(symbol-file) Toggle Tracking for This Extension'),
+                    description: tr('Enable or disable tracking for the current file extension'),
                     command: editor ? 'undotree.toggleTracking' : undefined,
                 },
                 {
-                    label: vscode.l10n.t('$(tools) Open Diagnostics'),
-                    description: vscode.l10n.t('Inspect persisted storage, manifest state, and orphan files'),
+                    label: tr('$(tools) Open Diagnostics'),
+                    description: tr('Inspect persisted storage, manifest state, and orphan files'),
                     command: getDiagnosticsEnabled(context) ? 'undotree.openDiagnostics' : undefined,
                 },
             ];
@@ -2240,8 +2242,8 @@ export async function activate(context: vscode.ExtensionContext) {
             const picked = await vscode.window.showQuickPick(
                 items.filter((item) => item.command),
                 {
-                    title: vscode.l10n.t('Undo Tree'),
-                    placeHolder: vscode.l10n.t('Choose an action'),
+                    title: tr('Undo Tree'),
+                    placeHolder: tr('Choose an action'),
                 }
             );
             if (!picked?.command) {
@@ -2266,7 +2268,7 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             const ext = path.extname(editor.document.fileName).toLowerCase();
             if (!ext) {
-                vscode.window.showWarningMessage(vscode.l10n.t('Cannot determine file extension.'));
+                vscode.window.showWarningMessage(tr('Cannot determine file extension.'));
                 return;
             }
             const config = vscode.workspace.getConfiguration('undotree');
@@ -2275,10 +2277,10 @@ export async function activate(context: vscode.ExtensionContext) {
             let updated: string[];
             if (idx === -1) {
                 updated = [...current, ext];
-                vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: enabled for {0}', ext));
+                vscode.window.showInformationMessage(tr('Undo Tree: enabled for {0}', ext));
             } else {
                 updated = current.filter((_, i) => i !== idx);
-                vscode.window.showInformationMessage(vscode.l10n.t('Undo Tree: disabled for {0}', ext));
+                vscode.window.showInformationMessage(tr('Undo Tree: disabled for {0}', ext));
             }
             await config.update('enabledExtensions', updated, vscode.ConfigurationTarget.Global);
             updateStatusBar(editor);
@@ -2306,7 +2308,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 'vscode.diff',
                 targetUri,
                 currentUri,
-                vscode.l10n.t('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
+                tr('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
                 {
                     preview: true,
                     preserveFocus: false,
@@ -2336,7 +2338,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 'vscode.diff',
                 leftUri,
                 rightUri,
-                vscode.l10n.t('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
+                tr('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
                 {
                     preview: true,
                     preserveFocus: false,
@@ -2364,13 +2366,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 try {
                     await flushPersistState(context);
                 } catch {
-                    vscode.window.showWarningMessage(vscode.l10n.t('Undo Tree: compact succeeded, but persisted state could not be updated.'));
+                    vscode.window.showWarningMessage(tr('Undo Tree: compact succeeded, but persisted state could not be updated.'));
                 }
             }
             vscode.window.showInformationMessage(
                 skipped > 0
-                    ? vscode.l10n.t('Undo Tree: compacted {0} node(s), skipped {1} marked node(s)', removed, skipped)
-                    : vscode.l10n.t('Undo Tree: compacted {0} node(s)', removed)
+                    ? tr('Undo Tree: compacted {0} node(s), skipped {1} marked node(s)', removed, skipped)
+                    : tr('Undo Tree: compacted {0} node(s)', removed)
             );
         }),
 
@@ -2390,13 +2392,13 @@ export async function activate(context: vscode.ExtensionContext) {
             const days = getHardCompactAfterDays();
             if (days <= 0) {
                 vscode.window.showWarningMessage(
-                    vscode.l10n.t('Undo Tree: set undotree.hardCompactAfterDays (≥ 1) to use this command')
+                    tr('Undo Tree: set undotree.hardCompactAfterDays (≥ 1) to use this command')
                 );
                 return;
             }
-            const deleteLabel = vscode.l10n.t('Delete');
+            const deleteLabel = tr('Delete');
             const confirm = await vscode.window.showWarningMessage(
-                vscode.l10n.t('Undo Tree: delete nodes older than {0} day(s)? This cannot be undone.', days),
+                tr('Undo Tree: delete nodes older than {0} day(s)? This cannot be undone.', days),
                 { modal: true },
                 deleteLabel
             );
@@ -2416,13 +2418,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 try {
                     await flushPersistState(context);
                 } catch {
-                    vscode.window.showWarningMessage(vscode.l10n.t('Undo Tree: hard compact succeeded, but persisted state could not be updated.'));
+                    vscode.window.showWarningMessage(tr('Undo Tree: hard compact succeeded, but persisted state could not be updated.'));
                 }
             }
             vscode.window.showInformationMessage(
                 skipped > 0
-                    ? vscode.l10n.t('Undo Tree: hard compacted {0} node(s) older than {1} day(s), skipped {2} marked node(s)', removed, days, skipped)
-                    : vscode.l10n.t('Undo Tree: hard compacted {0} node(s) older than {1} day(s)', removed, days)
+                    ? tr('Undo Tree: hard compacted {0} node(s) older than {1} day(s), skipped {2} marked node(s)', removed, days, skipped)
+                    : tr('Undo Tree: hard compacted {0} node(s) older than {1} day(s)', removed, days)
             );
         }),
 
@@ -2443,7 +2445,7 @@ export async function activate(context: vscode.ExtensionContext) {
             schedulePersistState(context);
             updateStatusBar(vscode.window.activeTextEditor);
             vscode.window.showInformationMessage(
-                manager.paused ? vscode.l10n.t('Undo Tree: paused') : vscode.l10n.t('Undo Tree: resumed')
+                manager.paused ? tr('Undo Tree: paused') : tr('Undo Tree: resumed')
             );
         }),
 
@@ -2523,6 +2525,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.excludePatterns') ||
                 e.affectsConfiguration('undotree.persistenceMode') ||
                 e.affectsConfiguration('undotree.warnOnMultiWindowConflict') ||
+                e.affectsConfiguration('undotree.language') ||
                 e.affectsConfiguration('undotree.autosaveInterval') ||
                 e.affectsConfiguration('undotree.timeFormat') ||
                 e.affectsConfiguration('undotree.timeFormatCustom') ||
@@ -2550,6 +2553,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (e.affectsConfiguration('undotree.enableDiagnostics')) {
                     void updateDiagnosticsContext(context);
                 }
+                if (e.affectsConfiguration('undotree.language')) {
+                    provider.resetShell();
+                }
                 if (e.affectsConfiguration('undotree.persistenceMode') || e.affectsConfiguration('undotree.warnOnMultiWindowConflict')) {
                     if (getPersistenceMode() !== 'auto' || !getWarnOnMultiWindowConflict()) {
                         void releaseAllMultiWindowLocks(context);
@@ -2563,7 +2569,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 unloadIdleResidentTrees(vscode.window.activeTextEditor);
                 updateStatusBar(vscode.window.activeTextEditor);
-                provider.refresh();
+                if (!e.affectsConfiguration('undotree.language')) {
+                    provider.refresh();
+                }
                 if (diagnosticsPanel) {
                     void renderDiagnosticsPanel();
                 }
@@ -2595,3 +2603,4 @@ export async function activate(context: vscode.ExtensionContext) {
 export async function deactivate() {
     await deactivateHandler?.();
 }
+

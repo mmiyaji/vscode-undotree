@@ -142,6 +142,17 @@
             "default": true,
             "order": 60,
             "markdownDescription": "%config.warnOnMultiWindowConflict.description%"
+          },
+          "undotree.language": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "en",
+              "ja"
+            ],
+            "default": "auto",
+            "order": 70,
+            "markdownDescription": "%config.language.description%"
           }
         }
       },

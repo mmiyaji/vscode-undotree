@@ -1279,6 +1279,7 @@ export class UndoTreeManager implements vscode.Disposable {
     hardCompact(tree: UndoTree, maxAgeDays: number): number {
         const thresholdMs = maxAgeDays * 86_400_000;
         const now = Date.now();
+        const latestNodeId = this.getLatestNodeId(tree);
 
         // Step 1: current の祖先を保護対象に
         const currentAncestors = new Set<number>();
@@ -1328,7 +1329,11 @@ export class UndoTreeManager implements vscode.Disposable {
             }
 
             const isExpired = (now - node.timestamp) > thresholdMs;
-            const isProtected = node.note || node.pinned || hasNotedAncestor.has(nodeId) || hasPinnedAncestor.has(nodeId);
+            const isProtected = nodeId === latestNodeId
+                || node.note
+                || node.pinned
+                || hasNotedAncestor.has(nodeId)
+                || hasPinnedAncestor.has(nodeId);
 
             if (isExpired && !isProtected) {
                 markSubtree(nodeId);
@@ -1506,6 +1511,23 @@ export class UndoTreeManager implements vscode.Disposable {
         return hasPinnedAncestor;
     }
 
+    private getLatestNodeId(tree: UndoTree): number {
+        let latestNodeId = tree.rootId;
+        let latestTimestamp = Number.NEGATIVE_INFINITY;
+
+        for (const [nodeId, node] of tree.nodes) {
+            if (
+                node.timestamp > latestTimestamp
+                || (node.timestamp === latestTimestamp && nodeId > latestNodeId)
+            ) {
+                latestTimestamp = node.timestamp;
+                latestNodeId = nodeId;
+            }
+        }
+
+        return latestNodeId;
+    }
+
     private canManuallyRemove(tree: UndoTree, node: UndoNode): boolean {
         return this.getManualRemoveBlockReason(tree, node) === undefined;
     }
@@ -1532,6 +1554,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private collectHardCompactNodeIds(tree: UndoTree, maxAgeDays: number, overrides?: Map<number, 'remove' | 'keep'>): Set<number> {
         const thresholdMs = maxAgeDays * 86_400_000;
         const now = Date.now();
+        const latestNodeId = this.getLatestNodeId(tree);
         const currentAncestors = this.collectCurrentAncestors(tree);
         const hasNotedAncestor = this.collectNotedAncestors(tree);
         const hasPinnedAncestor = this.collectPinnedAncestors(tree);
@@ -1580,7 +1603,12 @@ export class UndoTreeManager implements vscode.Disposable {
             }
 
             const isExpired = (now - node.timestamp) > thresholdMs;
-            const isProtected = node.note || node.pinned || hasNotedAncestor.has(nodeId) || hasPinnedAncestor.has(nodeId) || keptAncestors.has(nodeId);
+            const isProtected = nodeId === latestNodeId
+                || node.note
+                || node.pinned
+                || hasNotedAncestor.has(nodeId)
+                || hasPinnedAncestor.has(nodeId)
+                || keptAncestors.has(nodeId);
 
             if (isExpired && !isProtected) {
                 markSubtree(nodeId);
@@ -1598,11 +1626,15 @@ export class UndoTreeManager implements vscode.Disposable {
     private getHardCompactProtectReason(tree: UndoTree, node: UndoNode, maxAgeDays: number): string {
         const thresholdMs = maxAgeDays * 86_400_000;
         const ageMs = Date.now() - node.timestamp;
+        const latestNodeId = this.getLatestNodeId(tree);
         const currentAncestors = this.collectCurrentAncestors(tree);
         const hasNotedAncestor = this.collectNotedAncestors(tree);
         const hasPinnedAncestor = this.collectPinnedAncestors(tree);
         if (node.id === tree.currentId) {
             return 'current node';
+        }
+        if (node.id === latestNodeId) {
+            return 'latest node';
         }
         if (currentAncestors.has(node.id)) {
             return 'current path';

@@ -1254,6 +1254,284 @@ describe('persisted tree reconciliation', () => {
         expect(tree.nodes.get(21)?.children).not.toContain(2);
         expect(restored.reconstructContent(tree, 2)).toBe('latest');
     });
+
+    it('repairs a self-referencing node by falling back to root as parent', () => {
+        const manager = new UndoTreeManager();
+        manager.importTree('file:///self-loop.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [1], children: [1], timestamp: 1,
+                    label: 'self', hash: 'h1',
+                    storage: { kind: 'full', content: 'self' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1]],
+            currentId: 1,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///self-loop.md'));
+        expect(tree.nodes.size).toBe(2);
+        expect(tree.nodes.get(1)?.parents).toEqual([0]);
+        expect(tree.nodes.get(1)?.children).toEqual([]);
+        expect(tree.nodes.get(0)?.children).toContain(1);
+    });
+
+    it('repairs a mutual cycle between two nodes', () => {
+        const manager = new UndoTreeManager();
+        manager.importTree('file:///mutual.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [2], children: [2], timestamp: 1,
+                    label: 'a', hash: 'h1',
+                    storage: { kind: 'full', content: 'a' },
+                },
+                {
+                    id: 2, parents: [1], children: [1], timestamp: 2,
+                    label: 'b', hash: 'h2',
+                    storage: { kind: 'full', content: 'b' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h2', 2]],
+            currentId: 2,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///mutual.md'));
+        expect(tree.nodes.size).toBe(3);
+        // timestamp order: 0→1→2, so 1 gets parent from candidates (2 would cycle, fallback to 0)
+        // then 2 gets parent 1 (no cycle)
+        const node1 = tree.nodes.get(1)!;
+        const node2 = tree.nodes.get(2)!;
+        expect(node1.parents.length).toBe(1);
+        expect(node2.parents.length).toBe(1);
+        // no mutual: if 1→parent=X, 2→parent=Y, then X≠2 or Y≠1
+        expect(!(node1.parents[0] === 2 && node2.parents[0] === 1)).toBe(true);
+    });
+
+    it('repairs a root node that incorrectly has parents', () => {
+        const manager = new UndoTreeManager();
+        manager.importTree('file:///root-parent.md', {
+            nodes: [
+                {
+                    id: 0, parents: [1], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [0], children: [], timestamp: 1,
+                    label: 'save', hash: 'h1',
+                    storage: { kind: 'full', content: 'x' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1]],
+            currentId: 1,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///root-parent.md'));
+        expect(tree.nodes.get(0)?.parents).toEqual([]);
+        expect(tree.nodes.get(1)?.parents).toEqual([0]);
+        expect(tree.nodes.get(0)?.children).toContain(1);
+    });
+
+    it('attaches an orphan node to root when no links exist', () => {
+        const manager = new UndoTreeManager();
+        manager.importTree('file:///orphan.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [0], children: [], timestamp: 1,
+                    label: 'save', hash: 'h1',
+                    storage: { kind: 'full', content: 'x' },
+                },
+                {
+                    id: 3, parents: [], children: [], timestamp: 2,
+                    label: 'orphan', hash: 'h3',
+                    storage: { kind: 'full', content: 'orphan' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h3', 3]],
+            currentId: 1,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///orphan.md'));
+        expect(tree.nodes.size).toBe(3);
+        expect(tree.nodes.get(3)?.parents).toEqual([0]);
+        expect(tree.nodes.get(0)?.children).toContain(3);
+    });
+
+    it('repairs children list when parent claims no children but nodes reference it', () => {
+        const manager = new UndoTreeManager();
+        manager.importTree('file:///missing-children.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [0], children: [], timestamp: 1,
+                    label: 'mid', hash: 'h1',
+                    storage: { kind: 'full', content: 'x' },
+                },
+                {
+                    id: 2, parents: [1], children: [], timestamp: 2,
+                    label: 'child-a', hash: 'h2',
+                    storage: { kind: 'full', content: 'a' },
+                },
+                {
+                    id: 3, parents: [1], children: [], timestamp: 3,
+                    label: 'child-b', hash: 'h3',
+                    storage: { kind: 'full', content: 'b' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h2', 2], ['h3', 3]],
+            currentId: 3,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///missing-children.md'));
+        expect(tree.nodes.get(1)?.children).toContain(2);
+        expect(tree.nodes.get(1)?.children).toContain(3);
+        expect(tree.nodes.get(2)?.parents).toEqual([1]);
+        expect(tree.nodes.get(3)?.parents).toEqual([1]);
+    });
+
+    it('repairs a long cycle chain of 4+ nodes', () => {
+        const manager = new UndoTreeManager();
+        // 0 → 1 → 2 → 3 → 4, but 4's child points back to 2
+        manager.importTree('file:///long-cycle.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [0], children: [2], timestamp: 1,
+                    label: 's1', hash: 'h1',
+                    storage: { kind: 'full', content: 'v1' },
+                },
+                {
+                    id: 2, parents: [1], children: [3], timestamp: 2,
+                    label: 's2', hash: 'h2',
+                    storage: { kind: 'full', content: 'v2' },
+                },
+                {
+                    id: 3, parents: [2], children: [4], timestamp: 3,
+                    label: 's3', hash: 'h3',
+                    storage: { kind: 'full', content: 'v3' },
+                },
+                {
+                    id: 4, parents: [3], children: [2], timestamp: 4,
+                    label: 's4', hash: 'h4',
+                    storage: { kind: 'full', content: 'v4' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h2', 2], ['h3', 3], ['h4', 4]],
+            currentId: 4,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///long-cycle.md'));
+        expect(tree.nodes.size).toBe(5);
+        // verify no cycles: walk from each node to root via parents
+        for (const [nodeId, node] of tree.nodes) {
+            const visited = new Set<number>();
+            let current: number | undefined = nodeId;
+            while (current !== undefined) {
+                expect(visited.has(current)).toBe(false);
+                visited.add(current);
+                const n = tree.nodes.get(current);
+                current = n && n.parents.length > 0 ? n.parents[0] : undefined;
+            }
+            expect(visited.has(0)).toBe(true); // all nodes reach root
+        }
+    });
+
+    it('keeps currentId valid after repairing a cycle that includes the current node', () => {
+        const manager = new UndoTreeManager();
+        // cycle: 1 → 2 → 1, currentId=2
+        manager.importTree('file:///current-in-cycle.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [0], children: [2], timestamp: 1,
+                    label: 's1', hash: 'h1',
+                    storage: { kind: 'full', content: 'v1' },
+                },
+                {
+                    id: 2, parents: [1], children: [1], timestamp: 2,
+                    label: 's2', hash: 'h2',
+                    storage: { kind: 'full', content: 'v2' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h2', 2]],
+            currentId: 2,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///current-in-cycle.md'));
+        expect(tree.nodes.size).toBe(3);
+        expect(tree.currentId).toBe(2);
+        expect(tree.nodes.has(2)).toBe(true);
+        // reconstructContent should not throw
+        expect(manager.reconstructContent(tree, 2)).toBe('v2');
+    });
+
+    it('preserves pinned and note metadata after cycle repair', () => {
+        const manager = new UndoTreeManager();
+        manager.importTree('file:///meta-cycle.md', {
+            nodes: [
+                {
+                    id: 0, parents: [], children: [1], timestamp: 0,
+                    label: 'initial', hash: 'h0',
+                    storage: { kind: 'full', content: 'base' },
+                },
+                {
+                    id: 1, parents: [2], children: [2], timestamp: 1,
+                    label: 'pinned-node', hash: 'h1', pinned: true,
+                    storage: { kind: 'full', content: 'v1' },
+                },
+                {
+                    id: 2, parents: [1], children: [1], timestamp: 2,
+                    label: 'noted-node', hash: 'h2', note: 'important',
+                    storage: { kind: 'full', content: 'v2' },
+                },
+            ],
+            hashMap: [['h0', 0], ['h1', 1], ['h2', 2]],
+            currentId: 2,
+            rootId: 0,
+        });
+
+        const tree = manager.getTree(makeUri('file:///meta-cycle.md'));
+        expect(tree.nodes.size).toBe(3);
+        expect(tree.nodes.get(1)?.pinned).toBe(true);
+        expect(tree.nodes.get(2)?.note).toBe('important');
+        // all nodes preserved, no data loss
+        expect(tree.nodes.get(1)?.label).toBe('pinned-node');
+        expect(tree.nodes.get(2)?.label).toBe('noted-node');
+    });
 });
 
 // -----------------------------------------------
@@ -1412,5 +1690,18 @@ describe('hardCompact', () => {
         expect(tree.nodes.has(oldId1)).toBe(false);
         expect(tree.nodes.has(oldId2)).toBe(false);
         expect(tree.nodes.has(oldId3)).toBe(false);
+    });
+
+    it('current ではなくても最新タイムスタンプのノードは削除されない', () => {
+        const { manager, tree, branchId, mainId } = makeBranchScenario(60);
+        const now = Date.now();
+
+        tree.nodes.get(branchId)!.timestamp = now;
+        tree.nodes.get(mainId)!.timestamp = now - 60 * DAY_MS;
+
+        const removed = manager.hardCompact(tree, 30);
+
+        expect(removed).toBe(0);
+        expect(tree.nodes.has(branchId)).toBe(true);
     });
 });

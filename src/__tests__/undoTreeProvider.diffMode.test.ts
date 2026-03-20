@@ -35,7 +35,7 @@ describe('UndoTreeProvider diff mode', () => {
         expect(html).toContain('previewDiffForFocused();');
         expect(html).toContain("el.classList.toggle('diff-base', mode === 'diff' && diffCompareMode === 'pair' && nodeId === diffBaseNodeId);");
         expect(html).toContain("el.classList.toggle(");
-        expect(html).toContain('<span class="diff-target-badge">Diff</span>');
+        expect(html).toContain("'<span class=\"diff-target-badge\">' + escHtml(i18n.badgeDiff) + '</span>'");
         expect(html).toContain('Diff mode - select a node to compare');
         expect(html).toContain('setFocused(nodeIds.indexOf(currentId));');
         expect(html).toContain("if (e.key === 'Escape' && mode === 'diff') {");

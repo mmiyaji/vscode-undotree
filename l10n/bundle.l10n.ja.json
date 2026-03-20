@@ -216,6 +216,7 @@
   "Select a base node first or press B.": "比較元ノードを選択するか B キーを押してください。",
   "Jump": "移動",
   "Compare with Current": "現在と比較",
+  "Display Settings": "表示設定",
   "Set Pair Diff Base": "比較元に設定",
   "Pin": "ピン留め",
   "Unpin": "ピン解除",
