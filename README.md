@@ -17,15 +17,18 @@ The extension records history on saves and periodic autosave checkpoints. It doe
 - Tree-structured history with preserved branches
 - Save-triggered checkpoints and periodic autosave checkpoints
 - Sidebar navigation with keyboard support
-- Diff mode for comparing a node against the current document
+- Diff mode for comparing against the current document or between arbitrary nodes
 - Node notes and pinned nodes for important history points
-- Line-count or byte-count metrics per node
+- Line-count or byte-count metrics per node, including parent-relative deltas
+- Relative timestamp display
 - Manual and automatic persistence across sessions
 - Compact / Hard Compact with preview, validation, and manual keep/remove overrides
 - Diagnostics panel for persisted storage, manifest state, locks, and orphan files
 - Multi-window conflict warnings in auto persistence mode
 - Adaptive persistence with compression, checkpoint files, and lazy loading
 - Idle resident-tree unload for persisted clean trees to reduce memory usage
+- Runtime language override for the sidebar UI (`auto`, `en`, `ja`)
+- History preservation across file rename and move operations
 
 ## Installation
 
@@ -46,6 +49,7 @@ This extension is distributed as a `.vsix` file via [GitHub Releases](https://gi
 | Undo / Redo | Click **Undo** / **Redo** |
 | Jump to a node | Click the node row |
 | Compare with current | Switch to **Diff** and select a node |
+| Compare between two nodes | Switch to **Diff**, choose **Pair Diff**, select a base node, then select another node |
 | Pause / Resume tracking | Click **Pause** / **Resume** |
 | Open actions menu | Click the gear button |
 | Toggle tracking for current extension | Click the status bar item |
@@ -84,8 +88,22 @@ When the Undo Tree panel has focus:
 | `Home` / `End` | Move to first / last node |
 | `Enter` / `Space` | Jump to focused node |
 | `d` | Toggle Navigate / Diff mode |
+| `b` | Set the base node for Pair Diff |
+| `c` | Return to `vs Current` diff mode |
 | `p` | Toggle Pause / Resume |
 | `n` / `N` | Move to next / previous noted node |
+| `?` | Show the shortcut help overlay |
+
+### Context menu
+
+Right-click a node to open actions such as:
+
+- `Jump`
+- `Compare with Current`
+- `Set Pair Diff Base`
+- `Pin / Unpin`
+- `Edit Note`
+- `Display Settings`
 
 ### Actions menu
 
@@ -121,6 +139,8 @@ Behavior:
 - If the file content differs from the saved current node, a new `restore` node is appended
 - Root-only untouched trees are not persisted until history actually grows
 - `manifest.json.bak` is used as a fallback if the main manifest cannot be read
+- Persisted files are written through temporary files first to avoid leaving zero-byte history files behind on interrupted writes
+- Broken persisted tree topology is repaired on load when possible so content can be recovered without dropping the entire history
 
 ## Compaction
 
@@ -134,6 +154,8 @@ Current behavior:
 - The current node is kept
 - Pinned nodes and noted nodes are protected
 - `mixed` nodes are kept
+
+`Hard Compact` also protects the latest-timestamp node, even when it is not the current node.
 
 `mixed` means a node that is not part of a pure insert-only or pure delete-only chain. Full snapshot nodes are treated as `mixed`, and delta nodes that contain both insertion and deletion are also treated as `mixed`.
 
@@ -183,6 +205,14 @@ Available actions include:
 - `Open Storage Folder`
 - `Reset All State`
 
+## Rename / move behavior
+
+Undo Tree listens to file rename and move events.
+
+- In-memory history is moved from the old URI to the new URI
+- Persisted manifest entries and tree file names are updated to the new URI
+- Close/unload is temporarily suppressed during rename so history is not lost mid-operation
+
 ## Multi-window behavior
 
 Persistence is shared across VS Code windows because persisted history lives in the same extension storage folder.
@@ -206,16 +236,17 @@ Open settings from the actions menu, or search for `@ext:mmiyaji.vscode-undotree
 | `undotree.autosaveInterval` | `30` | Autosave checkpoint interval in seconds (`0` disables it) |
 | `undotree.hardCompactAfterDays` | `0` | Age threshold for `Hard Compact`; `0` disables it |
 | `undotree.warnOnMultiWindowConflict` | `true` | Show warnings in `auto` mode when the same tracked file appears active in another VS Code window |
+| `undotree.language` | `"auto"` | Runtime sidebar language: `auto`, `en`, or `ja` |
 
 ### Display
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `undotree.timeFormat` | `"time"` | `none`, `time`, `dateTime`, or `custom` |
+| `undotree.timeFormat` | `"time"` | `none`, `time`, `dateTime`, `relative`, or `custom` |
 | `undotree.timeFormatCustom` | `"yyyy-MM-dd HH:mm:ss"` | Custom timestamp format using [date-fns format](https://date-fns.org/v4.1.0/docs/format); used only when `timeFormat` is `custom` |
 | `undotree.showStorageKind` | `false` | Show `F` / `D` badges |
 | `undotree.nodeSizeMetric` | `"lines"` | `none`, `lines`, or `bytes` |
-| `undotree.nodeSizeMetricBase` | `"current"` | Compare size against `current` or `initial` |
+| `undotree.nodeSizeMetricBase` | `"parent"` | Compare size against `current`, `initial`, or `parent` |
 
 ### Performance
 
@@ -277,9 +308,9 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  save["Save event"] --> same{"Same content as current?"}
+  save["Save event"] --> same("Same content as current?")
   same -->|Yes| skip["Skip"]
-  same -->|No| ratio{"Large change or branch point?"}
+  same -->|No| ratio("Large change or branch point?")
   ratio -->|Yes| full["Store full snapshot or checkpoint"]
   ratio -->|No| delta["Store delta only"]
 ```

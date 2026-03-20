@@ -2,11 +2,21 @@
 
 ## 0.3.2
 
+### New features
+
+- Added `Pair Diff` so two arbitrary history nodes can be compared without involving the current document.
+- Added `relative` timestamp display mode.
+- Added a runtime language override setting (`auto`, `en`, `ja`) for sidebar and runtime UI strings.
+- Added a node context menu with note, pin, diff, and display-settings actions.
+- Added rename/move history migration so in-memory and persisted trees follow file URI changes.
+
 ### Improvements
 
 - Added structured persist/load logging to the `Undo Tree` output channel so node-count changes during save and restore can be traced more easily.
 - Hardened persisted-tree import by validating serialized node storage, required references, and parent/child back-references before accepting on-disk history.
 - Added nonce-based Content Security Policy to the sidebar webview and removed inline action handlers in favor of explicit event listeners.
+- Added topology repair for broken persisted trees and lightweight pre-checks so repair runs only when needed.
+- Improved diff review flow with better panel focus behavior, shortcut help overlay, and latest-state-aware Hard Compact protection.
 
 ### Fixes
 
@@ -15,6 +25,9 @@
 - Fixed checkpoint cache byte accounting when the same hash is refreshed multiple times.
 - Fixed reset and shutdown flows so pending persisted state is flushed safely and multi-window lock files are released.
 - Fixed compact preview and diagnostics webview actions to surface failures instead of leaving the UI in a silent broken state.
+- Fixed autosave after `jumpToNode()` so navigation alone does not create extra save/autosave nodes.
+- Fixed note editing so memo text uses double-click or the edit icon instead of hijacking normal node selection.
+- Fixed rename-in-place handling so visible history survives immediate file rename operations without requiring a tab switch.
 
 ## 0.3.1
 
