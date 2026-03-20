@@ -8,12 +8,15 @@ function makeUri(path = 'file:///pin.md') {
     return { toString: () => path } as any;
 }
 
+function uriToFileName(uriStr: string): string {
+    return decodeURIComponent(new URL(uriStr).pathname);
+}
+
 function makeDocument(content: string, uriStr = 'file:///pin.md') {
-    const fileName = uriStr.replace('file:///', 'C:/');
     return {
         getText: () => content,
         uri: makeUri(uriStr),
-        fileName,
+        fileName: uriToFileName(uriStr),
         isUntitled: false,
     } as any;
 }

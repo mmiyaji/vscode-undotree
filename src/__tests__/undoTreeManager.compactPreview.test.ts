@@ -4,11 +4,15 @@ function makeUri(path = 'file:///preview.txt') {
     return { toString: () => path } as any;
 }
 
+function uriToFileName(uriStr: string): string {
+    return decodeURIComponent(new URL(uriStr).pathname);
+}
+
 function makeDocument(content: string, uriStr = 'file:///preview.txt') {
     return {
         getText: () => content,
         uri: makeUri(uriStr),
-        fileName: uriStr.replace('file:///', 'C:/'),
+        fileName: uriToFileName(uriStr),
         isUntitled: false,
     } as any;
 }

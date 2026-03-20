@@ -138,7 +138,10 @@ export class UndoTreeManager implements vscode.Disposable {
             this.contentCache.set(contentHash, cached);
             return cached;
         }
-        const content = this.contentResolver?.(contentHash) ?? '';
+        if (!this.contentResolver) {
+            throw new Error(`Missing checkpoint content resolver for hash ${contentHash}`);
+        }
+        const content = this.contentResolver(contentHash);
         this.setCachedContent(contentHash, content);
         return content;
     }
@@ -153,9 +156,15 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         this.debugLog?.(`[checkpoint] cache MISS hash=${contentHash} cacheBytes=${Math.round(this.contentCacheBytes/1024)}KB maxBytes=${Math.round(this.contentCacheMaxBytes/1024)}KB`);
         this.onCheckpointLoadStart?.();
-        const content = this.asyncContentResolver
-            ? await this.asyncContentResolver(contentHash)
-            : (this.contentResolver?.(contentHash) ?? '');
+        let content: string;
+        if (this.asyncContentResolver) {
+            content = await this.asyncContentResolver(contentHash);
+        } else {
+            if (!this.contentResolver) {
+                throw new Error(`Missing checkpoint content resolver for hash ${contentHash}`);
+            }
+            content = this.contentResolver(contentHash);
+        }
         this.setCachedContent(contentHash, content);
         return content;
     }
@@ -190,6 +199,11 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private setCachedContent(hash: string, content: string) {
+        const existing = this.contentCache.get(hash);
+        if (existing !== undefined) {
+            this.contentCache.delete(hash);
+            this.contentCacheBytes = Math.max(0, this.contentCacheBytes - Buffer.byteLength(existing, 'utf8'));
+        }
         const bytes = Buffer.byteLength(content, 'utf8');
         this.evictCache(bytes);
         this.contentCache.set(hash, content);
@@ -719,39 +733,185 @@ export class UndoTreeManager implements vscode.Disposable {
         };
     }
 
+    private isValidDiff(value: unknown): value is Diff {
+        if (!value || typeof value !== 'object') {
+            return false;
+        }
+        const diff = value as Partial<Diff>;
+        return typeof diff.offset === 'number'
+            && Number.isFinite(diff.offset)
+            && diff.offset >= 0
+            && typeof diff.removeLength === 'number'
+            && Number.isFinite(diff.removeLength)
+            && diff.removeLength >= 0
+            && typeof diff.inserted === 'string';
+    }
+
+    private cloneValidatedStorage(storage: unknown): UndoNodeStorage {
+        if (!storage || typeof storage !== 'object') {
+            throw new Error('Invalid node storage');
+        }
+        const candidate = storage as Partial<UndoNodeStorage>;
+        if (candidate.kind === 'full') {
+            if (typeof candidate.content !== 'string') {
+                throw new Error('Invalid full node content');
+            }
+            return { kind: 'full', content: candidate.content };
+        }
+        if (candidate.kind === 'checkpoint') {
+            if (typeof candidate.contentHash !== 'string' || candidate.contentHash.length === 0) {
+                throw new Error('Invalid checkpoint content hash');
+            }
+            return { kind: 'checkpoint', contentHash: candidate.contentHash };
+        }
+        if (candidate.kind === 'delta') {
+            if (!Array.isArray(candidate.diffs) || !candidate.diffs.every((eventDiffs) =>
+                Array.isArray(eventDiffs) && eventDiffs.every((diff) => this.isValidDiff(diff))
+            )) {
+                throw new Error('Invalid delta node diffs');
+            }
+            return {
+                kind: 'delta',
+                diffs: candidate.diffs.map((eventDiffs) =>
+                    eventDiffs.map((diff) => ({ ...diff }))
+                ),
+            };
+        }
+        throw new Error('Unknown node storage kind');
+    }
+
+    private deserializeNode(node: unknown): UndoNode {
+        if (!node || typeof node !== 'object') {
+            throw new Error('Invalid undo node');
+        }
+        const candidate = node as Partial<SerializedUndoNode>;
+        if (
+            typeof candidate.id !== 'number'
+            || !Number.isInteger(candidate.id)
+            || typeof candidate.timestamp !== 'number'
+            || !Number.isFinite(candidate.timestamp)
+            || typeof candidate.label !== 'string'
+            || typeof candidate.hash !== 'string'
+            || !Array.isArray(candidate.parents)
+            || !candidate.parents.every((id) => typeof id === 'number' && Number.isInteger(id))
+            || !Array.isArray(candidate.children)
+            || !candidate.children.every((id) => typeof id === 'number' && Number.isInteger(id))
+        ) {
+            throw new Error('Invalid undo node shape');
+        }
+
+        const result: UndoNode = {
+            id: candidate.id,
+            parents: [...candidate.parents],
+            children: [...candidate.children],
+            timestamp: candidate.timestamp,
+            label: candidate.label,
+            hash: candidate.hash,
+            storage: this.cloneValidatedStorage(candidate.storage),
+        };
+        if (candidate.note !== undefined) {
+            if (typeof candidate.note !== 'string') {
+                throw new Error('Invalid node note');
+            }
+            result.note = candidate.note;
+        }
+        if (candidate.pinned !== undefined) {
+            if (typeof candidate.pinned !== 'boolean') {
+                throw new Error('Invalid pinned flag');
+            }
+            result.pinned = candidate.pinned;
+        }
+        if (candidate.lineCount !== undefined) {
+            if (typeof candidate.lineCount !== 'number' || !Number.isFinite(candidate.lineCount) || candidate.lineCount < 0) {
+                throw new Error('Invalid line count');
+            }
+            result.lineCount = candidate.lineCount;
+        }
+        if (candidate.byteCount !== undefined) {
+            if (typeof candidate.byteCount !== 'number' || !Number.isFinite(candidate.byteCount) || candidate.byteCount < 0) {
+                throw new Error('Invalid byte count');
+            }
+            result.byteCount = candidate.byteCount;
+        }
+        return result;
+    }
+
+    private deserializeTree(tree: unknown): UndoTree {
+        if (!tree || typeof tree !== 'object') {
+            throw new Error('Invalid undo tree');
+        }
+        const candidate = tree as Partial<SerializedUndoTree>;
+        if (
+            !Array.isArray(candidate.nodes)
+            || !Array.isArray(candidate.hashMap)
+            || typeof candidate.currentId !== 'number'
+            || !Number.isInteger(candidate.currentId)
+            || typeof candidate.rootId !== 'number'
+            || !Number.isInteger(candidate.rootId)
+        ) {
+            throw new Error('Invalid undo tree shape');
+        }
+
+        const nodes = new Map<number, UndoNode>();
+        for (const rawNode of candidate.nodes) {
+            const node = this.deserializeNode(rawNode);
+            if (nodes.has(node.id)) {
+                throw new Error(`Duplicate node id ${node.id}`);
+            }
+            nodes.set(node.id, node);
+        }
+
+        if (!nodes.has(candidate.currentId) || !nodes.has(candidate.rootId)) {
+            throw new Error('Undo tree references missing root or current node');
+        }
+
+        for (const node of nodes.values()) {
+            for (const parentId of node.parents) {
+                if (!nodes.has(parentId)) {
+                    throw new Error(`Node ${node.id} references missing parent ${parentId}`);
+                }
+                const parent = nodes.get(parentId)!;
+                if (!parent.children.includes(node.id)) {
+                    throw new Error(`Node ${node.id} is missing back-reference from parent ${parentId}`);
+                }
+            }
+            for (const childId of node.children) {
+                if (!nodes.has(childId)) {
+                    throw new Error(`Node ${node.id} references missing child ${childId}`);
+                }
+                const child = nodes.get(childId)!;
+                if (!child.parents.includes(node.id)) {
+                    throw new Error(`Node ${node.id} is missing back-reference from child ${childId}`);
+                }
+            }
+        }
+
+        const hashMap = new Map<string, number>();
+        for (const entry of candidate.hashMap) {
+            if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || typeof entry[1] !== 'number' || !nodes.has(entry[1])) {
+                throw new Error('Invalid hash map entry');
+            }
+            hashMap.set(entry[0], entry[1]);
+        }
+
+        return {
+            nodes,
+            hashMap,
+            currentId: candidate.currentId,
+            rootId: candidate.rootId,
+        };
+    }
+
     importState(state: SerializedUndoTreeState) {
+        if (!state || typeof state !== 'object' || typeof state.nextId !== 'number' || !Number.isFinite(state.nextId) || !state.trees || typeof state.trees !== 'object') {
+            throw new Error('Invalid serialized undo tree state');
+        }
         this.trees.clear();
         this.diffBuffer.clear();
         this.lastAccessAt.clear();
 
         for (const [key, tree] of Object.entries(state.trees)) {
-            this.trees.set(key, {
-                nodes: new Map(tree.nodes.map((node) => [node.id, {
-                    id: node.id,
-                    parents: [...node.parents],
-                    children: [...node.children],
-                    timestamp: node.timestamp,
-                    label: node.label,
-                    hash: node.hash,
-                    storage: node.storage.kind === 'full'
-                        ? { kind: 'full', content: node.storage.content }
-                        : node.storage.kind === 'checkpoint'
-                        ? { kind: 'checkpoint', contentHash: node.storage.contentHash }
-                        : {
-                            kind: 'delta',
-                            diffs: node.storage.diffs.map((eventDiffs: Diff[]) =>
-                                eventDiffs.map((diff: Diff) => ({ ...diff }))
-                            ),
-                        },
-                    ...(node.note !== undefined ? { note: node.note } : {}),
-                    ...(node.pinned !== undefined ? { pinned: node.pinned } : {}),
-                    ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
-                    ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
-                }])),
-                hashMap: new Map(tree.hashMap),
-                currentId: tree.currentId,
-                rootId: tree.rootId,
-            });
+            this.trees.set(key, this.deserializeTree(tree));
             this.lastAccessAt.set(key, Date.now());
         }
 
@@ -764,33 +924,7 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     importTree(uri: string, tree: SerializedUndoTree, nextId?: number) {
-        this.trees.set(uri, {
-            nodes: new Map(tree.nodes.map((node) => [node.id, {
-                id: node.id,
-                parents: [...node.parents],
-                children: [...node.children],
-                timestamp: node.timestamp,
-                label: node.label,
-                hash: node.hash,
-                storage: node.storage.kind === 'full'
-                    ? { kind: 'full', content: node.storage.content }
-                    : node.storage.kind === 'checkpoint'
-                    ? { kind: 'checkpoint', contentHash: node.storage.contentHash }
-                    : {
-                        kind: 'delta',
-                        diffs: node.storage.diffs.map((eventDiffs: Diff[]) =>
-                            eventDiffs.map((diff: Diff) => ({ ...diff }))
-                        ),
-                    },
-                ...(node.note !== undefined ? { note: node.note } : {}),
-                ...(node.pinned !== undefined ? { pinned: node.pinned } : {}),
-                ...(node.lineCount !== undefined ? { lineCount: node.lineCount } : {}),
-                ...(node.byteCount !== undefined ? { byteCount: node.byteCount } : {}),
-            }])),
-            hashMap: new Map(tree.hashMap),
-            currentId: tree.currentId,
-            rootId: tree.rootId,
-        });
+        this.trees.set(uri, this.deserializeTree(tree));
         this.lastAccessAt.set(uri, Date.now());
 
         if (typeof nextId === 'number') {
@@ -1134,8 +1268,11 @@ export class UndoTreeManager implements vscode.Disposable {
 
     private collectCurrentAncestors(tree: UndoTree): Set<number> {
         const currentAncestors = new Set<number>();
+        const visited = new Set<number>();
         let id: number | undefined = tree.currentId;
         while (id !== undefined) {
+            if (visited.has(id)) { break; }
+            visited.add(id);
             currentAncestors.add(id);
             const node = tree.nodes.get(id);
             id = node && node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
@@ -1147,8 +1284,11 @@ export class UndoTreeManager implements vscode.Disposable {
         const hasNotedAncestor = new Set<number>();
         for (const [nodeId, node] of tree.nodes) {
             if (!node.note) { continue; }
+            const visited = new Set<number>();
             let aid: number | undefined = nodeId;
             while (aid !== undefined) {
+                if (visited.has(aid)) { break; }
+                visited.add(aid);
                 if (hasNotedAncestor.has(aid)) { break; }
                 hasNotedAncestor.add(aid);
                 const anode = tree.nodes.get(aid);
@@ -1162,8 +1302,11 @@ export class UndoTreeManager implements vscode.Disposable {
         const hasPinnedAncestor = new Set<number>();
         for (const [nodeId, node] of tree.nodes) {
             if (!node.pinned) { continue; }
+            const visited = new Set<number>();
             let aid: number | undefined = nodeId;
             while (aid !== undefined) {
+                if (visited.has(aid)) { break; }
+                visited.add(aid);
                 if (hasPinnedAncestor.has(aid)) { break; }
                 hasPinnedAncestor.add(aid);
                 const anode = tree.nodes.get(aid);
@@ -1217,22 +1360,26 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         const toDelete = new Set<number>();
 
-        const markSubtree = (nodeId: number) => {
+        const markSubtree = (nodeId: number, visited = new Set<number>()) => {
+            if (visited.has(nodeId)) { return; }
+            visited.add(nodeId);
             const node = tree.nodes.get(nodeId);
             if (!node) { return; }
             toDelete.add(nodeId);
             for (const childId of node.children) {
-                markSubtree(childId);
+                markSubtree(childId, visited);
             }
         };
 
-        const dfs = (nodeId: number) => {
+        const dfs = (nodeId: number, visited = new Set<number>()) => {
+            if (visited.has(nodeId)) { return; }
+            visited.add(nodeId);
             const node = tree.nodes.get(nodeId);
             if (!node) { return; }
 
             if (currentAncestors.has(nodeId)) {
                 for (const childId of node.children) {
-                    dfs(childId);
+                    dfs(childId, visited);
                 }
                 return;
             }
@@ -1249,7 +1396,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 markSubtree(nodeId);
             } else {
                 for (const childId of node.children) {
-                    dfs(childId);
+                    dfs(childId, visited);
                 }
             }
         };

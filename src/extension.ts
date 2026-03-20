@@ -85,6 +85,7 @@ const multiWindowLockUris = new Set<string>();
 const multiWindowWarnedUris = new Set<string>();
 let multiWindowLockWriteWarningShown = false;
 const persistedUris = new Set<string>();
+let deactivateHandler: (() => Promise<void>) | undefined;
 
 function getSettingSearchQuery(settingId?: string): string {
     return settingId ? `${EXTENSION_SETTINGS_QUERY} ${settingId}` : EXTENSION_SETTINGS_QUERY;
@@ -263,6 +264,12 @@ function formatPreviewMetrics(item: CompactPreviewItem): string {
         parts.push(escHtml(item.note));
     }
     return parts.join(' · ');
+}
+
+function readCheckpointContentBuffer(contentPath: string): Buffer {
+    const buf = readFileSync(contentPath);
+    const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+    return isGzip ? gunzipSync(buf) : buf;
 }
 
 function getDiagnosticsEnabled(context: vscode.ExtensionContext): boolean {
@@ -976,6 +983,15 @@ async function persistStateToDisk(
             .map((entry) => fs.unlink(path.join(contentDir, entry.name))));
     }
 
+    manager?.debugLog?.(
+        `[persist] treeCount=${allEntries.length} persistedCount=${persistedEntries.length} writtenCount=${writeEntries.length} paused=${paused}`
+    );
+    for (const [uri, tree] of writeEntries) {
+        manager?.debugLog?.(
+            `[persist] uri=${uri} nodes=${tree.nodes.length} currentId=${tree.currentId} rootId=${tree.rootId}`
+        );
+    }
+
     return {
         rootDir,
         treesDir,
@@ -1080,6 +1096,10 @@ async function loadPersistedTreeFromDisk(
             return undefined;
         }
 
+        manager?.debugLog?.(
+            `[load] uri=${uri.toString()} file=${entry.file} nodes=${parsed.tree.nodes.length} currentId=${parsed.tree.currentId} rootId=${parsed.tree.rootId}`
+        );
+
         return {
             nextId: manifest.nextId,
             tree: parsed.tree,
@@ -1106,13 +1126,20 @@ async function ensureTreeLoaded(
             // ファイル読み込み失敗は無視して新規ツリーで継続
         }
         if (persisted) {
+            const beforeSyncNodeCount = persisted.tree.nodes.length;
             treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-            treeManager.syncDocumentState(document.uri, document.getText());
+            const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+            treeManager.debugLog?.(
+                `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
+            );
             return;
         }
     }
 
-    treeManager.syncDocumentState(document.uri, document.getText());
+    const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+    treeManager.debugLog?.(
+        `[ensureTreeLoaded] uri=${document.uri.toString()} source=fresh beforeNodes=${treeManager.hasTree(document.uri) ? syncedTree.nodes.size : 0} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
+    );
 }
 
 async function restoreTreeForDocument(
@@ -1125,8 +1152,12 @@ async function restoreTreeForDocument(
         return false;
     }
 
+    const beforeSyncNodeCount = persisted.tree.nodes.length;
     treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-    treeManager.syncDocumentState(document.uri, document.getText());
+    const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+    treeManager.debugLog?.(
+        `[restore] uri=${document.uri.toString()} beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
+    );
     return true;
 }
 
@@ -1269,6 +1300,7 @@ async function releaseAllMultiWindowLocks(context: vscode.ExtensionContext): Pro
         await releaseMultiWindowLock(context, uri);
     }
     multiWindowLockUris.clear();
+    multiWindowWarnedUris.clear();
 }
 
 function getIdleUnloadCandidateUris(activeEditor: vscode.TextEditor | undefined): vscode.Uri[] {
@@ -1691,21 +1723,21 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     manager.contentResolver = (hash) => {
+        const contentPath = path.join(treesDir, 'content', hash);
         try {
-            const buf = readFileSync(path.join(treesDir, 'content', hash));
-            const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
-            return isGzip ? gunzipSync(buf).toString('utf8') : buf.toString('utf8');
-        } catch {
-            return '';
+            return readCheckpointContentBuffer(contentPath).toString('utf8');
+        } catch (error) {
+            throw new Error(`Failed to load checkpoint content ${hash}: ${String(error)}`);
         }
     };
     manager.asyncContentResolver = async (hash) => {
+        const contentPath = path.join(treesDir, 'content', hash);
         try {
-            const buf = await fs.readFile(path.join(treesDir, 'content', hash));
+            const buf = await fs.readFile(contentPath);
             const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
             return isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
-        } catch {
-            return '';
+        } catch (error) {
+            throw new Error(`Failed to load checkpoint content ${hash}: ${String(error)}`);
         }
     };
 
@@ -1784,48 +1816,53 @@ export async function activate(context: vscode.ExtensionContext) {
                 compactPreviewTargetUri = undefined;
             });
             compactPreviewPanel.webview.onDidReceiveMessage(async (message) => {
-                switch (message.command) {
-                    case 'showCompact':
-                        compactPreviewMode = 'compact';
-                        break;
-                    case 'showHard':
-                        compactPreviewMode = 'hard';
-                        break;
-                    case 'refresh':
-                        break;
-                    case 'setTab':
-                        if (message.tab === 'removable' || message.tab === 'protected' || message.tab === 'all') {
-                            compactPreviewTab = message.tab;
+                try {
+                    switch (message.command) {
+                        case 'showCompact':
+                            compactPreviewMode = 'compact';
+                            break;
+                        case 'showHard':
+                            compactPreviewMode = 'hard';
+                            break;
+                        case 'refresh':
+                            break;
+                        case 'setTab':
+                            if (message.tab === 'removable' || message.tab === 'protected' || message.tab === 'all') {
+                                compactPreviewTab = message.tab;
+                            }
+                            break;
+                        case 'overrideKeep':
+                            if (typeof message.nodeId === 'number') {
+                                compactPreviewOverrides.set(message.nodeId, 'keep');
+                            }
+                            break;
+                        case 'overrideRemove':
+                            if (typeof message.nodeId === 'number') {
+                                compactPreviewOverrides.set(message.nodeId, 'remove');
+                            }
+                            break;
+                        case 'clearOverride':
+                            if (typeof message.nodeId === 'number') {
+                                compactPreviewOverrides.delete(message.nodeId);
+                            }
+                            break;
+                        case 'runCompact':
+                            await vscode.commands.executeCommand('undotree.compact');
+                            break;
+                        case 'runHard':
+                            await vscode.commands.executeCommand('undotree.hardCompact');
+                            break;
+                        case 'openSettings':
+                            await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.hardCompactAfterDays'));
+                            return;
+                        default:
+                            return;
                         }
-                        break;
-                    case 'overrideKeep':
-                        if (typeof message.nodeId === 'number') {
-                            compactPreviewOverrides.set(message.nodeId, 'keep');
-                        }
-                        break;
-                    case 'overrideRemove':
-                        if (typeof message.nodeId === 'number') {
-                            compactPreviewOverrides.set(message.nodeId, 'remove');
-                        }
-                        break;
-                    case 'clearOverride':
-                        if (typeof message.nodeId === 'number') {
-                            compactPreviewOverrides.delete(message.nodeId);
-                        }
-                        break;
-                    case 'runCompact':
-                        await vscode.commands.executeCommand('undotree.compact');
-                        break;
-                    case 'runHard':
-                        await vscode.commands.executeCommand('undotree.hardCompact');
-                        break;
-                    case 'openSettings':
-                        await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.hardCompactAfterDays'));
-                        return;
-                    default:
-                        return;
+                    await renderCompactPreviewPanel();
+                } catch (error) {
+                    outputChannel.appendLine(`[compact-preview] command failed: ${String(error)}`);
+                    void vscode.window.showErrorMessage(vscode.l10n.t('Undo Tree: compact preview action failed. See Output for details.'));
                 }
-                await renderCompactPreviewPanel();
             });
         } else {
             compactPreviewPanel.reveal(undefined, true);
@@ -1857,46 +1894,51 @@ export async function activate(context: vscode.ExtensionContext) {
                 diagnosticsPanel = undefined;
             });
             diagnosticsPanel.webview.onDidReceiveMessage(async (message) => {
-                switch (message.command) {
-                    case 'refresh':
-                    case 'validate':
-                        break;
-                    case 'pruneOrphans': {
-                        const result = await pruneOrphanPersistedFiles(context);
-                        vscode.window.showInformationMessage(
-                            vscode.l10n.t('Undo Tree: pruned {0} orphan tree file(s) and {1} orphan content file(s).', result.treeFiles, result.contentFiles)
-                        );
-                        break;
+                try {
+                    switch (message.command) {
+                        case 'refresh':
+                        case 'validate':
+                            break;
+                        case 'pruneOrphans': {
+                            const result = await pruneOrphanPersistedFiles(context);
+                            vscode.window.showInformationMessage(
+                                vscode.l10n.t('Undo Tree: pruned {0} orphan tree file(s) and {1} orphan content file(s).', result.treeFiles, result.contentFiles)
+                            );
+                            break;
+                        }
+                        case 'rebuildManifest': {
+                            const result = await rebuildPersistedManifestFromTreeFiles(context, manager?.paused === true);
+                            syncPersistedUris((await readPersistedManifest(context)).manifest?.trees.map((entry) => entry.uri) ?? []);
+                            vscode.window.showInformationMessage(
+                                vscode.l10n.t('Undo Tree: rebuilt manifest from {0} persisted tree file(s).', result.rebuilt)
+                            );
+                            break;
+                        }
+                        case 'openStorage':
+                            await openStorageFolder(context);
+                            break;
+                        case 'showOutput':
+                            outputChannel.show(true);
+                            break;
+                        case 'simulateBackup':
+                            await simulateManifestBackupFallback(context, manager?.paused === true);
+                            await notifyManifestReadStatus(context, 'backup', outputChannel);
+                            break;
+                        case 'simulateInvalid':
+                            await simulateManifestInvalid(context);
+                            await notifyManifestReadStatus(context, 'invalid', outputChannel);
+                            break;
+                        case 'resetAll':
+                            await vscode.commands.executeCommand('undotree.resetAllState');
+                            break;
+                        default:
+                            return;
                     }
-                    case 'rebuildManifest': {
-                        const result = await rebuildPersistedManifestFromTreeFiles(context, manager?.paused === true);
-                        syncPersistedUris((await readPersistedManifest(context)).manifest?.trees.map((entry) => entry.uri) ?? []);
-                        vscode.window.showInformationMessage(
-                            vscode.l10n.t('Undo Tree: rebuilt manifest from {0} persisted tree file(s).', result.rebuilt)
-                        );
-                        break;
-                    }
-                    case 'openStorage':
-                        await openStorageFolder(context);
-                        break;
-                    case 'showOutput':
-                        outputChannel.show(true);
-                        break;
-                    case 'simulateBackup':
-                        await simulateManifestBackupFallback(context, manager?.paused === true);
-                        await notifyManifestReadStatus(context, 'backup', outputChannel);
-                        break;
-                    case 'simulateInvalid':
-                        await simulateManifestInvalid(context);
-                        await notifyManifestReadStatus(context, 'invalid', outputChannel);
-                        break;
-                    case 'resetAll':
-                        await vscode.commands.executeCommand('undotree.resetAllState');
-                        break;
-                    default:
-                        return;
+                    await renderDiagnosticsPanel();
+                } catch (error) {
+                    outputChannel.appendLine(`[diagnostics] command failed: ${String(error)}`);
+                    void vscode.window.showErrorMessage(vscode.l10n.t('Undo Tree: diagnostics action failed. See Output for details.'));
                 }
-                await renderDiagnosticsPanel();
             });
         } else {
             diagnosticsPanel.reveal(undefined, true);
@@ -1988,6 +2030,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 diagnosticsPanel = undefined;
             }
 
+            await releaseAllMultiWindowLocks(context);
+            multiWindowWarnedUris.clear();
             await removePersistedState(context);
             syncPersistedUris([]);
             manager.resetAll();
@@ -2260,12 +2304,7 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!editor || !manager) {
                 return;
             }
-            const days = getHardCompactAfterDays();
-            if (days <= 0) {
-                void showCompactPreviewPanel('hard');
-            } else {
-                void showCompactPreviewPanel('hard');
-            }
+            void showCompactPreviewPanel('hard');
         }),
 
         vscode.commands.registerCommand('undotree.togglePause', () => {
@@ -2405,9 +2444,27 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    deactivateHandler = async () => {
+        if (persistTimer) {
+            clearTimeout(persistTimer);
+            persistTimer = undefined;
+        }
+        if (multiWindowLockTimer) {
+            clearInterval(multiWindowLockTimer);
+            multiWindowLockTimer = undefined;
+        }
+        try {
+            await flushPersistState(context);
+        } catch (error) {
+            outputChannel.appendLine(`[deactivate] failed to flush persisted state: ${String(error)}`);
+        }
+        await releaseAllMultiWindowLocks(context);
+        manager?.dispose();
+    };
+
     await notifyManifestReadStatus(context, persistedManifest.status, outputChannel);
 }
 
-export function deactivate() {
-    manager?.dispose();
+export async function deactivate() {
+    await deactivateHandler?.();
 }

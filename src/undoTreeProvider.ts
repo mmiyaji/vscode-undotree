@@ -8,6 +8,15 @@ type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<n
     ? T & { formattedTime: string; isEmpty: boolean }
     : never;
 
+function getNonce(): string {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let nonce = '';
+    for (let i = 0; i < 32; i++) {
+        nonce += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+    }
+    return nonce;
+}
+
 export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
     private mode: 'navigate' | 'diff' = 'navigate';
@@ -62,69 +71,74 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         this.render();
 
         webviewView.webview.onDidReceiveMessage(async (message) => {
-            const editor = vscode.window.activeTextEditor;
-            switch (message.command) {
-                case 'undo':
-                    await this.manager.undo();
-                    break;
-                case 'redo':
-                    await this.manager.redo();
-                    break;
-                case 'jumpToNode':
-                    if (editor && typeof message.nodeId === 'number') {
-                        await this.manager.jumpToNode(message.nodeId, editor);
-                        if (message.focusEditor) {
-                            await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+            try {
+                const editor = vscode.window.activeTextEditor;
+                switch (message.command) {
+                    case 'undo':
+                        await this.manager.undo();
+                        break;
+                    case 'redo':
+                        await this.manager.redo();
+                        break;
+                    case 'jumpToNode':
+                        if (editor && typeof message.nodeId === 'number') {
+                            await this.manager.jumpToNode(message.nodeId, editor);
+                            if (message.focusEditor) {
+                                await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+                            }
                         }
-                    }
-                    break;
-                case 'togglePause':
-                    await vscode.commands.executeCommand('undotree.togglePause');
-                    break;
-                case 'showMenu':
-                    await vscode.commands.executeCommand('undotree.showMenu');
-                    break;
-                case 'openSettings':
-                    await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
-                    break;
-                case 'toggleTracking':
-                    await vscode.commands.executeCommand('undotree.toggleTracking');
-                    break;
-                case 'toggleMode':
-                    this.mode = this.mode === 'navigate' ? 'diff' : 'navigate';
-                    this.render();
-                    break;
-                case 'diffWithNode':
-                    if (typeof message.nodeId === 'number') {
-                        await vscode.commands.executeCommand('undotree.diffWithNode', message.nodeId);
-                    }
-                    break;
-                case 'editNote': {
-                    const contextEditor = this.getContextEditor();
-                    if (typeof message.nodeId !== 'number' || !contextEditor) {
+                        break;
+                    case 'togglePause':
+                        await vscode.commands.executeCommand('undotree.togglePause');
+                        break;
+                    case 'showMenu':
+                        await vscode.commands.executeCommand('undotree.showMenu');
+                        break;
+                    case 'openSettings':
+                        await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
+                        break;
+                    case 'toggleTracking':
+                        await vscode.commands.executeCommand('undotree.toggleTracking');
+                        break;
+                    case 'toggleMode':
+                        this.mode = this.mode === 'navigate' ? 'diff' : 'navigate';
+                        this.render();
+                        break;
+                    case 'diffWithNode':
+                        if (typeof message.nodeId === 'number') {
+                            await vscode.commands.executeCommand('undotree.diffWithNode', message.nodeId);
+                        }
+                        break;
+                    case 'editNote': {
+                        const contextEditor = this.getContextEditor();
+                        if (typeof message.nodeId !== 'number' || !contextEditor) {
+                            break;
+                        }
+                        const tree = this.manager.getTree(contextEditor.document.uri);
+                        const node = tree.nodes.get(message.nodeId);
+                        const input = await vscode.window.showInputBox({
+                            prompt: 'Node note (empty to clear)',
+                            value: node?.note ?? '',
+                            placeHolder: 'e.g. build passed',
+                        });
+                        if (input === undefined) {
+                            break;
+                        }
+                        this.manager.setNote(contextEditor.document.uri, message.nodeId, input);
                         break;
                     }
-                    const tree = this.manager.getTree(contextEditor.document.uri);
-                    const node = tree.nodes.get(message.nodeId);
-                    const input = await vscode.window.showInputBox({
-                        prompt: 'Node note (empty to clear)',
-                        value: node?.note ?? '',
-                        placeHolder: 'e.g. build passed',
-                    });
-                    if (input === undefined) {
+                    case 'togglePin': {
+                        const contextEditor = this.getContextEditor();
+                        if (typeof message.nodeId !== 'number' || !contextEditor) {
+                            break;
+                        }
+                        this.manager.togglePinned(contextEditor.document.uri, message.nodeId);
                         break;
                     }
-                    this.manager.setNote(contextEditor.document.uri, message.nodeId, input);
-                    break;
                 }
-                case 'togglePin': {
-                    const contextEditor = this.getContextEditor();
-                    if (typeof message.nodeId !== 'number' || !contextEditor) {
-                        break;
-                    }
-                    this.manager.togglePinned(contextEditor.document.uri, message.nodeId);
-                    break;
-                }
+            } catch (error) {
+                this.manager.debugLog?.(`[provider] webview message failed: ${String(error)}`);
+                void vscode.window.showErrorMessage(vscode.l10n.t('Undo Tree: an action failed. See Output for details.'));
             }
         });
     }
@@ -343,6 +357,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     }
 
     private buildNotTrackedHtml(ext: string, _fileName: string): string {
+        const nonce = getNonce();
         const label = ext
             ? vscode.l10n.t('Undo Tree: {0} is not tracked', ext)
             : vscode.l10n.t('Undo Tree: this file is not tracked');
@@ -354,7 +369,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             : vscode.l10n.t('Enable tracking for this file');
         const settingsLabel = vscode.l10n.t('Open Settings');
         return `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<style nonce="${nonce}">
 body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);}
 .msg{opacity:0.7;margin-bottom:8px;}
 .hint{opacity:0.45;font-size:11px;margin-bottom:12px;}
@@ -362,10 +378,15 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
 .btn:hover{color:var(--vscode-textLink-activeForeground);}
 </style>
 </head><body>
-<div class="msg">${label}</div>
-<div class="hint">${hint}</div>
-<button class="btn" onclick="acquireVsCodeApi().postMessage({command:'toggleTracking'})">${enableLabel}</button>
-<button class="btn" onclick="acquireVsCodeApi().postMessage({command:'openSettings'})">${settingsLabel}</button>
+<div class="msg">${label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</div>
+<div class="hint">${hint.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</div>
+<button class="btn" id="legacy-enable-tracking">${enableLabel.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</button>
+<button class="btn" id="legacy-open-settings">${settingsLabel.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}</button>
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+document.getElementById('legacy-enable-tracking')?.addEventListener('click', () => vscode.postMessage({command:'toggleTracking'}));
+document.getElementById('legacy-open-settings')?.addEventListener('click', () => vscode.postMessage({command:'openSettings'}));
+</script>
 </body></html>`;
     }
 
@@ -382,12 +403,14 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
         initialNotTrackedExt = ''
     ): string {
+        const nonce = getNonce();
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<style>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.view?.webview.cspSource} data:; style-src ${this.view?.webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<style nonce="${nonce}">
   body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
   #tree { min-width: max-content; }
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
@@ -445,17 +468,17 @@ body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var
 </head>
 <body>
 <div class="actions">
-  <button id="btn-undo" onclick="send('undo')">${vscode.l10n.t('Undo')}</button>
-  <button id="btn-redo" onclick="send('redo')">${vscode.l10n.t('Redo')}</button>
-  <button class="btn-pause" onclick="send('togglePause')" title="${paused ? vscode.l10n.t('Resume tracking') : vscode.l10n.t('Pause tracking')}">${paused ? vscode.l10n.t('Resume') : vscode.l10n.t('Pause')}</button>
-  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" onclick="send('toggleMode')" title="${mode === 'navigate' ? vscode.l10n.t('Switch to Diff mode') : vscode.l10n.t('Switch to Navigate mode')}">${mode === 'navigate' ? vscode.l10n.t('Diff') : vscode.l10n.t('Nav')}</button>
-  <button class="btn-settings" onclick="send('showMenu')" title="${vscode.l10n.t('Open Undo Tree menu')}">&#9881;</button>
+  <button id="btn-undo">${vscode.l10n.t('Undo')}</button>
+  <button id="btn-redo">${vscode.l10n.t('Redo')}</button>
+  <button class="btn-pause" id="btn-pause" title="${paused ? vscode.l10n.t('Resume tracking') : vscode.l10n.t('Pause tracking')}">${paused ? vscode.l10n.t('Resume') : vscode.l10n.t('Pause')}</button>
+  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" id="btn-mode" title="${mode === 'navigate' ? vscode.l10n.t('Switch to Diff mode') : vscode.l10n.t('Switch to Navigate mode')}">${mode === 'navigate' ? vscode.l10n.t('Diff') : vscode.l10n.t('Nav')}</button>
+  <button class="btn-settings" id="btn-settings" title="${vscode.l10n.t('Open Undo Tree menu')}">&#9881;</button>
 </div>
 ${paused ? `<div class="paused-badge">${vscode.l10n.t('Tracking paused - history is frozen')}</div>` : ''}
 ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
 <div id="pinned"></div>
 <div id="tree"></div>
-<script>
+<script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   let nodes = ${nodesJson};
   let currentId = ${currentId};
@@ -487,6 +510,17 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
   }
 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
+
+  const undoButton = document.getElementById('btn-undo');
+  if (undoButton) { undoButton.addEventListener('click', () => send('undo')); }
+  const redoButton = document.getElementById('btn-redo');
+  if (redoButton) { redoButton.addEventListener('click', () => send('redo')); }
+  const pauseButton = document.getElementById('btn-pause');
+  if (pauseButton) { pauseButton.addEventListener('click', () => send('togglePause')); }
+  const modeButton = document.getElementById('btn-mode');
+  if (modeButton) { modeButton.addEventListener('click', () => send('toggleMode')); }
+  const settingsButton = document.getElementById('btn-settings');
+  if (settingsButton) { settingsButton.addEventListener('click', () => send('showMenu')); }
 
   window.addEventListener('message', (event) => {
     if (event.data?.command === 'showJumpLoading') {
@@ -671,7 +705,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
           row.innerHTML =
             '<span class="pin-mark">&#128204;</span>' +
             '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
-            (node.formattedTime ? '<span class="right-area"><span class="time">' + node.formattedTime + '</span></span>' : '');
+            (node.formattedTime ? '<span class="right-area"><span class="time">' + escHtml(node.formattedTime) + '</span></span>' : '');
           row.addEventListener('click', () => {
             const idx = nodeIds.indexOf(node.id);
             if (idx >= 0) { setFocused(idx); }
@@ -724,14 +758,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.title = mode === 'diff' ? 'Click to compare with current' : 'Click to jump to this node';
       const noteHtml = node.note
-        ? '<span class="note" title="' + escHtml(node.note) + i18n.noteClickToEdit + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">' + escHtml(node.note) + '</span>'
-        : '<span class="note-edit" title="' + i18n.noteAdd + '" onclick="event.stopPropagation();send(\\'editNote\\',{nodeId:' + node.id + '})">&#9998;</span>';
-      const pinHtml = '<span class="pin-btn' + (node.pinned ? ' active' : '') + '" title="' + (node.pinned ? i18n.unpinNode : i18n.pinNode) + '" onclick="event.stopPropagation();send(\\'togglePin\\',{nodeId:' + node.id + '})">&#128204;</span>';
+        ? '<span class="note note-action" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteClickToEdit + '">' + escHtml(node.note) + '</span>'
+        : '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.noteAdd + '">&#9998;</span>';
+      const pinHtml = '<span class="pin-btn pin-action' + (node.pinned ? ' active' : '') + '" data-node-id="' + node.id + '" title="' + (node.pinned ? i18n.unpinNode : i18n.pinNode) + '">&#128204;</span>';
       const refNode = (nodeSizeMetricBase === 'current' && isCurrent && node.id !== 0)
         ? node
         : nodeSizeMetricBase === 'initial' ? map[nodes[0].id] : map[currentId];
       const sizeDiffHtml = formatSizeDiff(node, refNode);
-      const labelHtml = node.note ? '' : '<span class="label">' + node.label + '</span>';
+      const labelHtml = node.note ? '' : '<span class="label">' + escHtml(node.label) + '</span>';
       div.innerHTML =
         (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
         labelHtml +
@@ -739,7 +773,21 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-        '<span class="right-area">' + pinHtml + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + node.formattedTime + '</span>' : '') + '</span>';
+        '<span class="right-area">' + pinHtml + sizeDiffHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + escHtml(node.formattedTime) + '</span>' : '') + '</span>';
+      const noteAction = div.querySelector('.note-action');
+      if (noteAction) {
+        noteAction.addEventListener('click', (event) => {
+          event.stopPropagation();
+          send('editNote', { nodeId: node.id });
+        });
+      }
+      const pinAction = div.querySelector('.pin-action');
+      if (pinAction) {
+        pinAction.addEventListener('click', (event) => {
+          event.stopPropagation();
+          send('togglePin', { nodeId: node.id });
+        });
+      }
       div.addEventListener('click', () => {
         const idx = nodeIds.indexOf(node.id);
         if (idx >= 0) { setFocused(idx); }
@@ -779,8 +827,16 @@ ${mode === 'diff' ? `<div class="diff-badge">${vscode.l10n.t('Diff mode - select
     treeEl.innerHTML =
       '<div class="msg">' + escHtml(ext ? replaceExt(i18n.notTrackedWithExt, ext) : i18n.notTrackedGeneric) + '</div>' +
       '<div class="hint">' + escHtml(ext ? replaceExt(i18n.notTrackedHintWithExt, ext) : i18n.notTrackedHintGeneric) + '</div>' +
-      '<button class="btn" onclick="send(\\'toggleTracking\\')">' + escHtml(ext ? replaceExt(i18n.enableTrackingWithExt, ext) : i18n.enableTrackingGeneric) + '</button>' +
-      '<button class="btn" onclick="send(\\'openSettings\\')">' + escHtml(i18n.openSettings) + '</button>';
+      '<button class="btn" id="enable-tracking-btn">' + escHtml(ext ? replaceExt(i18n.enableTrackingWithExt, ext) : i18n.enableTrackingGeneric) + '</button>' +
+      '<button class="btn" id="open-settings-btn">' + escHtml(i18n.openSettings) + '</button>';
+    const enableTrackingButton = document.getElementById('enable-tracking-btn');
+    if (enableTrackingButton) {
+      enableTrackingButton.addEventListener('click', () => send('toggleTracking'));
+    }
+    const openSettingsButton = document.getElementById('open-settings-btn');
+    if (openSettingsButton) {
+      openSettingsButton.addEventListener('click', () => send('openSettings'));
+    }
     nodeEls = [];
     nodeIds = [];
     treeMap = {};

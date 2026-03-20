@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.2
+
+### Improvements
+
+- Added structured persist/load logging to the `Undo Tree` output channel so node-count changes during save and restore can be traced more easily.
+- Hardened persisted-tree import by validating serialized node storage, required references, and parent/child back-references before accepting on-disk history.
+- Added nonce-based Content Security Policy to the sidebar webview and removed inline action handlers in favor of explicit event listeners.
+
+### Fixes
+
+- Fixed webview HTML escaping for node labels, formatted timestamps, and fallback not-tracked content.
+- Fixed checkpoint content loading so failed reads no longer fall back to cached empty strings and silently corrupt restored history.
+- Fixed checkpoint cache byte accounting when the same hash is refreshed multiple times.
+- Fixed reset and shutdown flows so pending persisted state is flushed safely and multi-window lock files are released.
+- Fixed compact preview and diagnostics webview actions to surface failures instead of leaving the UI in a silent broken state.
+
 ## 0.3.1
 
 ### New features

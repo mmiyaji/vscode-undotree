@@ -8,12 +8,15 @@ function makeUri(path = 'file:///existing.md') {
     return { toString: () => path } as any;
 }
 
+function uriToFileName(uriStr: string): string {
+    return decodeURIComponent(new URL(uriStr).pathname);
+}
+
 function makeDocument(content: string, uriStr = 'file:///existing.md') {
-    const fileName = uriStr.replace('file:///', 'C:/');
     return {
         getText: () => content,
         uri: makeUri(uriStr),
-        fileName,
+        fileName: uriToFileName(uriStr),
         isUntitled: false,
     } as any;
 }
@@ -128,7 +131,8 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
-        expect(html).toContain(`onclick="send('showMenu')"`);
+        expect(html).toContain('id="btn-settings"');
+        expect(html).toContain(`settingsButton.addEventListener('click', () => send('showMenu'));`);
         expect(html).toContain('title="Open Undo Tree menu"');
         expect(html).toContain('&#9881;</button>');
     });
@@ -229,7 +233,7 @@ describe('UndoTreeProvider initialization', () => {
         const view = makeView();
         const document = {
             ...makeDocument('const x = 1;', 'file:///example.js'),
-            fileName: 'C:\\Users\\mail\\Documents\\git\\vscode-undotree\\example.js',
+            fileName: '/workspace/example.js',
         };
 
         vscode.window.activeTextEditor = { document };
@@ -253,6 +257,53 @@ describe('UndoTreeProvider initialization', () => {
         provider.resolveWebviewView(view);
 
         expect(view.webview.html).toContain('Undo Tree is only available for text editors.');
+    });
+
+    it('escapes localized text in the legacy not-tracked HTML', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const vscode = require('vscode');
+        const originalL10n = vscode.l10n;
+        vscode.l10n = {
+            ...originalL10n,
+            t: jest.fn((text: string) => {
+                if (text.includes('is not tracked')) {
+                    return '<b>tracked?</b>';
+                }
+                if (text.includes('Open Settings')) {
+                    return '"settings"';
+                }
+                return text;
+            }),
+        };
+
+        const html = (provider as any).buildNotTrackedHtml('.md', 'file.md');
+
+        expect(html).toContain('&lt;b&gt;tracked?&lt;/b&gt;');
+        expect(html).toContain('&quot;settings&quot;');
+        expect(html).not.toContain('<b>tracked?</b>');
+        vscode.l10n = originalL10n;
+    });
+
+    it('adds a nonce-based CSP to the webview shell', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
+
+        expect(html).toContain('Content-Security-Policy');
+        expect(html).toContain("script-src 'nonce-");
+        expect(html).toContain("style-src undefined 'nonce-");
+    });
+
+    it('escapes label and formatted time values before injecting HTML', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
+
+        expect(html).toContain(`'<span class="label">' + escHtml(node.label) + '</span>'`);
+        expect(html).toContain('escHtml(node.formattedTime)');
     });
 
     it('shows loading only for the file currently being loaded', () => {
@@ -331,8 +382,8 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
-        expect(html).toContain('class="note-edit"');
+        expect(html).toContain('class="note-edit note-action"');
         expect(html).toContain('&#9998;</span>');
-        expect(html).not.toContain('笨・/span>');
+        expect(html).not.toContain('隨ｨ繝ｻ/span>');
     });
 });

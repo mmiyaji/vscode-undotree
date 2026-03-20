@@ -40,6 +40,94 @@ describe('初期状態', () => {
     });
 });
 
+describe('persisted state validation', () => {
+    it('rejects malformed imported trees', () => {
+        const manager = new UndoTreeManager();
+
+        expect(() => manager.importTree('file:///broken.md', {
+            nodes: [
+                {
+                    id: 0,
+                    parents: [],
+                    children: [1],
+                    timestamp: 0,
+                    label: 'initial',
+                    hash: 'root',
+                    storage: { kind: 'full', content: '' },
+                },
+                {
+                    id: 1,
+                    parents: [0],
+                    children: [],
+                    timestamp: 1,
+                    label: 'broken',
+                    hash: 'broken',
+                    storage: { kind: 'delta' } as any,
+                },
+            ],
+            hashMap: [['root', 0], ['broken', 1]],
+            currentId: 1,
+            rootId: 0,
+        })).toThrow('Invalid delta node diffs');
+    });
+
+    it('stops on malformed imported state', () => {
+        const manager = new UndoTreeManager();
+
+        expect(() => manager.importState({
+            nextId: 2,
+            trees: {
+                'file:///broken.md': {
+                    nodes: [
+                        {
+                            id: 0,
+                            parents: [],
+                            children: [99],
+                            timestamp: 0,
+                            label: 'initial',
+                            hash: 'root',
+                            storage: { kind: 'full', content: '' },
+                        },
+                    ],
+                    hashMap: [['root', 0]],
+                    currentId: 0,
+                    rootId: 0,
+                },
+            },
+        } as any)).toThrow('references missing child');
+    });
+
+    it('rejects trees whose parent and child references disagree', () => {
+        const manager = new UndoTreeManager();
+
+        expect(() => manager.importTree('file:///broken-links.md', {
+            nodes: [
+                {
+                    id: 0,
+                    parents: [],
+                    children: [1],
+                    timestamp: 0,
+                    label: 'initial',
+                    hash: 'root',
+                    storage: { kind: 'full', content: '' },
+                },
+                {
+                    id: 1,
+                    parents: [],
+                    children: [],
+                    timestamp: 1,
+                    label: 'save',
+                    hash: 'child',
+                    storage: { kind: 'full', content: 'x' },
+                },
+            ],
+            hashMap: [['root', 0], ['child', 1]],
+            currentId: 1,
+            rootId: 0,
+        })).toThrow('back-reference');
+    });
+});
+
 describe('保存時のノード追加', () => {
     it('初回保存でノードが追加される', () => {
         const manager = new UndoTreeManager();
