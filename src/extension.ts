@@ -231,6 +231,23 @@ function formatPreviewBytes(bytes: number): string {
     return `${new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value)} ${units[unitIndex]}`;
 }
 
+function formatRelativeDurationShort(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    if (totalSeconds < 60) {
+        return `${totalSeconds}s`;
+    }
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    if (totalMinutes < 60) {
+        return `${totalMinutes}m`;
+    }
+    const totalHours = Math.floor(totalMinutes / 60);
+    if (totalHours < 24) {
+        return `${totalHours}h`;
+    }
+    const totalDays = Math.floor(totalHours / 24);
+    return `${totalDays}d`;
+}
+
 function formatPreviewMetrics(item: CompactPreviewItem): string {
     const parts = [
         formatPreviewTimestamp(item.timestamp),
@@ -416,7 +433,7 @@ function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
             const flags = [
                 item.isOwned ? t('owned') : t('foreign'),
                 item.isLive ? t('live') : t('stale'),
-                `${Math.max(0, Math.round(item.ageMs / 1000))}s`,
+                formatRelativeDurationShort(item.ageMs),
             ].join(' · ');
             return `<li><strong>${escHtml(item.uri)}</strong><br><span class="hint">${escHtml(flags)} · ${escHtml(item.workspace || '-')}</span></li>`;
         }).join('')}</ul>${items.length > 20 ? `<div class="hint">${t('{0} more...', items.length - 20)}</div>` : ''}`;

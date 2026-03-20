@@ -1,54 +1,76 @@
 # Changelog
 
+## 0.3.1
+
+### New features
+
+- Added a Diagnostics panel for inspecting persisted storage, manifest state, orphan files, validation results, and multi-window locks.
+- Added persisted-storage maintenance actions from Diagnostics, including validation, orphan pruning, and manifest rebuild.
+- Added best-effort multi-window conflict warnings for `auto` persistence mode using short-lived lock files with heartbeat and TTL.
+- Added automatic idle unload for clean persisted trees to reduce memory usage while keeping on-demand restore behavior.
+- Added configurable in-memory checkpoint promotion with `undotree.memoryCheckpointThresholdKB` to reduce branch-snapshot memory pressure.
+
+### Improvements
+
+- Reused the Undo Tree webview shell and switched tree updates to message-driven rendering to reduce redraw cost.
+- Improved compact preview with tree-based `ALL` view, keep/remove overrides, reason summaries, validation actions, and panel reuse behavior.
+- Reused the same diff editor more consistently and improved focus behavior when opening comparisons.
+- Added safer manifest handling with `manifest.json.bak` fallback and disabled automatic prune during manifest recovery.
+- Improved persisted-history behavior so root-only untouched trees are not written to the manifest until history actually grows.
+- Added diagnostics visibility for multi-window lock status, including live/stale/owned summaries.
+- Added idle-unload logging to the `Undo Tree` output channel.
+- Updated settings organization and documentation for advanced performance tuning.
+
+### Fixes
+
+- Fixed persisted history cleanup so manifest read failures do not silently prune existing data.
+- Fixed `Open Storage Folder` from diagnostics and recovery warnings.
+- Fixed `Reset All State` from manifest recovery warnings so it works during startup recovery flows.
+- Fixed lock heartbeat so it only runs for currently open tracked text documents.
+- Fixed compact preview execution so actions continue to work when the preview panel has focus.
+- Fixed preview and diagnostics flows for files that were opened but never changed.
+- Fixed several Japanese localization gaps around diagnostics, preview, and compact-related actions.
+
 ## 0.3.0
 
 ### New features
 
-- **Node notes**: Attach a short note to any node via the ✎ icon in the panel. Notes survive compaction and hard-compact.
-- **Hard Compact**: New command `Undo Tree: Hard Compact` removes old nodes beyond a configurable age (`undotree.hardCompactAfterDays`). Current node, noted nodes, and their ancestors are always protected.
-- **Node size metrics**: Each node can display a line-count or byte-count diff relative to the current or initial node. Controlled by `undotree.nodeSizeMetric` (`none` / `lines` / `bytes`) and `undotree.nodeSizeMetricBase` (`current` / `initial`). Numbers use thousands separators; bytes switch to MB tier automatically.
-- **Adaptive persistence**: Large tree files are gzip-compressed automatically (`undotree.compressionThresholdKB`). Very large full-snapshot content is split into separate checkpoint files (`undotree.checkpointThresholdKB`) and loaded lazily to avoid blocking the UI.
-- **Loading indicator**: A cover overlay appears in the sidebar when a checkpoint file is read from disk. Only shown on actual cache misses, not on every node click.
-- **Async node jump**: Jumping to a checkpoint node is now non-blocking; the editor is updated asynchronously.
-- **Content cache**: Checkpoint content is cached in memory with an LRU eviction policy (`undotree.contentCacheMaxKB`, default 20 MB).
-- **Hash-based session restore**: On reopen, `currentId` is reconciled with the actual file content by hash so the tree position stays consistent even if node IDs shift.
-- **DAG convergence**: Saving content identical to an existing node reuses that node instead of creating a duplicate.
-- **`timeFormat: none`**: New option to hide timestamps entirely.
-- **Latest-node highlight**: The most recently timestamped leaf node is highlighted in green.
-- **Right-area sticky**: Timestamps and size metrics stick to the right edge during horizontal scroll.
-- **Keyboard navigation**: Arrow keys move focus within the sidebar; `Enter` jumps to the focused node.
-- **`showStorageKind` setting**: Optionally show `F`/`D` storage-kind badges on each node (default off).
-- **Debug output channel**: Extension logs to an `Undo Tree` output channel for diagnostics.
-- **Dirty-flag persistence**: Only modified trees are written to disk on each auto-save cycle, reducing I/O when many files are tracked.
+- Added node notes that survive compaction and hard compact.
+- Added `Hard Compact` with age-based pruning via `undotree.hardCompactAfterDays`.
+- Added line-count and byte-count node metrics relative to `current` or `initial`.
+- Added adaptive persistence with gzip compression and large-content checkpoint files.
+- Added lazy checkpoint loading with a loading indicator for disk cache misses.
+- Added non-blocking async jumps to checkpoint nodes.
+- Added an in-memory LRU cache for checkpoint content.
+- Added current-node reconciliation by content hash after restore.
+- Added latest-leaf highlighting and optional storage-kind badges.
+- Added keyboard navigation in the sidebar and an output channel for diagnostics.
 
 ### Fixes
 
 - Fixed auto-persist deleting saved trees for files that were not open in the current session.
-- Fixed `ロードできません` / loading-stuck state caused by unhandled errors during disk restore.
-- Fixed "No active editor" shown in the sidebar when focus moved to the panel during an async tree load.
-- Fixed `undotree.autosaveInterval` minimum enforcement (now at least 5 s).
+- Fixed loading-stuck states caused by unhandled errors during disk restore.
+- Fixed incorrect "No active editor" states while async tree loading was in progress.
+- Fixed minimum enforcement for `undotree.autosaveInterval`.
 
 ### Changes
 
-- Replaced text-based branch drawing with inline SVG connectors for consistent alignment.
-- Removed `undotree.nodeMarkerStyle` setting (replaced by `undotree.nodeSizeMetric`).
-- `(empty)` badge is shown for nodes that recorded an empty document.
-- Size diff shows `±0` explicitly rather than hiding the field.
+- Replaced text-based branch drawing with inline SVG connectors.
+- Removed `undotree.nodeMarkerStyle` in favor of node-size metrics.
+- Added explicit empty-document badges and zero-size diff display.
 
 ## 0.2.1
 
 - Fixed tree initialization when opening an existing file so the initial node reflects the current document content.
-- Reworked tree layout rendering to produce stable branch structure and avoid incorrect indentation for linear chains.
-- Removed content-based node convergence so editing from an older node always creates a new branch in the history tree.
+- Reworked tree layout rendering to keep branch structure stable and avoid incorrect indentation in linear chains.
+- Removed content-based node convergence so editing from an older node always creates a new branch.
 - Fixed branching behavior when jumping to older nodes and then saving, including autosave timing issues.
 - Replaced text-based branch drawing with inline SVG connectors for more consistent alignment and visibility.
-- Changed the settings button to open a menu with settings, persisted save, restore, compact, pause/resume, and tracking actions.
+- Changed the settings button to open a menu with actions such as settings, persisted save/restore, compact, pause/resume, and tracking toggles.
 - Added persisted history save and restore commands.
 - Added on-demand persisted history restore when tracked files are opened again.
 - Added `undotree.persistenceMode` with `manual` and `auto` modes.
-- Persisted pause state and ensured manual and automatic persistence both retain it.
-- Added configurable timestamp formats, including `date-fns`-compatible custom formatting with `undotree.timeFormat` and `undotree.timeFormatCustom`.
-- Added configurable node marker styles with `undotree.nodeMarkerStyle`, including `none`, `simple`, and `semantic` with `semantic` as the default.
-- Improved `none` marker rendering so rows do not keep an empty marker gap.
-- Localized command and setting labels through package NLS files, including Japanese translations for the newly added settings.
+- Persisted pause state and ensured both manual and automatic persistence retain it.
+- Added configurable timestamp formats, including `date-fns`-compatible custom formatting.
+- Localized commands and settings, including Japanese translations for newly added options.
 - Updated tests and README documentation to match the current behavior.
