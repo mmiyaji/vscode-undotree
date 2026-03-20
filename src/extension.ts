@@ -71,6 +71,12 @@ const PERSIST_DEBOUNCE_MS = 1000;
 let compactPreviewPanel: vscode.WebviewPanel | undefined;
 let compactPreviewOverrides = new Map<number, 'remove' | 'keep'>();
 let compactPreviewTargetUri: string | undefined;
+const EXTENSION_ID = 'mmiyaji.vscode-undotree';
+const EXTENSION_SETTINGS_QUERY = `@ext:${EXTENSION_ID}`;
+
+function getSettingSearchQuery(settingId?: string): string {
+    return settingId ? `${EXTENSION_SETTINGS_QUERY} ${settingId}` : EXTENSION_SETTINGS_QUERY;
+}
 
 type PersistedManifest = {
     version: number;
@@ -338,6 +344,12 @@ function getPersistedContentHashes(
     tree: NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>,
     checkpointThreshold: number
 ): Set<string> {
+    const hashes = new Set(
+        tree.nodes
+            .filter((node): node is typeof node & { storage: { kind: 'checkpoint'; contentHash: string } } =>
+                node.storage.kind === 'checkpoint')
+            .map((node) => node.storage.contentHash)
+    );
     const totalFullBytes = tree.nodes.reduce((sum, node) => {
         if (node.storage.kind === 'full') {
             return sum + (node.byteCount ?? Buffer.byteLength(node.storage.content, 'utf8'));
@@ -346,14 +358,13 @@ function getPersistedContentHashes(
     }, 0);
 
     if (totalFullBytes < checkpointThreshold) {
-        return new Set<string>();
+        return hashes;
     }
 
-    return new Set(
-        tree.nodes
-            .filter((node) => node.storage.kind === 'full' && node.storage.content !== '')
-            .map((node) => node.hash)
-    );
+    tree.nodes
+        .filter((node) => node.storage.kind === 'full' && node.storage.content !== '')
+        .forEach((node) => hashes.add(node.hash));
+    return hashes;
 }
 
 async function readPersistedContentHashesFromTreeFile(
@@ -453,19 +464,16 @@ async function persistStateToDisk(
 
         // コンテンツファイルの書き込み（既存ならスキップ、gzip圧縮）
         if (useCheckpoint) {
-            await Promise.all(tree.nodes
-                .filter((n) => n.storage.kind === 'full' && n.storage.content !== '')
-                .map(async (n) => {
-                    const full = n.storage as { kind: 'full'; content: string };
-                    const filePath = path.join(contentDir, n.hash);
-                    try {
-                        await fs.access(filePath);
-                    } catch {
-                        const compressed = await gzip(Buffer.from(full.content, 'utf8'));
-                        await fs.writeFile(filePath, compressed);
-                    }
-                })
-            );
+            await Promise.all(Array.from(contentHashes).map(async (hash) => {
+                const filePath = path.join(contentDir, hash);
+                try {
+                    await fs.access(filePath);
+                } catch {
+                    const content = manager?.getCheckpointContent(hash) ?? '';
+                    const compressed = await gzip(Buffer.from(content, 'utf8'));
+                    await fs.writeFile(filePath, compressed);
+                }
+            }));
         }
 
         const json = JSON.stringify({ uri, tree: { ...tree, nodes: serializedNodes } }, null, 2);
@@ -654,6 +662,11 @@ function getCompressionThresholdBytes(): number {
 function getCheckpointThresholdBytes(): number {
     const kb = vscode.workspace.getConfiguration('undotree').get<number>('checkpointThresholdKB');
     return (typeof kb === 'number' && kb >= 0 ? kb : 1000) * 1024;
+}
+
+function getMemoryCheckpointThresholdBytes(): number {
+    const kb = vscode.workspace.getConfiguration('undotree').get<number>('memoryCheckpointThresholdKB');
+    return (typeof kb === 'number' && kb >= 0 ? kb : 32) * 1024;
 }
 
 function getContentCacheMaxBytes(): number {
@@ -870,6 +883,7 @@ export async function activate(context: vscode.ExtensionContext) {
     manager.paused = persistedManifest?.paused === true;
     manager.setAutosaveInterval(getAutosaveIntervalMs());
     manager.setContentCacheMax(getContentCacheMaxBytes());
+    manager.setMemoryCheckpointThreshold(getMemoryCheckpointThresholdBytes());
 
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     manager.contentResolver = (hash) => {
@@ -1001,7 +1015,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         await vscode.commands.executeCommand('undotree.hardCompact');
                         break;
                     case 'openSettings':
-                        await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree.hardCompactAfterDays');
+                        await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.hardCompactAfterDays'));
                         return;
                     default:
                         return;
@@ -1125,6 +1139,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 label: string;
                 description?: string;
                 command?: string;
+                settingId?: string;
             }> = [
                 {
                     label: vscode.l10n.t('$(gear) Open Settings'),
@@ -1147,6 +1162,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         : vscode.l10n.t('$(sync) Auto Persist: Off'),
                     description: vscode.l10n.t('Open settings to change persistent save mode'),
                     command: 'workbench.action.openSettings',
+                    settingId: 'undotree.persistenceMode',
                 },
                 {
                     label: vscode.l10n.t('$(history) Restore Persisted State'),
@@ -1194,7 +1210,10 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             if (picked.command === 'workbench.action.openSettings') {
-                await vscode.commands.executeCommand(picked.command, 'undotree');
+                const query = picked.settingId
+                    ? getSettingSearchQuery(picked.settingId)
+                    : getSettingSearchQuery();
+                await vscode.commands.executeCommand(picked.command, query);
                 return;
             }
 
@@ -1445,6 +1464,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.nodeSizeMetricBase') ||
                 e.affectsConfiguration('undotree.compressionThresholdKB') ||
                 e.affectsConfiguration('undotree.checkpointThresholdKB') ||
+                e.affectsConfiguration('undotree.memoryCheckpointThresholdKB') ||
                 e.affectsConfiguration('undotree.contentCacheMaxKB')
             ) {
                 if (e.affectsConfiguration('undotree.persistenceMode')) {
@@ -1455,6 +1475,9 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 if (e.affectsConfiguration('undotree.contentCacheMaxKB')) {
                     manager?.setContentCacheMax(getContentCacheMaxBytes());
+                }
+                if (e.affectsConfiguration('undotree.memoryCheckpointThresholdKB')) {
+                    manager?.setMemoryCheckpointThreshold(getMemoryCheckpointThresholdBytes());
                 }
                 updateStatusBar(vscode.window.activeTextEditor);
                 provider.refresh();

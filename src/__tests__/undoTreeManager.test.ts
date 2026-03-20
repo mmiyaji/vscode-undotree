@@ -158,6 +158,30 @@ describe('分岐点の全量昇格', () => {
         expect(node1.storage.kind).toBe('full');
         expect(node1.children.length).toBe(2);
     });
+
+    it('uses checkpoint storage for large branch parents when the threshold is exceeded', () => {
+        const manager = new UndoTreeManager();
+        manager.setMemoryCheckpointThreshold(32);
+        const base = 'a'.repeat(256);
+        manager.onDidSaveTextDocument(makeDocument(base));
+
+        const tree = manager.getTree(makeUri());
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(base + 'b'), [{ offset: 256, removeLength: 0, text: 'b' }])
+        );
+        manager.onDidSaveTextDocument(makeDocument(base + 'b'));
+
+        tree.currentId = 1;
+        manager.onDidChangeTextDocument(
+            makeChangeEvent(makeDocument(base + 'c'), [{ offset: 256, removeLength: 0, text: 'c' }])
+        );
+        manager.onDidSaveTextDocument(makeDocument(base + 'c'));
+
+        const node1 = tree.nodes.get(1)!;
+        expect(node1.children.length).toBe(2);
+        expect(node1.storage.kind).toBe('checkpoint');
+        expect(manager.reconstructContent(tree, 1)).toBe(base);
+    });
 });
 
 // -----------------------------------------------

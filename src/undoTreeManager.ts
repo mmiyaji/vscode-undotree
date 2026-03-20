@@ -103,6 +103,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private contentCache = new Map<string, string>();
     private contentCacheBytes = 0;
     private contentCacheMaxBytes = 20480 * 1024;
+    private memoryCheckpointThresholdBytes = 32 * 1024;
     private emptyHash: string | undefined;
     contentResolver: ((hash: string) => string) | undefined;
     asyncContentResolver: ((hash: string) => Promise<string>) | undefined;
@@ -119,6 +120,10 @@ export class UndoTreeManager implements vscode.Disposable {
     setContentCacheMax(maxBytes: number) {
         this.contentCacheMaxBytes = maxBytes;
         this.evictCache(0);
+    }
+
+    setMemoryCheckpointThreshold(maxBytes: number) {
+        this.memoryCheckpointThresholdBytes = maxBytes;
     }
 
     private getEmptyHash(): string {
@@ -188,6 +193,10 @@ export class UndoTreeManager implements vscode.Disposable {
         this.evictCache(bytes);
         this.contentCache.set(hash, content);
         this.contentCacheBytes += bytes;
+    }
+
+    getCheckpointContent(hash: string): string {
+        return this.getOrLoadContent(hash);
     }
 
     private evictCache(incoming: number) {
@@ -380,15 +389,15 @@ export class UndoTreeManager implements vscode.Disposable {
             ...this.computeSizeMetrics(content),
         };
         currentNode.children.push(newId);
-
-        if (currentNode.children.length >= 2) {
-            const currentContent = this.reconstructContent(tree, tree.currentId);
-            this.upgradeToFull(tree, tree.currentId, currentContent);
-        }
-
         tree.nodes.set(newId, node);
         tree.hashMap.set(hash, newId);
         tree.currentId = newId;
+
+        if (currentNode.children.length >= 2) {
+            const currentContent = this.reconstructContent(tree, currentNode.id);
+            this.upgradeStorage(tree, currentNode.id, currentContent);
+        }
+
         this.diffBuffer.delete(key);
         this.dirtyTrees.add(key);
         this.onRefresh?.();
@@ -429,9 +438,24 @@ export class UndoTreeManager implements vscode.Disposable {
         return changedChars / contentLength > FULL_STORAGE_THRESHOLD;
     }
 
-    private upgradeToFull(tree: UndoTree, nodeId: number, content: string) {
+    private shouldUseCheckpointForMemory(content: string, nodeId: number, tree: UndoTree): boolean {
+        if (this.memoryCheckpointThresholdBytes <= 0) {
+            return false;
+        }
+        if (nodeId === tree.rootId || nodeId === tree.currentId) {
+            return false;
+        }
+        return Buffer.byteLength(content, 'utf8') >= this.memoryCheckpointThresholdBytes;
+    }
+
+    private upgradeStorage(tree: UndoTree, nodeId: number, content: string) {
         const node = tree.nodes.get(nodeId);
-        if (!node || node.storage.kind === 'full' || node.storage.kind === 'checkpoint') {
+        if (!node) {
+            return;
+        }
+        if (this.shouldUseCheckpointForMemory(content, nodeId, tree)) {
+            this.setCachedContent(node.hash, content);
+            node.storage = { kind: 'checkpoint', contentHash: node.hash };
             return;
         }
         node.storage = { kind: 'full', content };
@@ -844,13 +868,12 @@ export class UndoTreeManager implements vscode.Disposable {
         };
 
         currentNode.children.push(newId);
-        if (currentNode.children.length >= 2) {
-            this.upgradeToFull(tree, tree.currentId, currentContent);
-        }
-
         tree.nodes.set(newId, node);
         tree.hashMap.set(node.hash, newId);
         tree.currentId = newId;
+        if (currentNode.children.length >= 2) {
+            this.upgradeStorage(tree, currentNode.id, currentContent);
+        }
         this.diffBuffer.delete(key);
         this.dirtyTrees.add(key);
         this.onRefresh?.();

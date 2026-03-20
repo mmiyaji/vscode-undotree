@@ -75,109 +75,141 @@
         "title": "%commands.hardCompactDryRun.title%"
       }
     ],
-    "configuration": {
-      "title": "%config.title%",
-      "properties": {
-        "undotree.enabledExtensions": {
-          "type": "array",
-          "items": {
-            "type": "string"
+    "configuration": [
+      {
+        "title": "%config.general.title%",
+        "properties": {
+          "undotree.enabledExtensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [
+              ".txt",
+              ".md"
+            ],
+            "order": 10,
+            "markdownDescription": "%config.enabledExtensions.description%"
           },
-          "default": [
-            ".txt",
-            ".md"
-          ],
-          "markdownDescription": "%config.enabledExtensions.description%"
-        },
-        "undotree.excludePatterns": {
-          "type": "array",
-          "items": {
-            "type": "string"
+          "undotree.excludePatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "order": 20,
+            "markdownDescription": "%config.excludePatterns.description%"
           },
-          "default": [],
-          "markdownDescription": "%config.excludePatterns.description%"
-        },
-        "undotree.persistenceMode": {
-          "type": "string",
-          "enum": [
-            "manual",
-            "auto"
-          ],
-          "default": "manual",
-          "markdownDescription": "%config.persistenceMode.description%"
-        },
-        "undotree.autosaveInterval": {
-          "type": "number",
-          "default": 30,
-          "minimum": 0,
-          "markdownDescription": "%config.autosaveInterval.description%"
-        },
-        "undotree.timeFormat": {
-          "type": "string",
-          "enum": [
-            "none",
-            "time",
-            "dateTime",
-            "custom"
-          ],
-          "default": "time",
-          "markdownDescription": "%config.timeFormat.description%"
-        },
-        "undotree.timeFormatCustom": {
-          "type": "string",
-          "default": "yyyy-MM-dd HH:mm:ss",
-          "markdownDescription": "%config.timeFormatCustom.description%"
-        },
-        "undotree.showStorageKind": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "%config.showStorageKind.description%"
-        },
-        "undotree.nodeSizeMetric": {
-          "type": "string",
-          "enum": [
-            "none",
-            "lines",
-            "bytes"
-          ],
-          "default": "lines",
-          "markdownDescription": "%config.nodeSizeMetric.description%"
-        },
-        "undotree.nodeSizeMetricBase": {
-          "type": "string",
-          "enum": [
-            "current",
-            "initial"
-          ],
-          "default": "current",
-          "markdownDescription": "%config.nodeSizeMetricBase.description%"
-        },
-        "undotree.compressionThresholdKB": {
-          "type": "number",
-          "default": 100,
-          "minimum": 0,
-          "markdownDescription": "%config.compressionThresholdKB.description%"
-        },
-        "undotree.checkpointThresholdKB": {
-          "type": "number",
-          "default": 1000,
-          "minimum": 0,
-          "markdownDescription": "%config.checkpointThresholdKB.description%"
-        },
-        "undotree.contentCacheMaxKB": {
-          "type": "number",
-          "default": 20480,
-          "minimum": 0,
-          "markdownDescription": "%config.contentCacheMaxKB.description%"
-        },
-        "undotree.hardCompactAfterDays": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "markdownDescription": "%config.hardCompactAfterDays.description%"
+          "undotree.persistenceMode": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "auto"
+            ],
+            "default": "manual",
+            "order": 30,
+            "markdownDescription": "%config.persistenceMode.description%"
+          },
+          "undotree.autosaveInterval": {
+            "type": "number",
+            "default": 30,
+            "minimum": 0,
+            "order": 40,
+            "markdownDescription": "%config.autosaveInterval.description%"
+          },
+          "undotree.hardCompactAfterDays": {
+            "type": "number",
+            "default": 0,
+            "minimum": 0,
+            "order": 50,
+            "markdownDescription": "%config.hardCompactAfterDays.description%"
+          }
+        }
+      },
+      {
+        "title": "%config.display.title%",
+        "properties": {
+          "undotree.timeFormat": {
+            "type": "string",
+            "enum": [
+              "none",
+              "time",
+              "dateTime",
+              "custom"
+            ],
+            "default": "time",
+            "order": 10,
+            "markdownDescription": "%config.timeFormat.description%"
+          },
+          "undotree.timeFormatCustom": {
+            "type": "string",
+            "default": "yyyy-MM-dd HH:mm:ss",
+            "order": 20,
+            "markdownDescription": "%config.timeFormatCustom.description%"
+          },
+          "undotree.showStorageKind": {
+            "type": "boolean",
+            "default": false,
+            "order": 30,
+            "markdownDescription": "%config.showStorageKind.description%"
+          },
+          "undotree.nodeSizeMetric": {
+            "type": "string",
+            "enum": [
+              "none",
+              "lines",
+              "bytes"
+            ],
+            "default": "lines",
+            "order": 40,
+            "markdownDescription": "%config.nodeSizeMetric.description%"
+          },
+          "undotree.nodeSizeMetricBase": {
+            "type": "string",
+            "enum": [
+              "current",
+              "initial"
+            ],
+            "default": "current",
+            "order": 50,
+            "markdownDescription": "%config.nodeSizeMetricBase.description%"
+          }
+        }
+      },
+      {
+        "title": "%config.performance.title%",
+        "properties": {
+          "undotree.compressionThresholdKB": {
+            "type": "number",
+            "default": 100,
+            "minimum": 0,
+            "order": 10,
+            "markdownDescription": "%config.compressionThresholdKB.description%"
+          },
+          "undotree.checkpointThresholdKB": {
+            "type": "number",
+            "default": 1000,
+            "minimum": 0,
+            "order": 20,
+            "markdownDescription": "%config.checkpointThresholdKB.description%"
+          },
+          "undotree.memoryCheckpointThresholdKB": {
+            "type": "number",
+            "default": 32,
+            "minimum": 0,
+            "order": 30,
+            "markdownDescription": "%config.memoryCheckpointThresholdKB.description%"
+          },
+          "undotree.contentCacheMaxKB": {
+            "type": "number",
+            "default": 20480,
+            "minimum": 0,
+            "order": 40,
+            "markdownDescription": "%config.contentCacheMaxKB.description%"
+          }
         }
       }
-    },
+    ],
     "views": {
       "explorer": [
         {
