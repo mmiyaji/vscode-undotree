@@ -467,6 +467,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 <style nonce="${nonce}">
   body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
   #tree { min-width: max-content; }
+  #tree.plain-view { min-width: 0; }
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
   .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
@@ -531,9 +532,9 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .pinned-link:hover { background: var(--vscode-list-hoverBackground); }
   .pinned-link .pin-mark { opacity: 0.85; }
   .pinned-link .pinned-label { opacity: 0.8; }
-  .msg { opacity: 0.7; margin-bottom: 8px; }
-  .hint { opacity: 0.45; font-size: 11px; margin-bottom: 12px; }
-  .btn { display: block; margin-bottom: 6px; background: none; border: none; padding: 0; color: var(--vscode-textLink-foreground); font-size: 12px; cursor: pointer; text-decoration: underline; text-align: left; }
+  .msg { opacity: 0.7; margin-bottom: 8px; white-space: normal; overflow-wrap: anywhere; }
+  .hint { opacity: 0.45; font-size: 11px; margin-bottom: 12px; white-space: normal; overflow-wrap: anywhere; }
+  .btn { display: block; margin-bottom: 6px; background: none; border: none; padding: 0; color: var(--vscode-textLink-foreground); font-size: 12px; cursor: pointer; text-decoration: underline; text-align: left; white-space: normal; overflow-wrap: anywhere; }
   .btn:hover { color: var(--vscode-textLink-activeForeground); background: none; }
   .help-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 10; }
   .help-overlay.visible { display: flex; }
@@ -1041,6 +1042,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const latestId = nodes.reduce((best, n) => n.timestamp > map[best].timestamp ? n.id : best, nodes[0].id);
     const pinnedContainer = document.getElementById('pinned');
     const container = document.getElementById('tree');
+    container.classList.remove('plain-view');
     pinnedContainer.innerHTML = '';
     container.innerHTML = '';
     nodeEls = [];
@@ -1231,6 +1233,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const treeEl = document.getElementById('tree');
     const pinnedEl = document.getElementById('pinned');
     if (pinnedEl) { pinnedEl.innerHTML = ''; }
+    treeEl.classList.add('plain-view');
     treeEl.innerHTML =
       '<div class="msg">' + escHtml(ext ? replaceExt(i18n.notTrackedWithExt, ext) : i18n.notTrackedGeneric) + '</div>' +
       '<div class="hint">' + escHtml(ext ? replaceExt(i18n.notTrackedHintWithExt, ext) : i18n.notTrackedHintGeneric) + '</div>' +
