@@ -2,7 +2,7 @@
 
 import * as vscode from 'vscode';
 import { promises as fs } from 'fs';
-import { readFileSync } from 'fs';
+import { readFileSync    } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { promisify } from 'util';
@@ -11,7 +11,7 @@ import { gzip as gzipCb, gunzip as gunzipCb, gunzipSync } from 'zlib';
 const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
 import { UndoTreeProvider } from './undoTreeProvider';
-import { CompactPreviewItem, CompactPreviewResult, UndoTreeManager } from './undoTreeManager';
+import { CompactPreviewItem, CompactPreviewResult, SerializedUndoTree, UndoTreeManager, mergeSerializedTrees } from './undoTreeManager';
 import { initializeRuntimeL10n, t as tr } from './runtimeL10n';
 
 // バーチャルドキュメント（差分表示用）
@@ -87,6 +87,7 @@ const multiWindowWarnedUris = new Set<string>();
 let multiWindowLockWriteWarningShown = false;
 const persistedUris = new Set<string>();
 const pendingRenameOldUris = new Set<string>();
+const persistRootMismatchWarnedUris = new Set<string>();
 let deactivateHandler: (() => Promise<void>) | undefined;
 
 function getSettingSearchQuery(settingId?: string): string {
@@ -835,6 +836,19 @@ function getPersistedContentHashes(
     return hashes;
 }
 
+function getSerializedRootHash(tree: SerializedUndoTree): string | undefined {
+    return tree.nodes.find((node) => node.id === tree.rootId)?.hash;
+}
+
+function findSerializedFullContentByHash(tree: SerializedUndoTree, hash: string): string | undefined {
+    for (const node of tree.nodes) {
+        if (node.hash === hash && node.storage.kind === 'full') {
+            return node.storage.content;
+        }
+    }
+    return undefined;
+}
+
 async function readPersistedContentHashesFromTreeFile(
     treesDir: string,
     fileName: string
@@ -933,22 +947,68 @@ async function persistStateToDisk(
     const inMemoryUris = new Set(allEntries.map(([uri]) => uri));
     const preservedEntries = (existingManifest?.trees ?? []).filter(e => !inMemoryUris.has(e.uri));
 
+    const preparedWriteEntries: Array<[string, NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>]> = [];
+    let persistedNextId = state.nextId;
+    const persistOutcomes: Array<{ uri: string; action: 'written' | 'merged' | 'preserved-existing'; nodes: number; details?: string }> = [];
+    for (const [uri, tree] of writeEntries) {
+        let treeToWrite = tree;
+        let action: 'written' | 'merged' | 'preserved-existing' = 'written';
+        let details: string | undefined;
+        if (existingUris.has(uri)) {
+            try {
+                const existing = await loadPersistedTreeFromDisk(context, vscode.Uri.parse(uri));
+                if (existing?.tree) {
+                    const existingRootHash = getSerializedRootHash(existing.tree);
+                    const incomingRootHash = getSerializedRootHash(tree);
+                    if (existingRootHash && incomingRootHash && existingRootHash === incomingRootHash) {
+                        const merged = mergeSerializedTrees(existing.tree, tree, Math.max(existing.nextId, state.nextId));
+                        treeToWrite = merged.tree;
+                        persistedNextId = Math.max(persistedNextId, merged.nextId);
+                        action = 'merged';
+                        details = `existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length}`;
+                        persistRootMismatchWarnedUris.delete(uri);
+                        manager?.debugLog?.(
+                            `[persist-merge] uri=${uri} mode=merged existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} mergedNodes=${treeToWrite.nodes.length}`
+                        );
+                    } else {
+                        treeToWrite = existing.tree;
+                        persistedNextId = Math.max(persistedNextId, existing.nextId);
+                        action = 'preserved-existing';
+                        details = `existingRoot=${existingRootHash ?? 'missing'} incomingRoot=${incomingRootHash ?? 'missing'}`;
+                        manager?.debugLog?.(
+                            `[persist-merge] uri=${uri} mode=preserve-existing reason=root-mismatch existingRoot=${existingRootHash ?? 'missing'} incomingRoot=${incomingRootHash ?? 'missing'}`
+                        );
+                        if (!persistRootMismatchWarnedUris.has(uri)) {
+                            persistRootMismatchWarnedUris.add(uri);
+                            void vscode.window.showWarningMessage(
+                                tr('Undo Tree: saved history for this file was not overwritten because the in-memory tree does not share the same root. Existing persisted history was kept. See Output for details.')
+                            );
+                        }
+                    }
+                }
+            } catch (error) {
+                manager?.debugLog?.(
+                    `[persist-merge] uri=${uri} mode=skip-existing reason=load-failed error=${String(error)}`
+                );
+            }
+        }
+        preparedWriteEntries.push([uri, treeToWrite]);
+        persistOutcomes.push({ uri, action, nodes: treeToWrite.nodes.length, ...(details ? { details } : {}) });
+        for (const hash of getPersistedContentHashes(treeToWrite, checkpointThreshold)) {
+            referencedContentHashes.add(hash);
+        }
+    }
+
     const manifest: PersistedManifest = {
         version: 1,
         savedAt: Date.now(),
-        nextId: state.nextId,
+        nextId: persistedNextId,
         paused,
         trees: [
             ...persistedEntries.map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
             ...preservedEntries,
         ],
     };
-
-    for (const [, tree] of allEntries) {
-        for (const hash of getPersistedContentHashes(tree, checkpointThreshold)) {
-            referencedContentHashes.add(hash);
-        }
-    }
 
     let canPruneTreeFiles = existingManifestResult.status !== 'invalid' && existingManifestResult.status !== 'backup';
     let canPruneContentFiles = existingManifestResult.status !== 'invalid' && existingManifestResult.status !== 'backup';
@@ -962,7 +1022,7 @@ async function persistStateToDisk(
         }
     }));
 
-    await Promise.all(writeEntries.map(async ([uri, tree]) => {
+    await Promise.all(preparedWriteEntries.map(async ([uri, tree]) => {
         const contentHashes = getPersistedContentHashes(tree, checkpointThreshold);
         const useCheckpoint = contentHashes.size > 0;
         const totalFullBytes = tree.nodes.reduce((sum, node) => {
@@ -990,7 +1050,12 @@ async function persistStateToDisk(
                 try {
                     await fs.access(filePath);
                 } catch {
-                    const content = manager?.getCheckpointContent(hash) ?? '';
+                    const content =
+                        findSerializedFullContentByHash(tree, hash) ??
+                        manager?.getCheckpointContent(hash);
+                    if (content === undefined) {
+                        throw new Error(`Missing checkpoint content for hash ${hash}`);
+                    }
                     const compressed = await gzip(Buffer.from(content, 'utf8'));
                     await writeFileSafely(filePath, compressed);
                 }
@@ -1034,7 +1099,12 @@ async function persistStateToDisk(
     manager?.debugLog?.(
         `[persist] treeCount=${allEntries.length} persistedCount=${persistedEntries.length} writtenCount=${writeEntries.length} paused=${paused}`
     );
-    for (const [uri, tree] of writeEntries) {
+    for (const outcome of persistOutcomes) {
+        manager?.debugLog?.(
+            `[persist-summary] uri=${outcome.uri} action=${outcome.action} nodes=${outcome.nodes}${outcome.details ? ` ${outcome.details}` : ''}`
+        );
+    }
+    for (const [uri, tree] of preparedWriteEntries) {
         manager?.debugLog?.(
             `[persist] uri=${uri} nodes=${tree.nodes.length} currentId=${tree.currentId} rootId=${tree.rootId}`
         );
@@ -2725,4 +2795,10 @@ export async function activate(context: vscode.ExtensionContext) {
 export async function deactivate() {
     await deactivateHandler?.();
 }
+
+export const __test__ = {
+    persistStateToDisk,
+    loadPersistedTreeFromDisk,
+    readPersistedManifest,
+};
 

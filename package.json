@@ -184,6 +184,22 @@
             "order": 30,
             "markdownDescription": "%config.showStorageKind.description%"
           },
+          "undotree.colorTheme": {
+            "type": "string",
+            "enum": [
+              "blue",
+              "neutral",
+              "green",
+              "amber",
+              "teal",
+              "violet",
+              "rose",
+              "red"
+            ],
+            "default": "blue",
+            "order": 35,
+            "markdownDescription": "%config.colorTheme.description%"
+          },
           "undotree.nodeSizeMetric": {
             "type": "string",
             "enum": [

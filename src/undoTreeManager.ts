@@ -61,6 +61,148 @@ export type SerializedUndoTreeState = {
     trees: Record<string, SerializedUndoTree>;
 };
 
+function uniqueIds(values: number[]): number[] {
+    return Array.from(new Set(values));
+}
+
+function rebuildSerializedHashMap(tree: SerializedUndoTree): Array<[string, number]> {
+    const byHash = new Map<string, { id: number; timestamp: number }>();
+    for (const node of tree.nodes) {
+        const current = byHash.get(node.hash);
+        if (!current || node.timestamp >= current.timestamp) {
+            byHash.set(node.hash, { id: node.id, timestamp: node.timestamp });
+        }
+    }
+    return Array.from(byHash.entries()).map(([hash, entry]) => [hash, entry.id]);
+}
+
+export function mergeSerializedTrees(
+    base: SerializedUndoTree | undefined,
+    incoming: SerializedUndoTree,
+    nextIdHint = 1
+): { tree: SerializedUndoTree; nextId: number } {
+    if (!base) {
+        return {
+            tree: {
+                nodes: incoming.nodes.map((node) => ({
+                    ...node,
+                    parents: [...node.parents],
+                    children: [...node.children],
+                })),
+                hashMap: [...incoming.hashMap],
+                currentId: incoming.currentId,
+                rootId: incoming.rootId,
+            },
+            nextId: Math.max(nextIdHint, ...incoming.nodes.map((node) => node.id + 1), 1),
+        };
+    }
+
+    const mergedNodes = new Map<number, SerializedUndoNode>(
+        base.nodes.map((node) => [
+            node.id,
+            {
+                ...node,
+                parents: [...node.parents],
+                children: [...node.children],
+            },
+        ])
+    );
+    const idRemap = new Map<number, number>();
+    let nextId = Math.max(
+        nextIdHint,
+        ...Array.from(mergedNodes.keys()).map((id) => id + 1),
+        ...incoming.nodes.map((node) => node.id + 1),
+        1
+    );
+
+    for (const node of incoming.nodes) {
+        const existing = mergedNodes.get(node.id);
+        if (!existing) {
+            mergedNodes.set(node.id, {
+                ...node,
+                parents: [...node.parents],
+                children: [...node.children],
+            });
+            idRemap.set(node.id, node.id);
+            continue;
+        }
+
+        if (existing.hash === node.hash) {
+            idRemap.set(node.id, node.id);
+            existing.timestamp = Math.max(existing.timestamp, node.timestamp);
+            existing.label = node.label;
+            existing.storage = node.storage;
+            existing.lineCount = node.lineCount ?? existing.lineCount;
+            existing.byteCount = node.byteCount ?? existing.byteCount;
+            existing.note = node.note ?? existing.note;
+            existing.pinned = node.pinned ?? existing.pinned;
+            existing.parents = uniqueIds([...existing.parents, ...node.parents]);
+            existing.children = uniqueIds([...existing.children, ...node.children]);
+            continue;
+        }
+
+        const remappedId = nextId++;
+        idRemap.set(node.id, remappedId);
+        mergedNodes.set(remappedId, {
+            ...node,
+            id: remappedId,
+            parents: [...node.parents],
+            children: [...node.children],
+        });
+    }
+
+    for (const node of incoming.nodes) {
+        const mergedId = idRemap.get(node.id)!;
+        const mergedNode = mergedNodes.get(mergedId)!;
+        const remappedParents = uniqueIds(
+            node.parents
+                .map((parentId) => idRemap.get(parentId) ?? parentId)
+                .filter((parentId) => mergedNodes.has(parentId))
+        );
+        const remappedChildren = uniqueIds(
+            node.children
+                .map((childId) => idRemap.get(childId) ?? childId)
+                .filter((childId) => mergedNodes.has(childId))
+        );
+        mergedNode.parents = uniqueIds([...mergedNode.parents, ...remappedParents]);
+        mergedNode.children = uniqueIds([...mergedNode.children, ...remappedChildren]);
+    }
+
+    const rootId = mergedNodes.has(base.rootId) ? base.rootId : (idRemap.get(incoming.rootId) ?? incoming.rootId);
+    for (const node of mergedNodes.values()) {
+        if (node.id === rootId) {
+            node.parents = [];
+            continue;
+        }
+        if (node.parents.length === 0) {
+            node.parents = [rootId];
+        }
+    }
+
+    for (const node of mergedNodes.values()) {
+        node.children = [];
+    }
+    for (const node of mergedNodes.values()) {
+        for (const parentId of node.parents) {
+            const parent = mergedNodes.get(parentId);
+            if (parent && !parent.children.includes(node.id)) {
+                parent.children.push(node.id);
+            }
+        }
+    }
+
+    const currentId = idRemap.get(incoming.currentId) ?? incoming.currentId;
+    const mergedTree: SerializedUndoTree = {
+        nodes: Array.from(mergedNodes.values()).sort((a, b) => a.id - b.id),
+        hashMap: [],
+        currentId: mergedNodes.has(currentId) ? currentId : rootId,
+        rootId,
+    };
+    mergedTree.hashMap = rebuildSerializedHashMap(mergedTree);
+
+    return { tree: mergedTree, nextId };
+}
+
 export type CompactPreviewItem = {
     id: number;
     label: string;
@@ -1236,6 +1378,14 @@ export class UndoTreeManager implements vscode.Disposable {
             return tree;
         }
 
+        const reusableLatestLeafId = this.findReusableLatestLeafForContent(tree, content);
+        if (reusableLatestLeafId !== undefined) {
+            tree.currentId = reusableLatestLeafId;
+            this.diffBuffer.delete(uri.toString());
+            this.onRefresh?.();
+            return tree;
+        }
+
         const key = uri.toString();
         const currentNode = tree.nodes.get(tree.currentId)!;
         const newId = this.nextId++;
@@ -1261,6 +1411,29 @@ export class UndoTreeManager implements vscode.Disposable {
         this.dirtyTrees.add(key);
         this.onRefresh?.();
         return tree;
+    }
+
+    private findReusableLatestLeafForContent(tree: UndoTree, content: string): number | undefined {
+        const hash = this.hashContent(content);
+        const candidateId = tree.hashMap.get(hash);
+        if (candidateId === undefined) {
+            return undefined;
+        }
+        const candidate = tree.nodes.get(candidateId);
+        if (!candidate) {
+            return undefined;
+        }
+        if (candidate.children.length !== 0) {
+            return undefined;
+        }
+        const latestNodeId = this.getLatestNodeId(tree);
+        if (candidateId !== latestNodeId) {
+            return undefined;
+        }
+        if (this.reconstructContent(tree, candidateId) !== content) {
+            return undefined;
+        }
+        return candidateId;
     }
 
     private classifyNode(node: UndoNode): 'insert' | 'delete' | 'mixed' {

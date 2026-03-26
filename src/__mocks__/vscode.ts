@@ -36,6 +36,9 @@ const vscode = {
                 activeTab: undefined as unknown,
             },
         },
+        showWarningMessage: jest.fn(),
+        showInformationMessage: jest.fn(),
+        showErrorMessage: jest.fn(),
     },
     workspace: {
         textDocuments: [] as unknown[],

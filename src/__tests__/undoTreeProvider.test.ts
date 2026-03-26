@@ -490,7 +490,7 @@ describe('UndoTreeProvider initialization', () => {
         expect(view.webview.html).toContain('view: "tree"');
     });
 
-    it('falls back to the latest open tracked document when no other context is available', () => {
+    it('shows a text-editor-only message when there is no remembered context', () => {
         const vscode = require('vscode');
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
@@ -511,8 +511,7 @@ describe('UndoTreeProvider initialization', () => {
 
         provider.resolveWebviewView(view);
 
-        expect(view.webview.html).toContain('let sourceUri = "file:///second.md";');
-        expect(view.webview.html).toContain('view: "tree"');
+        expect(view.webview.html).toContain('Undo Tree is only available for text editors.');
     });
 
     it('shows a text-editor-only message when there is no active text editor', () => {

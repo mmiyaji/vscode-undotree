@@ -24,6 +24,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private lastEditor?: vscode.TextEditor;
     private lastEditorUri?: string;
     private lastDocumentUri?: string;
+    private contextUri?: string;
     private loadingRequest?: { uri: string; token: number };
     private loadingToken = 0;
     private webviewInitialized = false;
@@ -43,7 +44,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     rememberDocument(document: vscode.TextDocument | undefined) {
         if (document && this.isSidebarContextDocument(document)) {
-            this.lastDocumentUri = document.uri.toString();
+            this.contextUri = document.uri.toString();
+            this.lastDocumentUri = this.contextUri;
         }
     }
 
@@ -239,6 +241,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         const nodeSizeMetric = this.getNodeSizeMetric();
         const nodeSizeMetricBase = this.getNodeSizeMetricBase();
         const showStorageKind = this.getShowStorageKind();
+        const colorTheme = this.getColorTheme();
         const state = this.getRenderState(
             document,
             isLoadingCurrentEditor,
@@ -246,7 +249,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             timeFormatCustom,
             nodeSizeMetric,
             nodeSizeMetricBase,
-            showStorageKind
+            showStorageKind,
+            colorTheme
         );
 
         if (!this.webviewInitialized) {
@@ -260,6 +264,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 state.nodeSizeMetric,
                 state.nodeSizeMetricBase,
                 state.showStorageKind,
+                state.colorTheme,
                 state.view,
                 state.notTrackedExt,
                 state.sourceUri
@@ -281,7 +286,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
-        showStorageKind: boolean
+        showStorageKind: boolean,
+        colorTheme: 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red'
     ) {
         if (isLoadingCurrentEditor) {
             return {
@@ -295,6 +301,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetric,
                 nodeSizeMetricBase,
                 showStorageKind,
+                colorTheme,
                 notTrackedExt: '',
                 sourceUri: '',
             };
@@ -311,6 +318,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetric,
                 nodeSizeMetricBase,
                 showStorageKind,
+                colorTheme,
                 notTrackedExt: '',
                 sourceUri: '',
             };
@@ -329,6 +337,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetric,
                 nodeSizeMetricBase,
                 showStorageKind,
+                colorTheme,
                 notTrackedExt: ext,
                 sourceUri: document.uri.toString(),
             };
@@ -350,6 +359,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             nodeSizeMetric,
             nodeSizeMetricBase,
             showStorageKind,
+            colorTheme,
             notTrackedExt: '',
             sourceUri: document.uri.toString(),
         };
@@ -358,47 +368,46 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private getContextDocument(): vscode.TextDocument | undefined {
         const active = vscode.window.activeTextEditor;
         if (active && this.isSidebarContextDocument(active.document)) {
+            this.rememberDocument(active.document);
             return active.document;
         }
         const activeTabUri = this.getActiveTabUri();
         if (activeTabUri) {
             const tabDoc = vscode.workspace.textDocuments.find((document) => document.uri.toString() === activeTabUri);
             if (tabDoc && this.isSidebarContextDocument(tabDoc)) {
+                this.rememberDocument(tabDoc);
                 return tabDoc;
             }
         }
-        if (this.lastDocumentUri) {
+        if (this.contextUri) {
             const rememberedDoc = vscode.workspace.textDocuments.find(
                 (document) =>
                     this.isSidebarContextDocument(document) &&
-                    document.uri.toString() === this.lastDocumentUri
+                    document.uri.toString() === this.contextUri
             );
             if (rememberedDoc) {
                 return rememberedDoc;
             }
         }
-        const latestOpenDocument = [...(vscode.workspace.textDocuments ?? [])]
-            .reverse()
-            .find((document) => this.isSidebarContextDocument(document));
-        if (latestOpenDocument) {
-            return latestOpenDocument;
-        }
         const visibleEditors = vscode.window.visibleTextEditors ?? [];
-        if (this.lastEditorUri) {
+        if (this.contextUri) {
             const matchingVisible = visibleEditors.find(
                 (editor) =>
                     this.isSidebarContextDocument(editor.document) &&
-                    editor.document.uri.toString() === this.lastEditorUri
+                    editor.document.uri.toString() === this.contextUri
             );
             if (matchingVisible) {
+                this.rememberDocument(matchingVisible.document);
                 return matchingVisible.document;
             }
         }
         const visible = visibleEditors.find((editor) => this.isSidebarContextDocument(editor.document));
         if (visible) {
+            this.rememberDocument(visible.document);
             return visible.document;
         }
         if (this.lastEditor && this.isSidebarContextDocument(this.lastEditor.document)) {
+            this.rememberDocument(this.lastEditor.document);
             return this.lastEditor.document;
         }
         return active?.document;
@@ -407,6 +416,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private getContextEditor(): vscode.TextEditor | undefined {
         const active = vscode.window.activeTextEditor;
         if (active && this.isSidebarContextDocument(active.document)) {
+            this.rememberDocument(active.document);
             return active;
         }
         const activeTabUri = this.getActiveTabUri();
@@ -417,26 +427,30 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                     editor.document.uri.toString() === activeTabUri
             );
             if (matchingVisibleFromTab) {
+                this.rememberDocument(matchingVisibleFromTab.document);
                 return matchingVisibleFromTab;
             }
         }
         const visibleEditors = vscode.window.visibleTextEditors ?? [];
-        if (this.lastEditorUri) {
+        if (this.contextUri) {
             const matchingVisible = visibleEditors.find(
                 (editor) =>
                     this.isSidebarContextDocument(editor.document) &&
-                    editor.document.uri.toString() === this.lastEditorUri
+                    editor.document.uri.toString() === this.contextUri
             );
             if (matchingVisible) {
+                this.rememberDocument(matchingVisible.document);
                 return matchingVisible;
             }
         }
+        if (this.lastEditor && this.isSidebarContextDocument(this.lastEditor.document)) {
+            this.rememberDocument(this.lastEditor.document);
+            return this.lastEditor;
+        }
         const visible = visibleEditors.find((editor) => this.isSidebarContextDocument(editor.document));
         if (visible) {
+            this.rememberDocument(visible.document);
             return visible;
-        }
-        if (this.lastEditor && this.isSidebarContextDocument(this.lastEditor.document)) {
-            return this.lastEditor;
         }
         return active;
     }
@@ -483,6 +497,22 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             return value;
         }
         return 'parent';
+    }
+
+    private getColorTheme(): 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' {
+        const value = vscode.workspace.getConfiguration('undotree').get<string>('colorTheme');
+        if (
+            value === 'neutral' ||
+            value === 'green' ||
+            value === 'amber' ||
+            value === 'teal' ||
+            value === 'violet' ||
+            value === 'rose' ||
+            value === 'red'
+        ) {
+            return value;
+        }
+        return 'blue';
     }
 
     private getEnabledExtensions(): string[] {
@@ -595,6 +625,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
         showStorageKind: boolean,
+        colorTheme: 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' = 'blue',
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
         initialNotTrackedExt = '',
         initialSourceUri = ''
@@ -608,31 +639,97 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.view?.webview.cspSource} data:; style-src ${this.view?.webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <style nonce="${nonce}">
   body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
+  :root {
+    --undotree-accent: #3794ff;
+    --undotree-accent-strong: #4ca0ff;
+    --undotree-accent-soft: rgba(55, 148, 255, 0.16);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 74%, #3794ff 10%);
+    --undotree-current: rgba(9, 71, 113, 0.84);
+    --undotree-latest: #4fc1ff;
+  }
+  body[data-color-theme="neutral"] {
+    --undotree-accent: rgba(212, 212, 212, 0.55);
+    --undotree-accent-strong: rgba(212, 212, 212, 0.78);
+    --undotree-accent-soft: rgba(212, 212, 212, 0.10);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 86%, rgba(212, 212, 212, 0.16) 14%);
+    --undotree-current: rgba(90, 90, 90, 0.30);
+    --undotree-latest: rgba(212, 212, 212, 0.78);
+  }
+  body[data-color-theme="green"] {
+    --undotree-accent: var(--vscode-charts-green, #89d185);
+    --undotree-accent-strong: #98d993;
+    --undotree-accent-soft: rgba(137, 209, 133, 0.16);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 76%, rgba(137, 209, 133, 0.18) 24%);
+    --undotree-current: rgba(50, 85, 52, 0.38);
+    --undotree-latest: var(--vscode-charts-green, #89d185);
+  }
+  body[data-color-theme="amber"] {
+    --undotree-accent: var(--vscode-charts-yellow, #d7ba7d);
+    --undotree-accent-strong: #dfc48d;
+    --undotree-accent-soft: rgba(215, 186, 125, 0.18);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 76%, rgba(215, 186, 125, 0.20) 24%);
+    --undotree-current: rgba(93, 77, 43, 0.42);
+    --undotree-latest: var(--vscode-charts-yellow, #d7ba7d);
+  }
+  body[data-color-theme="teal"] {
+    --undotree-accent: #4ec9b0;
+    --undotree-accent-strong: #67d2bd;
+    --undotree-accent-soft: rgba(78, 201, 176, 0.16);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 76%, rgba(78, 201, 176, 0.18) 24%);
+    --undotree-current: rgba(36, 84, 76, 0.42);
+    --undotree-latest: #4ec9b0;
+  }
+  body[data-color-theme="violet"] {
+    --undotree-accent: #b392f0;
+    --undotree-accent-strong: #bea1f2;
+    --undotree-accent-soft: rgba(179, 146, 240, 0.16);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 76%, rgba(179, 146, 240, 0.18) 24%);
+    --undotree-current: rgba(72, 56, 102, 0.42);
+    --undotree-latest: #b392f0;
+  }
+  body[data-color-theme="rose"] {
+    --undotree-accent: #f28bba;
+    --undotree-accent-strong: #f49bc4;
+    --undotree-accent-soft: rgba(242, 139, 186, 0.16);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 76%, rgba(242, 139, 186, 0.18) 24%);
+    --undotree-current: rgba(106, 58, 78, 0.42);
+    --undotree-latest: #f28bba;
+  }
+  body[data-color-theme="red"] {
+    --undotree-accent: #e06c75;
+    --undotree-accent-strong: #e58087;
+    --undotree-accent-soft: rgba(224, 108, 117, 0.16);
+    --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 76%, rgba(224, 108, 117, 0.18) 24%);
+    --undotree-current: rgba(104, 49, 53, 0.42);
+    --undotree-latest: #e06c75;
+  }
   #tree { min-width: max-content; }
   #tree.plain-view { min-width: 0; }
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
-  .node.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-  .node.focused { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  .node.diff-target { background: color-mix(in srgb, var(--vscode-focusBorder) 16%, transparent); color: var(--vscode-foreground); }
-  .node.diff-target .right-area { background: color-mix(in srgb, var(--vscode-focusBorder) 16%, var(--vscode-sideBar-background)); }
-  .node.current.diff-target { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
-  .diff-target-badge { font-size: 9px; color: var(--vscode-focusBorder); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
-  .diff-base { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)) 70%, transparent); }
-  .diff-base-badge { font-size: 9px; color: var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
+  .node.current { background: var(--undotree-current); color: var(--vscode-list-activeSelectionForeground); }
+  .node:hover:not(.current) { background: var(--undotree-hover); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--undotree-accent) 30%, transparent); }
+  .node:hover:not(.current) .right-area { background: var(--undotree-hover); }
+  .node.focused { outline: 1px solid var(--undotree-accent-strong); outline-offset: -1px; }
+  .node.diff-target { background: var(--undotree-accent-soft); color: var(--vscode-foreground); }
+  .node.diff-target .right-area { background: color-mix(in srgb, var(--undotree-accent-soft) 72%, var(--vscode-sideBar-background)); }
+  .node.current.diff-target { box-shadow: inset 0 0 0 1px var(--undotree-accent-strong); }
+  .diff-target-badge { font-size: 9px; color: var(--undotree-accent-strong); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
+  .diff-base { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--undotree-accent-strong) 70%, transparent); }
+  .diff-base-badge { font-size: 9px; color: var(--undotree-accent-strong); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
-  .graph svg { width: 12px; height: 14px; display: block; overflow: visible; }
+  .graph svg.graph-segment { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
-  .label { opacity: 0.8; }
+  .label { opacity: 0.96; }
   .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-left: 6px; position: sticky; right: 4px; background: var(--vscode-sideBar-background); }
   .metrics { display: inline-grid; grid-template-columns: var(--diff-col-width, auto) var(--total-col-width, auto) var(--time-col-width, auto); align-items: center; justify-content: end; justify-items: end; column-gap: 6px; flex: 0 0 auto; }
-  .node.current .right-area { background: var(--vscode-list-activeSelectionBackground); }
+  .node.current .right-area { background: var(--undotree-current); }
   .time { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
-  .time.latest { opacity: 0.9; color: var(--vscode-charts-green, #89d185); }
+  .time.latest { opacity: 0.9; color: var(--undotree-latest); }
   .empty { opacity: 0.5; padding: 8px; }
   .actions { display: flex; gap: 4px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 1; padding: 8px 0 4px; }
-  button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
-  button:hover { background: var(--vscode-button-hoverBackground); }
+  button { background: var(--undotree-accent); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
+  button:hover { background: var(--undotree-accent-strong); }
   button:disabled { opacity: 0.4; cursor: default; }
   .btn-pause { margin-left: auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .btn-pause:hover { background: var(--vscode-button-secondaryHoverBackground); }
@@ -644,7 +741,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .btn-settings { background: transparent; color: var(--vscode-foreground); opacity: 0.6; padding: 3px 5px; }
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
-  .diff-badge { font-size: 10px; color: var(--vscode-focusBorder); margin-left: 2px; }
+  .diff-badge { font-size: 10px; color: var(--undotree-accent-strong); margin-left: 2px; }
   .diff-tools { display: none; align-items: center; gap: 4px; margin: 0 0 8px; position: sticky; top: 37px; z-index: 1; background: var(--vscode-sideBar-background); padding: 0 0 6px; }
   .diff-tools.visible { display: flex; flex-wrap: wrap; }
   .btn-compare { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
@@ -658,24 +755,24 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .meta-col.empty, .time.empty { visibility: hidden; }
   .size-diff.plus { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
   .size-diff.minus { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
-  .tree-header { display: flex; align-items: center; gap: 4px; padding: 0 4px 6px; font-size: 10px; opacity: 0.55; white-space: nowrap; }
-  .tree-header .label-col { min-width: 0; }
-  .tree-header .right-area { background: var(--vscode-sideBar-background); position: sticky; right: 4px; padding-left: 6px; }
+  .tree-header { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; padding: 0 4px 6px; font-size: 10px; opacity: 0.55; white-space: nowrap; min-width: max-content; }
+  .tree-header .label-col { min-width: max-content; flex: 0 0 auto; }
+  .tree-header .right-area { background: var(--vscode-sideBar-background); position: sticky; right: 4px; padding-left: 6px; flex: 0 0 auto; white-space: nowrap; }
+  .tree-header .metrics { flex: 0 0 auto; }
   .tree-header .size-diff, .tree-header .size-total, .tree-header .time { opacity: 0.7; }
   .time { text-align: right; white-space: nowrap; justify-self: end; }
-  .note { font-weight: 600; opacity: 0.72; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
+  .note { font-weight: 600; opacity: 0.9; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
   .node:hover .note-edit:hover { opacity: 1; }
-  .pin-btn { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; margin-left: 6px; }
-  .node:hover .pin-btn, .pin-btn.active { opacity: 0.85; }
-  .pin-btn:hover { opacity: 1; }
   .pinned-wrap { margin-bottom: 8px; }
   .pinned-title { font-size: 10px; opacity: 0.55; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
   .pinned-link { display:flex; align-items:center; gap:4px; padding:2px 4px; cursor:pointer; border-radius:3px; white-space:nowrap; }
   .pinned-link:hover { background: var(--vscode-list-hoverBackground); }
-  .pinned-link .pin-mark { opacity: 0.85; }
+  .pinned-link .pin-mark { opacity: 0.85; width: 12px; height: 12px; display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-foreground); flex: 0 0 auto; cursor: pointer; }
+  .pinned-link .pin-mark svg { width: 10px; height: 10px; display: block; }
   .pinned-link .pinned-label { opacity: 0.8; }
+  .pinned-link .pin-mark:hover { opacity: 1; }
   .msg { opacity: 0.7; margin-bottom: 8px; white-space: normal; overflow-wrap: anywhere; }
   .hint { opacity: 0.45; font-size: 11px; margin-bottom: 12px; white-space: normal; overflow-wrap: anywhere; }
   .btn { display: block; margin-bottom: 6px; background: none; border: none; padding: 0; color: var(--vscode-textLink-foreground); font-size: 12px; cursor: pointer; text-decoration: underline; text-align: left; white-space: normal; overflow-wrap: anywhere; }
@@ -702,7 +799,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .context-menu-sep { height: 1px; margin: 4px 0; background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
 </style>
 </head>
-<body>
+<body data-color-theme="${colorTheme}">
 <div class="actions">
   <button id="btn-undo">${tr('Undo')}</button>
   <button id="btn-redo">${tr('Redo')}</button>
@@ -755,6 +852,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   let nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
   let nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
   let showStorageKind = ${JSON.stringify(showStorageKind)};
+  let colorTheme = ${JSON.stringify(colorTheme)};
   let sourceUri = ${JSON.stringify(initialSourceUri)};
   let diffCompareMode = 'current';
   let diffBaseNodeId = null;
@@ -1221,10 +1319,10 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         .forEach((node) => {
           const row = document.createElement('div');
           row.className = 'pinned-link';
-              row.innerHTML =
-                '<span class="pin-mark">&#128204;</span>' +
-                '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
-                (node.formattedTime ? '<span class="right-area"><span class="metrics"><span class="meta-col size-diff empty"></span><span class="meta-col size-total empty"></span><span class="time">' + escHtml(node.formattedTime) + '</span></span></span>' : '');
+          row.innerHTML =
+            '<span class="pin-mark" data-node-id="' + node.id + '" title="' + escHtml(i18n.contextUnpin) + '" aria-label="' + escHtml(i18n.contextUnpin) + '"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8 9.9 5.7l4.3.6-3.1 3 0.7 4.2L8 11.5l-3.8 2 0.7-4.2-3.1-3 4.3-.6L8 1.8Z" fill="currentColor"/></svg></span>' +
+            '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
+            (node.formattedTime ? '<span class="right-area"><span class="metrics"><span class="meta-col size-diff empty"></span><span class="meta-col size-total empty"></span><span class="time">' + escHtml(node.formattedTime) + '</span></span></span>' : '');
           row.addEventListener('click', () => {
             const idx = nodeIds.indexOf(node.id);
             if (idx >= 0) { setFocused(idx); }
@@ -1238,6 +1336,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
             if (idx >= 0) { setFocused(idx); }
             showContextMenu(node.id, event.clientX, event.clientY);
           });
+          const pinToggle = row.querySelector('.pin-mark');
+          if (pinToggle) {
+            pinToggle.addEventListener('click', (event) => {
+              event.stopPropagation();
+              send('togglePin', { nodeId: node.id });
+            });
+          }
           wrap.appendChild(row);
         });
       pinnedContainer.appendChild(wrap);
@@ -1246,13 +1351,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     function renderSegment(kind) {
       switch (kind) {
         case 'pipe':
-          return '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.75"/></svg>';
+          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.75"/></svg>';
         case 'tee':
-          return '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
+          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
         case 'elbow':
-          return '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 7 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
+          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 7 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
         default:
-          return '<svg viewBox="0 0 12 14" aria-hidden="true"></svg>';
+          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"></svg>';
       }
     }
 
@@ -1284,7 +1389,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         ? '<span class="note note-text" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteDoubleClickToEdit + '">' + escHtml(node.note) + '</span>' +
           '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.contextEditNote + '">&#9998;</span>'
         : '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.noteAdd + '">&#9998;</span>';
-      const pinHtml = '<span class="pin-btn pin-action' + (node.pinned ? ' active' : '') + '" data-node-id="' + node.id + '" title="' + (node.pinned ? i18n.unpinNode : i18n.pinNode) + '">&#128204;</span>';
+      const graphWrapHtml = graphHtml
+        ? '<span class="graph">' + graphHtml + '</span>'
+        : '';
       const parentId = node.parents?.length ? node.parents[node.parents.length - 1] : undefined;
       const refNode = nodeSizeMetricBase === 'current'
         ? ((isCurrent && node.id !== 0) ? node : map[currentId])
@@ -1295,16 +1402,15 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
             : null;
       const sizeParts = formatSizeDiff(node, refNode);
       const labelHtml = node.note ? '' : '<span class="label">' + escHtml(node.label) + '</span>';
-          div.innerHTML =
-            (graphHtml ? '<span class="graph">' + graphHtml + '</span>' : '') +
-            labelHtml +
-            (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">' + escHtml(i18n.badgeBase) + '</span>' : '') +
-            (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">' + escHtml(i18n.badgeDiff) + '</span>' : '') +
-            (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
-            noteHtml +
-            (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
-            pinHtml +
-            '<span class="right-area"><span class="metrics">' + sizeParts.diffHtml + sizeParts.totalHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + escHtml(node.formattedTime) + '</span>' : '<span class="time empty"></span>') + '</span></span>';
+      div.innerHTML =
+        graphWrapHtml +
+        labelHtml +
+        (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">' + escHtml(i18n.badgeBase) + '</span>' : '') +
+        (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">' + escHtml(i18n.badgeDiff) + '</span>' : '') +
+        (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
+        noteHtml +
+        (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
+        '<span class="right-area"><span class="metrics">' + sizeParts.diffHtml + sizeParts.totalHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + escHtml(node.formattedTime) + '</span>' : '<span class="time empty"></span>') + '</span></span>';
       const noteAction = div.querySelector('.note-action');
       if (noteAction) {
         noteAction.addEventListener('click', (event) => {
@@ -1317,13 +1423,6 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         noteText.addEventListener('dblclick', (event) => {
           event.stopPropagation();
           send('editNote', { nodeId: node.id });
-        });
-      }
-      const pinAction = div.querySelector('.pin-action');
-      if (pinAction) {
-        pinAction.addEventListener('click', (event) => {
-          event.stopPropagation();
-          send('togglePin', { nodeId: node.id });
         });
       }
       div.addEventListener('click', () => {
@@ -1405,7 +1504,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     nodeSizeMetric = state.nodeSizeMetric;
     nodeSizeMetricBase = state.nodeSizeMetricBase;
     showStorageKind = state.showStorageKind;
+    colorTheme = state.colorTheme || 'blue';
     sourceUri = state.sourceUri || '';
+    document.body.setAttribute('data-color-theme', colorTheme);
 
     if (diffBaseNodeId !== null && !state.nodes?.some((node) => node.id === diffBaseNodeId)) {
       diffBaseNodeId = null;
@@ -1488,6 +1589,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     nodeSizeMetric,
     nodeSizeMetricBase,
     showStorageKind,
+    colorTheme,
     notTrackedExt: ${JSON.stringify(initialNotTrackedExt)},
     sourceUri
   });

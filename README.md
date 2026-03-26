@@ -10,7 +10,13 @@ Unlike standard linear undo/redo, **vscode-undotree** preserves branches. If you
 
 The extension records history on saves and periodic autosave checkpoints. It does not replace VS Code's native undo stack; it adds a separate history layer for navigating meaningful states.
 
-![Undo Tree panel](./media/undotree-panel.png)
+![Undo Tree hero](./media/undotree.png)
+
+## Color Themes
+
+`undotree.colorTheme` lets you switch the sidebar accent theme. The default is `blue`, and additional built-in themes are `neutral`, `green`, `amber`, `teal`, `violet`, `rose`, and `red`.
+
+![Undo Tree color themes](./media/undotree-color-themes.png)
 
 ## Features
 

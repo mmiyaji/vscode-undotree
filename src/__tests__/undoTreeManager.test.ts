@@ -1,4 +1,4 @@
-import { UndoTreeManager } from '../undoTreeManager';
+import { mergeSerializedTrees, SerializedUndoTree, UndoTreeManager } from '../undoTreeManager';
 
 jest.mock('vscode');
 jest.useFakeTimers();
@@ -1201,6 +1201,24 @@ describe('persisted tree reconciliation', () => {
         expect(restored.reconstructContent(tree, tree.currentId)).toBe('disk version');
     });
 
+    it('reuses the latest leaf when restored content matches the latest terminal node', () => {
+        const manager = new UndoTreeManager();
+        const uri = makeUri('file:///persisted-latest.md');
+
+        manager.onDidSaveTextDocument(makeDocument('base', 'file:///persisted-latest.md'));
+        manager.onDidSaveTextDocument(makeDocument('latest', 'file:///persisted-latest.md'));
+
+        const exported = manager.exportState();
+        const restored = new UndoTreeManager();
+        restored.importState(exported);
+
+        const tree = restored.syncDocumentState(uri, 'latest');
+
+        expect(tree.nodes.size).toBe(3);
+        expect(tree.currentId).toBe(2);
+        expect(tree.nodes.get(tree.currentId)?.label).toBe('save');
+    });
+
     it('repairs a cyclic persisted tree by choosing a safe parent and preserving all nodes', () => {
         const restored = new UndoTreeManager();
         restored.importTree('file:///broken-cycle.md', {
@@ -1552,6 +1570,87 @@ describe('persisted tree reconciliation', () => {
         // all nodes preserved, no data loss
         expect(tree.nodes.get(1)?.label).toBe('pinned-node');
         expect(tree.nodes.get(2)?.label).toBe('noted-node');
+    });
+});
+
+describe('serialized tree merge', () => {
+    function makeSerializedTree(nodes: SerializedUndoTree['nodes'], currentId: number, rootId = 0): SerializedUndoTree {
+        return {
+            nodes,
+            currentId,
+            rootId,
+            hashMap: nodes.map((node) => [node.hash, node.id]),
+        };
+    }
+
+    it('merges persisted and in-memory histories when they share the same root', () => {
+        const base = makeSerializedTree([
+            {
+                id: 0, parents: [], children: [1, 2], timestamp: 1, label: 'initial', hash: 'root-hash',
+                storage: { kind: 'full', content: 'root' }, lineCount: 1, byteCount: 4,
+            },
+            {
+                id: 1, parents: [0], children: [], timestamp: 2, label: 'save', hash: 'persisted-a',
+                storage: { kind: 'full', content: 'persisted A' }, lineCount: 1, byteCount: 11,
+            },
+            {
+                id: 2, parents: [0], children: [], timestamp: 3, label: 'save', hash: 'persisted-b',
+                storage: { kind: 'full', content: 'persisted B' }, lineCount: 1, byteCount: 11,
+            },
+        ], 2);
+
+        const incoming = makeSerializedTree([
+            {
+                id: 0, parents: [], children: [1, 3], timestamp: 1, label: 'initial', hash: 'root-hash',
+                storage: { kind: 'full', content: 'root' }, lineCount: 1, byteCount: 4,
+            },
+            {
+                id: 1, parents: [0], children: [], timestamp: 4, label: 'save', hash: 'persisted-a',
+                storage: { kind: 'full', content: 'persisted A' }, lineCount: 1, byteCount: 11,
+            },
+            {
+                id: 3, parents: [0], children: [], timestamp: 5, label: 'save', hash: 'memory-c',
+                storage: { kind: 'full', content: 'memory C' }, lineCount: 1, byteCount: 8,
+            },
+        ], 3);
+
+        const merged = mergeSerializedTrees(base, incoming, 10).tree;
+
+        expect(merged.rootId).toBe(0);
+        expect(merged.currentId).toBe(3);
+        expect(merged.nodes.map((node) => node.id)).toEqual([0, 1, 2, 3]);
+        expect(merged.nodes.find((node) => node.id === 0)?.children).toEqual(expect.arrayContaining([1, 2, 3]));
+    });
+
+    it('remaps colliding ids with different hashes while preserving both nodes', () => {
+        const base = makeSerializedTree([
+            {
+                id: 0, parents: [], children: [1], timestamp: 1, label: 'initial', hash: 'root-hash',
+                storage: { kind: 'full', content: 'root' }, lineCount: 1, byteCount: 4,
+            },
+            {
+                id: 1, parents: [0], children: [], timestamp: 2, label: 'save', hash: 'base-1',
+                storage: { kind: 'full', content: 'base one' }, lineCount: 1, byteCount: 8,
+            },
+        ], 1);
+
+        const incoming = makeSerializedTree([
+            {
+                id: 0, parents: [], children: [1], timestamp: 1, label: 'initial', hash: 'root-hash',
+                storage: { kind: 'full', content: 'root' }, lineCount: 1, byteCount: 4,
+            },
+            {
+                id: 1, parents: [0], children: [], timestamp: 3, label: 'save', hash: 'incoming-1',
+                storage: { kind: 'full', content: 'incoming one' }, lineCount: 1, byteCount: 12,
+            },
+        ], 1);
+
+        const { tree, nextId } = mergeSerializedTrees(base, incoming, 2);
+
+        expect(tree.nodes).toHaveLength(3);
+        expect(tree.nodes.some((node) => node.id === 1 && node.hash === 'base-1')).toBe(true);
+        expect(tree.nodes.some((node) => node.id !== 1 && node.hash === 'incoming-1')).toBe(true);
+        expect(nextId).toBeGreaterThan(2);
     });
 });
 
