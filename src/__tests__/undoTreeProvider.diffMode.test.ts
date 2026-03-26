@@ -7,7 +7,10 @@ describe('UndoTreeProvider diff mode', () => {
     function makeEditor(path: string) {
         return {
             document: {
-                uri: { toString: () => path },
+                uri: {
+                    scheme: path.split(':', 1)[0],
+                    toString: () => path,
+                },
             },
         } as any;
     }

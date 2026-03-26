@@ -1921,6 +1921,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // 既に開いているエディタのツリーを実際のコンテンツで初期化
     if (vscode.window.activeTextEditor && isTracked(vscode.window.activeTextEditor.document)) {
         const ed = vscode.window.activeTextEditor;
+        provider.rememberDocument(ed.document);
         provider.setActiveEditor(ed);
         try {
             await ensureTreeLoaded(context, manager, ed.document);
@@ -2131,7 +2132,17 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider('undotree.treeView', provider),
 
         vscode.commands.registerCommand('undotree.show', () => {
+            provider.captureWindowContext();
+            provider.refresh();
             vscode.commands.executeCommand('undotree.treeView.focus');
+            setTimeout(() => {
+                provider.captureWindowContext();
+                provider.refresh();
+            }, 75);
+            setTimeout(() => {
+                provider.captureWindowContext();
+                provider.refresh();
+            }, 250);
         }),
 
         vscode.commands.registerCommand('undotree.undo', () => {
@@ -2560,8 +2571,11 @@ export async function activate(context: vscode.ExtensionContext) {
             manager?.debugLog?.(`[openTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${manager?.hasTree(doc.uri) === true}`);
             void (async () => {
                 if (isTracked(doc) && manager) {
+                    provider.rememberDocument(doc);
                     await ensureTreeLoaded(context, manager, doc);
                     await acquireMultiWindowLock(context, doc, outputChannel);
+                    provider.captureWindowContext();
+                    provider.refresh();
                 }
             })();
         }),

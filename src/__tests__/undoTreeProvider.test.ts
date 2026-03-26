@@ -5,7 +5,10 @@ jest.mock('vscode');
 jest.useFakeTimers();
 
 function makeUri(path = 'file:///existing.md') {
-    return { toString: () => path } as any;
+    return {
+        scheme: path.split(':', 1)[0],
+        toString: () => path,
+    } as any;
 }
 
 function uriToFileName(uriStr: string): string {
@@ -24,6 +27,10 @@ function makeDocument(content: string, uriStr = 'file:///existing.md') {
 describe('UndoTreeProvider initialization', () => {
     beforeEach(() => {
         const vscode = require('vscode');
+        vscode.window.activeTextEditor = undefined;
+        vscode.window.visibleTextEditors = [];
+        vscode.window.tabGroups = { activeTabGroup: { activeTab: undefined } };
+        vscode.workspace.textDocuments = [];
         vscode.workspace.getConfiguration = jest.fn((section?: string) => {
             if (section === 'undotree') {
                 return {
@@ -45,6 +52,8 @@ describe('UndoTreeProvider initialization', () => {
 
     function makeView() {
         return {
+            visible: true,
+            onDidChangeVisibility: jest.fn(),
             webview: {
                 options: {},
                 html: '',
@@ -61,8 +70,11 @@ describe('UndoTreeProvider initialization', () => {
         const document = makeDocument('existing file content');
 
         vscode.window.activeTextEditor = { document };
+        vscode.workspace.textDocuments = [document];
 
         const view = {
+            visible: true,
+            onDidChangeVisibility: jest.fn(),
             webview: {
                 options: {},
                 html: '',
@@ -262,6 +274,7 @@ describe('UndoTreeProvider initialization', () => {
         };
 
         vscode.window.activeTextEditor = { document };
+        vscode.workspace.textDocuments = [document];
 
         provider.resolveWebviewView(view);
 
@@ -269,6 +282,237 @@ describe('UndoTreeProvider initialization', () => {
         expect(view.webview.html).toContain('Open Settings');
         expect(view.webview.html).toContain('enableTrackingWithExt');
         expect(view.webview.html).toContain('".js"');
+    });
+
+    it('prefers the active untracked file over a stale tracked editor', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const trackedEditor = {
+            document: {
+                ...makeDocument('tracked text', 'file:///tracked.md'),
+                fileName: '/workspace/tracked.md',
+            },
+        } as any;
+        const untrackedEditor = {
+            document: {
+                ...makeDocument('const x = 1;', 'file:///example.js'),
+                fileName: '/workspace/example.js',
+            },
+        } as any;
+
+        provider.setActiveEditor(trackedEditor);
+        vscode.window.activeTextEditor = untrackedEditor;
+        vscode.workspace.textDocuments = [trackedEditor.document, untrackedEditor.document];
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('is not tracked');
+        expect(view.webview.html).toContain('".js"');
+        expect(view.webview.html).not.toContain('tracked text');
+    });
+
+    it('falls back to the last real editor when the active editor is output', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const trackedEditor = {
+            document: {
+                ...makeDocument('tracked text', 'file:///tracked.md'),
+                fileName: '/workspace/tracked.md',
+            },
+        } as any;
+        const outputEditor = {
+            document: {
+                uri: { scheme: 'output', toString: () => 'output:undo-tree' },
+                fileName: 'Undo Tree Output',
+                isUntitled: false,
+                getText: () => '',
+            },
+        } as any;
+
+        provider.setActiveEditor(trackedEditor);
+        vscode.window.activeTextEditor = outputEditor;
+        vscode.workspace.textDocuments = [trackedEditor.document];
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///tracked.md";');
+        expect(view.webview.html).toContain('view: "tree"');
+    });
+
+    it('falls back to the last real editor when the view is focused and there is no active editor', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const trackedEditor = {
+            document: {
+                ...makeDocument('tracked text', 'file:///tracked.md'),
+                fileName: '/workspace/tracked.md',
+            },
+        } as any;
+
+        provider.setActiveEditor(trackedEditor);
+        vscode.window.activeTextEditor = undefined;
+        vscode.workspace.textDocuments = [trackedEditor.document];
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///tracked.md";');
+        expect(view.webview.html).toContain('view: "tree"');
+    });
+
+    it('prefers a visible real editor over a stale last editor when the view is reopened', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const staleEditor = {
+            document: {
+                ...makeDocument('stale text', 'file:///stale.md'),
+                fileName: '/workspace/stale.md',
+            },
+        } as any;
+        const visibleEditor = {
+            document: {
+                ...makeDocument('visible text', 'file:///visible.md'),
+                fileName: '/workspace/visible.md',
+            },
+        } as any;
+
+        provider.setActiveEditor(staleEditor);
+        vscode.window.activeTextEditor = undefined;
+        vscode.window.visibleTextEditors = [visibleEditor];
+        vscode.workspace.textDocuments = [staleEditor.document, visibleEditor.document];
+        provider.captureWindowContext();
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///visible.md";');
+        expect(view.webview.html).toContain('view: "tree"');
+        expect(view.webview.html).not.toContain('let sourceUri = "file:///stale.md";');
+    });
+
+    it('uses the active tab document when no active editor exists', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const document = {
+            ...makeDocument('tab text', 'file:///from-tab.md'),
+            fileName: '/workspace/from-tab.md',
+        };
+
+        vscode.window.activeTextEditor = undefined;
+        vscode.window.visibleTextEditors = [];
+        vscode.window.tabGroups = {
+            activeTabGroup: {
+                activeTab: {
+                    input: {
+                        uri: document.uri,
+                    },
+                },
+            },
+        };
+        vscode.workspace.textDocuments = [document];
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///from-tab.md";');
+        expect(view.webview.html).toContain('view: "tree"');
+    });
+
+    it('captureWindowContext prefers the active tab document over stale visible editors', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const staleDocument = {
+            ...makeDocument('stale text', 'file:///stale.md'),
+            fileName: '/workspace/stale.md',
+        };
+        const freshDocument = {
+            ...makeDocument('fresh text', 'file:///fresh.md'),
+            fileName: '/workspace/fresh.md',
+        };
+        const staleEditor = { document: staleDocument } as any;
+        const freshEditor = { document: freshDocument } as any;
+
+        provider.setActiveEditor(staleEditor);
+        vscode.window.activeTextEditor = undefined;
+        vscode.window.visibleTextEditors = [staleEditor, freshEditor];
+        vscode.window.tabGroups = {
+            activeTabGroup: {
+                activeTab: {
+                    input: {
+                        uri: freshDocument.uri,
+                    },
+                },
+            },
+        };
+        vscode.workspace.textDocuments = [staleDocument, freshDocument];
+
+        provider.captureWindowContext();
+
+        const view = makeView();
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///fresh.md";');
+        expect(view.webview.html).not.toContain('let sourceUri = "file:///stale.md";');
+    });
+
+    it('uses the most recently remembered tracked document when reopening the view', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const firstDocument = {
+            ...makeDocument('first text', 'file:///first.md'),
+            fileName: '/workspace/first.md',
+        };
+        const secondDocument = {
+            ...makeDocument('second text', 'file:///second.md'),
+            fileName: '/workspace/second.md',
+        };
+
+        provider.rememberDocument(firstDocument);
+        provider.rememberDocument(secondDocument);
+        vscode.window.activeTextEditor = undefined;
+        vscode.window.visibleTextEditors = [];
+        vscode.window.tabGroups = { activeTabGroup: { activeTab: undefined } };
+        vscode.workspace.textDocuments = [firstDocument, secondDocument];
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///second.md";');
+        expect(view.webview.html).toContain('view: "tree"');
+    });
+
+    it('falls back to the latest open tracked document when no other context is available', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const firstDocument = {
+            ...makeDocument('first text', 'file:///first.md'),
+            fileName: '/workspace/first.md',
+        };
+        const secondDocument = {
+            ...makeDocument('second text', 'file:///second.md'),
+            fileName: '/workspace/second.md',
+        };
+
+        vscode.window.activeTextEditor = undefined;
+        vscode.window.visibleTextEditors = [];
+        vscode.window.tabGroups = { activeTabGroup: { activeTab: undefined } };
+        vscode.workspace.textDocuments = [firstDocument, secondDocument];
+
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('let sourceUri = "file:///second.md";');
+        expect(view.webview.html).toContain('view: "tree"');
     });
 
     it('shows a text-editor-only message when there is no active text editor', () => {

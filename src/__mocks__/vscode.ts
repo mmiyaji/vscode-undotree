@@ -30,8 +30,15 @@ const vscode = {
     },
     window: {
         activeTextEditor: undefined as unknown,
+        visibleTextEditors: [] as unknown[],
+        tabGroups: {
+            activeTabGroup: {
+                activeTab: undefined as unknown,
+            },
+        },
     },
     workspace: {
+        textDocuments: [] as unknown[],
         getConfiguration: jest.fn(() => ({
             get: jest.fn(),
         })),

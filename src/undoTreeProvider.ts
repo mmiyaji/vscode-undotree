@@ -23,19 +23,68 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private mode: 'navigate' | 'diff' = 'navigate';
     private lastEditor?: vscode.TextEditor;
     private lastEditorUri?: string;
+    private lastDocumentUri?: string;
     private loadingRequest?: { uri: string; token: number };
     private loadingToken = 0;
     private webviewInitialized = false;
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
-        const nextUri = editor?.document.uri.toString();
-        if (this.mode === 'diff' && this.lastEditorUri && nextUri !== this.lastEditorUri) {
+        const nextContextEditor = editor && this.isSidebarContextDocument(editor.document) ? editor : undefined;
+        const nextContextUri = nextContextEditor?.document.uri.toString();
+        if (this.mode === 'diff' && this.lastEditorUri && nextContextUri && nextContextUri !== this.lastEditorUri) {
             this.mode = 'navigate';
         }
-        if (editor) {
-            this.lastEditor = editor;
+        if (nextContextEditor) {
+            this.rememberDocument(nextContextEditor.document);
+            this.lastEditor = nextContextEditor;
+            this.lastEditorUri = nextContextUri;
         }
-        this.lastEditorUri = nextUri;
+    }
+
+    rememberDocument(document: vscode.TextDocument | undefined) {
+        if (document && this.isSidebarContextDocument(document)) {
+            this.lastDocumentUri = document.uri.toString();
+        }
+    }
+
+    captureWindowContext() {
+        const active = vscode.window.activeTextEditor;
+        if (active && this.isSidebarContextDocument(active.document)) {
+            this.setActiveEditor(active);
+            return;
+        }
+        const activeTabUri = this.getActiveTabUri();
+        if (activeTabUri) {
+            const visibleForActiveTab = (vscode.window.visibleTextEditors ?? []).find(
+                (editor) =>
+                    this.isSidebarContextDocument(editor.document) &&
+                    editor.document.uri.toString() === activeTabUri
+            );
+            if (visibleForActiveTab) {
+                this.setActiveEditor(visibleForActiveTab);
+                return;
+            }
+            const tabDocument = (vscode.workspace.textDocuments ?? []).find(
+                (document) =>
+                    this.isSidebarContextDocument(document) &&
+                    document.uri.toString() === activeTabUri
+            );
+            if (tabDocument) {
+                this.rememberDocument(tabDocument);
+                return;
+            }
+        }
+        const visible = vscode.window.visibleTextEditors?.find((editor) => this.isSidebarContextDocument(editor.document));
+        if (visible) {
+            this.setActiveEditor(visible);
+            return;
+        }
+        const lastTrackedDocument = [...(vscode.workspace.textDocuments ?? [])]
+            .reverse()
+            .find((document) => this.isSidebarContextDocument(document));
+        if (lastTrackedDocument) {
+            this.rememberDocument(lastTrackedDocument);
+        }
     }
 
     showCheckpointLoading() {
@@ -74,6 +123,13 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         this.view = webviewView;
         this.webviewInitialized = false;
         webviewView.webview.options = { enableScripts: true };
+        webviewView.onDidChangeVisibility(() => {
+            if (!webviewView.visible) {
+                return;
+            }
+            this.captureWindowContext();
+            this.render();
+        });
         this.render();
 
         webviewView.webview.onDidReceiveMessage(async (message) => {
@@ -175,16 +231,16 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         if (!this.view) {
             return;
         }
-        const editor = vscode.window.activeTextEditor;
-        const isLoadingCurrentEditor = !!editor &&
-            this.loadingRequest?.uri === editor.document.uri.toString();
+        const document = this.getContextDocument();
+        const isLoadingCurrentEditor = !!document &&
+            this.loadingRequest?.uri === document.uri.toString();
         const timeFormat = this.getTimeFormat();
         const timeFormatCustom = this.getTimeFormatCustom();
         const nodeSizeMetric = this.getNodeSizeMetric();
         const nodeSizeMetricBase = this.getNodeSizeMetricBase();
         const showStorageKind = this.getShowStorageKind();
         const state = this.getRenderState(
-            editor,
+            document,
             isLoadingCurrentEditor,
             timeFormat,
             timeFormatCustom,
@@ -219,7 +275,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     }
 
     private getRenderState(
-        editor: vscode.TextEditor | undefined,
+        document: vscode.TextDocument | undefined,
         isLoadingCurrentEditor: boolean,
         timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
@@ -243,7 +299,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 sourceUri: '',
             };
         }
-        if (!editor) {
+        if (!document) {
             return {
                 view: 'empty' as const,
                 nodes: null,
@@ -259,8 +315,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 sourceUri: '',
             };
         }
-        if (!this.isTrackedDocument(editor.document)) {
-            const fileName = editor.document.isUntitled ? '' : editor.document.fileName.replace(/.*[\\/]/, '');
+        if (!this.isTrackedDocument(document)) {
+            const fileName = document.isUntitled ? '' : document.fileName.replace(/.*[\\/]/, '');
             const ext = fileName.match(/\.[^.]+$/)?.[0] ?? '';
             return {
                 view: 'notTracked' as const,
@@ -274,10 +330,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 nodeSizeMetricBase,
                 showStorageKind,
                 notTrackedExt: ext,
-                sourceUri: editor.document.uri.toString(),
+                sourceUri: document.uri.toString(),
             };
         }
-        const tree = this.manager.getTree(editor.document.uri, editor.document.getText());
+        const tree = this.manager.getTree(document.uri, document.getText());
         const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
             ...node,
             formattedTime: this.formatTimestamp(node.timestamp, timeFormat, timeFormatCustom),
@@ -295,19 +351,105 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             nodeSizeMetricBase,
             showStorageKind,
             notTrackedExt: '',
-            sourceUri: editor.document.uri.toString(),
+            sourceUri: document.uri.toString(),
         };
+    }
+
+    private getContextDocument(): vscode.TextDocument | undefined {
+        const active = vscode.window.activeTextEditor;
+        if (active && this.isSidebarContextDocument(active.document)) {
+            return active.document;
+        }
+        const activeTabUri = this.getActiveTabUri();
+        if (activeTabUri) {
+            const tabDoc = vscode.workspace.textDocuments.find((document) => document.uri.toString() === activeTabUri);
+            if (tabDoc && this.isSidebarContextDocument(tabDoc)) {
+                return tabDoc;
+            }
+        }
+        if (this.lastDocumentUri) {
+            const rememberedDoc = vscode.workspace.textDocuments.find(
+                (document) =>
+                    this.isSidebarContextDocument(document) &&
+                    document.uri.toString() === this.lastDocumentUri
+            );
+            if (rememberedDoc) {
+                return rememberedDoc;
+            }
+        }
+        const latestOpenDocument = [...(vscode.workspace.textDocuments ?? [])]
+            .reverse()
+            .find((document) => this.isSidebarContextDocument(document));
+        if (latestOpenDocument) {
+            return latestOpenDocument;
+        }
+        const visibleEditors = vscode.window.visibleTextEditors ?? [];
+        if (this.lastEditorUri) {
+            const matchingVisible = visibleEditors.find(
+                (editor) =>
+                    this.isSidebarContextDocument(editor.document) &&
+                    editor.document.uri.toString() === this.lastEditorUri
+            );
+            if (matchingVisible) {
+                return matchingVisible.document;
+            }
+        }
+        const visible = visibleEditors.find((editor) => this.isSidebarContextDocument(editor.document));
+        if (visible) {
+            return visible.document;
+        }
+        if (this.lastEditor && this.isSidebarContextDocument(this.lastEditor.document)) {
+            return this.lastEditor.document;
+        }
+        return active?.document;
     }
 
     private getContextEditor(): vscode.TextEditor | undefined {
         const active = vscode.window.activeTextEditor;
-        if (active && this.isTrackedDocument(active.document)) {
+        if (active && this.isSidebarContextDocument(active.document)) {
             return active;
         }
-        if (this.lastEditor && this.isTrackedDocument(this.lastEditor.document)) {
+        const activeTabUri = this.getActiveTabUri();
+        if (activeTabUri) {
+            const matchingVisibleFromTab = (vscode.window.visibleTextEditors ?? []).find(
+                (editor) =>
+                    this.isSidebarContextDocument(editor.document) &&
+                    editor.document.uri.toString() === activeTabUri
+            );
+            if (matchingVisibleFromTab) {
+                return matchingVisibleFromTab;
+            }
+        }
+        const visibleEditors = vscode.window.visibleTextEditors ?? [];
+        if (this.lastEditorUri) {
+            const matchingVisible = visibleEditors.find(
+                (editor) =>
+                    this.isSidebarContextDocument(editor.document) &&
+                    editor.document.uri.toString() === this.lastEditorUri
+            );
+            if (matchingVisible) {
+                return matchingVisible;
+            }
+        }
+        const visible = visibleEditors.find((editor) => this.isSidebarContextDocument(editor.document));
+        if (visible) {
+            return visible;
+        }
+        if (this.lastEditor && this.isSidebarContextDocument(this.lastEditor.document)) {
             return this.lastEditor;
         }
         return active;
+    }
+
+    private getActiveTabUri(): string | undefined {
+        const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+        const input = (activeTab as { input?: { uri?: vscode.Uri } } | undefined)?.input;
+        return input?.uri?.toString();
+    }
+
+    private isSidebarContextDocument(document: vscode.TextDocument): boolean {
+        const scheme = document.uri.scheme ?? document.uri.toString().split(':', 1)[0];
+        return scheme === 'file' || document.isUntitled;
     }
 
     private getTimeFormat(): 'none' | 'time' | 'dateTime' | 'relative' | 'custom' {
@@ -497,6 +639,8 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .btn-mode { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .btn-mode:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .btn-mode.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; width: 26px; height: 24px; padding: 0; }
+  .icon-button .icon-glyph { font-size: 12px; line-height: 1; pointer-events: none; }
   .btn-settings { background: transparent; color: var(--vscode-foreground); opacity: 0.6; padding: 3px 5px; }
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
@@ -562,9 +706,9 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 <div class="actions">
   <button id="btn-undo">${tr('Undo')}</button>
   <button id="btn-redo">${tr('Redo')}</button>
-  <button class="btn-pause" id="btn-pause" title="${paused ? tr('Resume tracking') : tr('Pause tracking')}">${paused ? tr('Resume') : tr('Pause')}</button>
-  <button class="btn-mode${mode === 'diff' ? ' active' : ''}" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${mode === 'navigate' ? tr('Diff') : tr('Nav')}</button>
-  <button class="btn-settings" id="btn-settings" title="${tr('Open Undo Tree menu')}">&#9881;</button>
+  <button class="btn-pause icon-button" id="btn-pause" title="${paused ? tr('Resume tracking') : tr('Pause tracking')}" aria-label="${paused ? tr('Resume tracking') : tr('Pause tracking')}">${paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>'}</button>
+  <button class="btn-mode icon-button${mode === 'diff' ? ' active' : ''}" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}" aria-label="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${mode === 'navigate' ? '<span class="icon-glyph">&#8644;</span>' : '<span class="icon-glyph">&#9776;</span>'}</button>
+  <button class="btn-settings icon-button" id="btn-settings" title="${tr('Open Undo Tree menu')}" aria-label="${tr('Open Undo Tree menu')}">&#9881;</button>
 </div>
 ${paused ? `<div class="paused-badge">${tr('Tracking paused - history is frozen')}</div>` : ''}
 <div id="diff-tools" class="diff-tools${mode === 'diff' ? ' visible' : ''}">
@@ -1270,11 +1414,18 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       }
     }
 
-    document.querySelector('.btn-pause').textContent = state.paused ? ${JSON.stringify(tr('Resume'))} : ${JSON.stringify(tr('Pause'))};
-    document.querySelector('.btn-pause').title = state.paused ? ${JSON.stringify(tr('Resume tracking'))} : ${JSON.stringify(tr('Pause tracking'))};
-    document.querySelector('.btn-mode').textContent = mode === 'navigate' ? ${JSON.stringify(tr('Diff'))} : ${JSON.stringify(tr('Nav'))};
-    document.querySelector('.btn-mode').title = mode === 'navigate' ? ${JSON.stringify(tr('Switch to Diff mode'))} : ${JSON.stringify(tr('Switch to Navigate mode'))};
-    document.querySelector('.btn-mode').classList.toggle('active', mode === 'diff');
+    const pauseButton = document.querySelector('.btn-pause');
+    const pauseTitle = state.paused ? ${JSON.stringify(tr('Resume tracking'))} : ${JSON.stringify(tr('Pause tracking'))};
+    pauseButton.innerHTML = state.paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>';
+    pauseButton.title = pauseTitle;
+    pauseButton.setAttribute('aria-label', pauseTitle);
+
+    const modeButton = document.querySelector('.btn-mode');
+    const modeTitle = mode === 'navigate' ? ${JSON.stringify(tr('Switch to Diff mode'))} : ${JSON.stringify(tr('Switch to Navigate mode'))};
+    modeButton.innerHTML = mode === 'navigate' ? '<span class="icon-glyph">&#8644;</span>' : '<span class="icon-glyph">&#9776;</span>';
+    modeButton.title = modeTitle;
+    modeButton.setAttribute('aria-label', modeTitle);
+    modeButton.classList.toggle('active', mode === 'diff');
 
     let pausedBadge = document.querySelector('.paused-badge');
     if (state.paused) {

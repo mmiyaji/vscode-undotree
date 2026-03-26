@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.3
+
+### New features
+
+- Added a Playwright-based VS Code UI smoke test to verify Undo Tree context switching when the view is collapsed and reopened.
+
+### Improvements
+
+- Improved sidebar context resolution when the `UNDO TREE` view is collapsed, reopened, or focused after switching files.
+- Switched pause/resume and diff/navigation toolbar actions to icon buttons so narrow sidebar widths do not break the layout.
+
+### Fixes
+
+- Fixed stale tree rendering when reopening the `UNDO TREE` view after switching to another file.
+- Fixed context refresh timing so tracked documents opened while the view is collapsed are reflected when the view becomes visible again.
+
 ## 0.3.2
 
 ### New features
