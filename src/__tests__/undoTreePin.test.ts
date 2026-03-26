@@ -109,8 +109,8 @@ describe('UndoTree pinning', () => {
         );
 
         expect(html).toContain('const pinnedNodes = nodes.filter((node) => node.id !== 0 && node.pinned);');
-        expect(html).toContain('.pin-btn {');
+        expect(html).toContain('.pinned-link .pin-mark {');
         expect(html).toContain("class=\"pinned-title\"");
-        expect(html).toContain('&#128204;');
+        expect(html).toContain('M8 1.8 9.9 5.7l4.3.6-3.1 3 0.7 4.2L8 11.5l-3.8 2 0.7-4.2-3.1-3 4.3-.6L8 1.8Z');
     });
 });
