@@ -287,7 +287,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
         showStorageKind: boolean,
-        colorTheme: 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red'
+        colorTheme: 'auto' | 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red'
     ) {
         if (isLoadingCurrentEditor) {
             return {
@@ -499,9 +499,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return 'parent';
     }
 
-    private getColorTheme(): 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' {
+    private getColorTheme(): 'auto' | 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('colorTheme');
         if (
+            value === 'auto' ||
             value === 'neutral' ||
             value === 'green' ||
             value === 'amber' ||
@@ -625,7 +626,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
         showStorageKind: boolean,
-        colorTheme: 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' = 'blue',
+        colorTheme: 'auto' | 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' = 'blue',
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
         initialNotTrackedExt = '',
         initialSourceUri = ''
@@ -646,6 +647,32 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
     --undotree-hover: color-mix(in srgb, var(--vscode-list-hoverBackground) 74%, #3794ff 10%);
     --undotree-current: rgba(9, 71, 113, 0.84);
     --undotree-latest: #4fc1ff;
+    --undotree-label-opacity: 0.96;
+    --undotree-note-opacity: 0.9;
+    --undotree-pinned-opacity: 0.8;
+  }
+  body[data-color-theme="auto"] {
+    --undotree-accent: var(--vscode-button-background, var(--vscode-focusBorder, #3794ff));
+    --undotree-accent-strong: var(--vscode-button-hoverBackground, var(--vscode-focusBorder, #4ca0ff));
+    --undotree-accent-soft: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 16%, transparent);
+    --undotree-hover: var(--vscode-list-hoverBackground);
+    --undotree-current: var(--vscode-list-activeSelectionBackground);
+    --undotree-latest: var(--vscode-textLink-foreground, var(--vscode-charts-blue, #3794ff));
+    --undotree-label-opacity: 0.96;
+    --undotree-note-opacity: 0.9;
+    --undotree-pinned-opacity: 0.8;
+  }
+  body.vscode-light[data-color-theme="auto"],
+  body.vscode-high-contrast-light[data-color-theme="auto"] {
+    --undotree-accent: var(--vscode-button-background, var(--vscode-focusBorder, #0b66d0));
+    --undotree-accent-strong: var(--vscode-button-hoverBackground, var(--vscode-focusBorder, #0057b8));
+    --undotree-accent-soft: color-mix(in srgb, var(--vscode-focusBorder, #0b66d0) 12%, transparent);
+    --undotree-hover: var(--vscode-list-hoverBackground);
+    --undotree-current: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 88%, white 12%);
+    --undotree-latest: var(--vscode-textLink-foreground, var(--vscode-charts-blue, #0057b8));
+    --undotree-label-opacity: 1;
+    --undotree-note-opacity: 0.96;
+    --undotree-pinned-opacity: 0.92;
   }
   body[data-color-theme="neutral"] {
     --undotree-accent: rgba(212, 212, 212, 0.55);
@@ -720,7 +747,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg.graph-segment { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
-  .label { opacity: 0.96; }
+  .label { opacity: var(--undotree-label-opacity); }
   .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-left: 6px; position: sticky; right: 4px; background: var(--vscode-sideBar-background); }
   .metrics { display: inline-grid; grid-template-columns: var(--diff-col-width, auto) var(--total-col-width, auto) var(--time-col-width, auto); align-items: center; justify-content: end; justify-items: end; column-gap: 6px; flex: 0 0 auto; }
   .node.current .right-area { background: var(--undotree-current); }
@@ -761,7 +788,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .tree-header .metrics { flex: 0 0 auto; }
   .tree-header .size-diff, .tree-header .size-total, .tree-header .time { opacity: 0.7; }
   .time { text-align: right; white-space: nowrap; justify-self: end; }
-  .note { font-weight: 600; opacity: 0.9; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
+  .note { font-weight: 600; opacity: var(--undotree-note-opacity); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
   .note-edit { opacity: 0; font-size: 10px; cursor: pointer; flex-shrink: 0; padding: 0 2px; }
   .node:hover .note-edit { opacity: 0.45; }
   .node:hover .note-edit:hover { opacity: 1; }
@@ -771,7 +798,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .pinned-link:hover { background: var(--vscode-list-hoverBackground); }
   .pinned-link .pin-mark { opacity: 0.85; width: 12px; height: 12px; display: inline-flex; align-items: center; justify-content: center; color: var(--vscode-foreground); flex: 0 0 auto; cursor: pointer; }
   .pinned-link .pin-mark svg { width: 10px; height: 10px; display: block; }
-  .pinned-link .pinned-label { opacity: 0.8; }
+  .pinned-link .pinned-label { opacity: var(--undotree-pinned-opacity); }
   .pinned-link .pin-mark:hover { opacity: 1; }
   .msg { opacity: 0.7; margin-bottom: 8px; white-space: normal; overflow-wrap: anywhere; }
   .hint { opacity: 0.45; font-size: 11px; margin-bottom: 12px; white-space: normal; overflow-wrap: anywhere; }

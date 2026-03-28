@@ -14,7 +14,7 @@ The extension records history on saves and periodic autosave checkpoints. It doe
 
 ## Color Themes
 
-`undotree.colorTheme` lets you switch the sidebar accent theme. The default is `blue`, and additional built-in themes are `neutral`, `green`, `amber`, `teal`, `violet`, `rose`, and `red`.
+`undotree.colorTheme` lets you switch the sidebar accent theme. The default is `blue`. `auto` follows the active VS Code theme and improves text contrast on light themes. Additional built-in themes are `neutral`, `green`, `amber`, `teal`, `violet`, `rose`, and `red`.
 
 ![Undo Tree color themes](./media/undotree-color-themes.png)
 
@@ -253,6 +253,7 @@ Open settings from the actions menu, or search for `@ext:mmiyaji.vscode-undotree
 | `undotree.showStorageKind` | `false` | Show `F` / `D` badges |
 | `undotree.nodeSizeMetric` | `"lines"` | `none`, `lines`, or `bytes` |
 | `undotree.nodeSizeMetricBase` | `"parent"` | Compare size against `current`, `initial`, or `parent` |
+| `undotree.colorTheme` | `"blue"` | Sidebar accent theme: `blue` / `auto` / `neutral` / `green` / `amber` / `teal` / `violet` / `rose` / `red` |
 
 ### Performance
 

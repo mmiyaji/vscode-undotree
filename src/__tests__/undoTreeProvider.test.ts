@@ -175,6 +175,19 @@ describe('UndoTreeProvider initialization', () => {
         )).toBe('5m ago');
     });
 
+    it('renders auto color theme styles for theme-aware accents', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false, 'auto');
+
+        expect(html).toContain('data-color-theme="auto"');
+        expect(html).toContain('body[data-color-theme="auto"] {');
+        expect(html).toContain('--undotree-accent: var(--vscode-button-background');
+        expect(html).toContain('body.vscode-light[data-color-theme="auto"]');
+        expect(html).toContain('--undotree-label-opacity: 1;');
+    });
+
     it('supports custom timestamp formatting', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);

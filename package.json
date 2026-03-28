@@ -187,6 +187,7 @@
           "undotree.colorTheme": {
             "type": "string",
             "enum": [
+              "auto",
               "blue",
               "neutral",
               "green",
