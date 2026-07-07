@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { format as formatDate } from 'date-fns';
 import { UndoTreeManager } from './undoTreeManager';
 import { t as tr } from './runtimeL10n';
+import { matchesGlob } from './glob';
 
 type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<number, infer T>
     ? T & { formattedTime: string; isEmpty: boolean }
@@ -136,7 +137,6 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (message) => {
             try {
-                const editor = vscode.window.activeTextEditor;
                 switch (message.command) {
                     case 'undo':
                         await this.manager.undo();
@@ -144,14 +144,17 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                     case 'redo':
                         await this.manager.redo();
                         break;
-                    case 'jumpToNode':
-                        if (editor && typeof message.nodeId === 'number') {
-                            await this.manager.jumpToNode(message.nodeId, editor);
+                    case 'jumpToNode': {
+                        const sourceUri = typeof message.sourceUri === 'string' ? message.sourceUri : '';
+                        const contextEditor = sourceUri ? this.getContextEditor(sourceUri) : undefined;
+                        if (contextEditor && typeof message.nodeId === 'number') {
+                            await this.manager.jumpToNode(message.nodeId, contextEditor);
                             if (message.focusEditor) {
                                 await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
                             }
                         }
                         break;
+                    }
                     case 'togglePause':
                         await vscode.commands.executeCommand('undotree.togglePause');
                         break;
@@ -190,7 +193,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                         }
                         break;
                     case 'editNote': {
-                        const contextEditor = this.getContextEditor();
+                        const sourceUri = typeof message.sourceUri === 'string' ? message.sourceUri : undefined;
+                        const contextEditor = this.getContextEditor(sourceUri);
                         if (typeof message.nodeId !== 'number' || !contextEditor) {
                             break;
                         }
@@ -208,7 +212,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                         break;
                     }
                     case 'togglePin': {
-                        const contextEditor = this.getContextEditor();
+                        const sourceUri = typeof message.sourceUri === 'string' ? message.sourceUri : undefined;
+                        const contextEditor = this.getContextEditor(sourceUri);
                         if (typeof message.nodeId !== 'number' || !contextEditor) {
                             break;
                         }
@@ -267,7 +272,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 state.colorTheme,
                 state.view,
                 state.notTrackedExt,
-                state.sourceUri
+                state.sourceUri,
+                state.rootId
             );
             this.webviewInitialized = true;
             return;
@@ -304,6 +310,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 colorTheme,
                 notTrackedExt: '',
                 sourceUri: '',
+                rootId: 0,
             };
         }
         if (!document) {
@@ -321,6 +328,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 colorTheme,
                 notTrackedExt: '',
                 sourceUri: '',
+                rootId: 0,
             };
         }
         if (!this.isTrackedDocument(document)) {
@@ -340,6 +348,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 colorTheme,
                 notTrackedExt: ext,
                 sourceUri: document.uri.toString(),
+                rootId: 0,
             };
         }
         const tree = this.manager.getTree(document.uri, document.getText());
@@ -362,6 +371,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             colorTheme,
             notTrackedExt: '',
             sourceUri: document.uri.toString(),
+            rootId: tree.rootId,
         };
     }
 
@@ -413,8 +423,25 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return active?.document;
     }
 
-    private getContextEditor(): vscode.TextEditor | undefined {
+    private isContextEditor(editor: vscode.TextEditor | undefined, expectedUri?: string): editor is vscode.TextEditor {
+        return !!editor
+            && this.isSidebarContextDocument(editor.document)
+            && (!expectedUri || editor.document.uri.toString() === expectedUri);
+    }
+
+    private getContextEditor(expectedUri?: string): vscode.TextEditor | undefined {
         const active = vscode.window.activeTextEditor;
+        const visibleEditors = vscode.window.visibleTextEditors ?? [];
+        if (expectedUri) {
+            const exact = [active, this.lastEditor, ...visibleEditors].find((editor) =>
+                this.isContextEditor(editor, expectedUri)
+            );
+            if (exact) {
+                this.rememberDocument(exact.document);
+                return exact;
+            }
+            return undefined;
+        }
         if (active && this.isSidebarContextDocument(active.document)) {
             this.rememberDocument(active.document);
             return active;
@@ -431,7 +458,6 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 return matchingVisibleFromTab;
             }
         }
-        const visibleEditors = vscode.window.visibleTextEditors ?? [];
         if (this.contextUri) {
             const matchingVisible = visibleEditors.find(
                 (editor) =>
@@ -526,14 +552,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return Array.isArray(value) ? value : [];
     }
 
-    private matchesGlob(filename: string, pattern: string): boolean {
-        const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-        return new RegExp(`^${escaped}$`, 'i').test(filename);
-    }
-
     private isTrackedDocument(document: vscode.TextDocument): boolean {
         const fileName = document.fileName.replace(/.*[\\/]/, '');
-        if (this.getExcludePatterns().some((pattern) => this.matchesGlob(fileName, pattern))) {
+        if (this.getExcludePatterns().some((pattern) => matchesGlob(fileName, pattern))) {
             return false;
         }
         const ext = fileName.match(/\.[^.]+$/)?.[0]?.toLowerCase() ?? '';
@@ -584,6 +605,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     private buildNotTrackedHtml(ext: string, _fileName: string): string {
         const nonce = getNonce();
+        const cspSource = this.getCspSource();
         const label = ext
             ? tr('Undo Tree: {0} is not tracked', ext)
             : tr('Undo Tree: this file is not tracked');
@@ -595,7 +617,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             : tr('Enable tracking for this file');
         const settingsLabel = tr('Open Settings');
         return `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.view?.webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <style nonce="${nonce}">
 body{font-family:var(--vscode-font-family);font-size:12px;padding:16px;color:var(--vscode-foreground);}
 .msg{opacity:0.7;margin-bottom:8px;}
@@ -616,6 +638,10 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 </body></html>`;
     }
 
+    private getCspSource(): string {
+        return this.view?.webview.cspSource ?? 'vscode-resource:';
+    }
+
     private buildHtml(
         nodes: DisplayNode[] | null,
         currentId: number,
@@ -629,15 +655,17 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         colorTheme: 'auto' | 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' = 'blue',
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
         initialNotTrackedExt = '',
-        initialSourceUri = ''
+        initialSourceUri = '',
+        initialRootId = 0
     ): string {
         const nonce = getNonce();
+        const cspSource = this.getCspSource();
         const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
         return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.view?.webview.cspSource} data:; style-src ${this.view?.webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <style nonce="${nonce}">
   body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
   :root {
@@ -881,6 +909,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   let showStorageKind = ${JSON.stringify(showStorageKind)};
   let colorTheme = ${JSON.stringify(colorTheme)};
   let sourceUri = ${JSON.stringify(initialSourceUri)};
+  let rootId = ${JSON.stringify(initialRootId)};
   let diffCompareMode = 'current';
   let diffBaseNodeId = null;
   const i18n = {
@@ -1180,7 +1209,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         send('diffWithNode', { nodeId, sourceUri });
       }
     }
-    else { send('jumpToNode', { nodeId, focusEditor: true }); }
+    else { send('jumpToNode', { nodeId, sourceUri, focusEditor: true }); }
   }
 
   function moveSibling(dir) {
@@ -1284,26 +1313,27 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       const action = target.getAttribute('data-action');
       hideContextMenu();
       if (action === 'jump') {
-        send('jumpToNode', { nodeId });
+        send('jumpToNode', { nodeId, sourceUri });
       } else if (action === 'diff-current' && nodeId !== currentId && sourceUri) {
         send('diffWithNode', { nodeId, sourceUri });
       } else if (action === 'set-base') {
         setDiffBaseNode(nodeId);
       } else if (action === 'toggle-pin') {
-        send('togglePin', { nodeId });
+        send('togglePin', { nodeId, sourceUri });
       } else if (action === 'edit-note') {
-        send('editNote', { nodeId });
+        send('editNote', { nodeId, sourceUri });
       } else if (action === 'display-settings') {
         send('openDisplaySettings');
       }
     });
   }
 
-  function buildTree(nodes, currentId) {
+  function buildTree(nodes, currentId, nextRootId) {
     if (!nodes) {
       document.getElementById('tree').innerHTML = '<div class="empty">' + i18n.textEditorsOnly + '</div>';
       return;
     }
+    rootId = typeof nextRootId === 'number' ? nextRootId : 0;
 
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
@@ -1354,7 +1384,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
             const idx = nodeIds.indexOf(node.id);
             if (idx >= 0) { setFocused(idx); }
             if (mode !== 'diff') {
-              send('jumpToNode', { nodeId: node.id });
+              send('jumpToNode', { nodeId: node.id, sourceUri });
             }
           });
           row.addEventListener('contextmenu', (event) => {
@@ -1367,7 +1397,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
           if (pinToggle) {
             pinToggle.addEventListener('click', (event) => {
               event.stopPropagation();
-              send('togglePin', { nodeId: node.id });
+              send('togglePin', { nodeId: node.id, sourceUri });
             });
           }
           wrap.appendChild(row);
@@ -1442,14 +1472,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       if (noteAction) {
         noteAction.addEventListener('click', (event) => {
           event.stopPropagation();
-          send('editNote', { nodeId: node.id });
+          send('editNote', { nodeId: node.id, sourceUri });
         });
       }
       const noteText = div.querySelector('.note-text');
       if (noteText) {
         noteText.addEventListener('dblclick', (event) => {
           event.stopPropagation();
-          send('editNote', { nodeId: node.id });
+          send('editNote', { nodeId: node.id, sourceUri });
         });
       }
       div.addEventListener('click', () => {
@@ -1466,7 +1496,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
               send('diffWithNode', { nodeId: node.id, sourceUri });
             }
           } else {
-            send('jumpToNode', { nodeId: node.id });
+            send('jumpToNode', { nodeId: node.id, sourceUri });
           }
         }
       });
@@ -1490,7 +1520,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       });
     }
 
-        renderNode(0, [], false, 0);
+        renderNode(rootId, [], false, 0);
 
         const currentEl = container.querySelector('.node.current');
         if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
@@ -1533,6 +1563,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     showStorageKind = state.showStorageKind;
     colorTheme = state.colorTheme || 'blue';
     sourceUri = state.sourceUri || '';
+    rootId = typeof state.rootId === 'number' ? state.rootId : 0;
     document.body.setAttribute('data-color-theme', colorTheme);
 
     if (diffBaseNodeId !== null && !state.nodes?.some((node) => node.id === diffBaseNodeId)) {
@@ -1602,7 +1633,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       renderNotTracked(state.notTrackedExt || '');
       return;
     }
-    buildTree(state.nodes, state.currentId);
+    buildTree(state.nodes, state.currentId, rootId);
   }
 
   renderState({
@@ -1618,7 +1649,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     showStorageKind,
     colorTheme,
     notTrackedExt: ${JSON.stringify(initialNotTrackedExt)},
-    sourceUri
+    sourceUri,
+    rootId
   });
 </script>
 </body>

@@ -2,7 +2,7 @@
 
 import * as vscode from 'vscode';
 import { promises as fs } from 'fs';
-import { readFileSync    } from 'fs';
+import { readFileSync } from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { promisify } from 'util';
@@ -13,6 +13,8 @@ const gunzip = promisify(gunzipCb);
 import { UndoTreeProvider } from './undoTreeProvider';
 import { CompactPreviewItem, CompactPreviewResult, SerializedUndoTree, UndoTreeManager, mergeSerializedTrees } from './undoTreeManager';
 import { initializeRuntimeL10n, t as tr } from './runtimeL10n';
+import { isValidContentHash } from './contentHash';
+import { matchesGlob } from './glob';
 
 // バーチャルドキュメント（差分表示用）
 export class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
@@ -88,10 +90,35 @@ let multiWindowLockWriteWarningShown = false;
 const persistedUris = new Set<string>();
 const pendingRenameOldUris = new Set<string>();
 const persistRootMismatchWarnedUris = new Set<string>();
+let autoPersistFailureCount = 0;
+let autoPersistWarningShown = false;
 let deactivateHandler: (() => Promise<void>) | undefined;
 
 function getSettingSearchQuery(settingId?: string): string {
     return settingId ? `${EXTENSION_SETTINGS_QUERY} ${settingId}` : EXTENSION_SETTINGS_QUERY;
+}
+
+function getWebviewNonce(): string {
+    return crypto.randomBytes(16).toString('base64');
+}
+
+function buildWebviewCspMeta(nonce: string): string {
+    return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">`;
+}
+
+function buildWebviewMessageHtml(message: string): string {
+    const nonce = getWebviewNonce();
+    return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+${buildWebviewCspMeta(nonce)}
+<style nonce="${nonce}">
+body { font-family: var(--vscode-font-family); padding: 16px; color: var(--vscode-foreground); opacity: 0.7; }
+</style>
+</head>
+<body>${escHtml(message)}</body>
+</html>`;
 }
 
 type PersistedManifest = {
@@ -428,6 +455,7 @@ async function collectDiagnosticsSnapshot(context: vscode.ExtensionContext): Pro
 
 function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
     const t = vscode.l10n.t;
+    const nonce = getWebviewNonce();
     const manifestStateClass = snapshot.manifestStatus === 'invalid'
         ? 'danger'
         : snapshot.manifestStatus === 'backup'
@@ -459,7 +487,8 @@ function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <style>
+  ${buildWebviewCspMeta(nonce)}
+  <style nonce="${nonce}">
     body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
     h1, h2 { font-weight: 600; margin: 0 0 12px; }
     h1 { font-size: 16px; }
@@ -592,7 +621,7 @@ function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
     ${renderList(snapshot.validation.missingContentHashes, t('No missing content hashes detected.'))}
   </div>
 
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     document.querySelectorAll('[data-command]').forEach((button) => {
       button.addEventListener('click', () => {
@@ -613,6 +642,7 @@ function buildCompactPreviewHtml(
     activeTab: 'removable' | 'protected' | 'all'
 ): string {
     const t = vscode.l10n.t;
+    const nonce = getWebviewNonce();
     const localizeReason = (reason: string) => t(reason);
     const title = mode === 'compact' ? t('Compact Preview') : t('Hard Compact Preview');
     const summarizeReasons = (items: CompactPreviewResult['removable']) => Object.entries(
@@ -675,9 +705,9 @@ function buildCompactPreviewHtml(
               </div>
               <div class="row-actions">
                 <span class="reason ${effectiveStatus === 'remove' ? 'remove' : 'keep'}${isManual ? ' manual' : ''}">${statusLabel}</span>
-                <button class="mini secondary" onclick="send('overrideKeep', ${item.id})">${t('Keep')}</button>
-                <button class="mini" onclick="send('overrideRemove', ${item.id})" ${removeDisabled}>${t('Remove')}</button>
-                <button class="mini secondary" onclick="send('clearOverride', ${item.id})">${t('Auto')}</button>
+                <button class="mini secondary" data-command="overrideKeep" data-node-id="${item.id}">${t('Keep')}</button>
+                <button class="mini" data-command="overrideRemove" data-node-id="${item.id}" ${removeDisabled}>${t('Remove')}</button>
+                <button class="mini secondary" data-command="clearOverride" data-node-id="${item.id}">${t('Auto')}</button>
               </div>
             </div>`;
                 const nextPrefix = [...prefix, isLast ? '&nbsp;&nbsp;&nbsp;' : '│&nbsp; '];
@@ -700,7 +730,8 @@ function buildCompactPreviewHtml(
 <html>
 <head>
 <meta charset="UTF-8">
-<style>
+${buildWebviewCspMeta(nonce)}
+<style nonce="${nonce}">
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
   .header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
   .title { font-size: 16px; font-weight: 600; }
@@ -751,12 +782,12 @@ function buildCompactPreviewHtml(
     </div>
   </div>
   <div class="actions">
-    <button class="${mode === 'compact' ? 'active' : 'secondary'}" onclick="send('showCompact')">${t('Compact')}</button>
-    <button class="${mode === 'hard' ? 'active' : 'secondary'}" onclick="send('showHard')" ${hardActionDisabled}>${t('Hard Compact')}</button>
-    <button class="secondary" onclick="send('refresh')">${t('Refresh')}</button>
-    <button onclick="send('runCompact')">${t('Run Compact')}</button>
-    <button onclick="send('runHard')" ${hardActionDisabled}>${t('Run Hard Compact')}</button>
-    ${mode === 'hard' && hardDays <= 0 ? `<button class="secondary" onclick="send('openSettings')">${t('Open Settings')}</button>` : ''}
+    <button class="${mode === 'compact' ? 'active' : 'secondary'}" data-command="showCompact">${t('Compact')}</button>
+    <button class="${mode === 'hard' ? 'active' : 'secondary'}" data-command="showHard" ${hardActionDisabled}>${t('Hard Compact')}</button>
+    <button class="secondary" data-command="refresh">${t('Refresh')}</button>
+    <button data-command="runCompact">${t('Run Compact')}</button>
+    <button data-command="runHard" ${hardActionDisabled}>${t('Run Hard Compact')}</button>
+    ${mode === 'hard' && hardDays <= 0 ? `<button class="secondary" data-command="openSettings">${t('Open Settings')}</button>` : ''}
   </div>
   <div class="summary">
     <div class="card">
@@ -776,9 +807,9 @@ function buildCompactPreviewHtml(
     </div>
   </div>
   <div class="tabs">
-    <button id="tab-removable" class="${removableTabActive ? 'active' : 'secondary'}" onclick="showTab('removable')">${t('Removable')}</button>
-    <button id="tab-protected" class="${protectedTabActive ? 'active' : 'secondary'}" onclick="showTab('protected')">${t('Protected')}</button>
-    <button id="tab-all" class="${allTabActive ? 'active' : 'secondary'}" onclick="showTab('all')">${t('All')}</button>
+    <button id="tab-removable" class="${removableTabActive ? 'active' : 'secondary'}" data-tab="removable">${t('Removable')}</button>
+    <button id="tab-protected" class="${protectedTabActive ? 'active' : 'secondary'}" data-tab="protected">${t('Protected')}</button>
+    <button id="tab-all" class="${allTabActive ? 'active' : 'secondary'}" data-tab="all">${t('All')}</button>
   </div>
   <div id="panel-removable" class="tab-panel ${removableTabActive ? 'active' : ''}">
     <div class="section">
@@ -798,12 +829,18 @@ function buildCompactPreviewHtml(
       <div class="list">${allRows}</div>
     </div>
   </div>
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     function send(command, nodeId, tab) { vscode.postMessage({ command, nodeId, tab }); }
-    function showTab(tab) {
-      send('setTab', undefined, tab);
-    }
+    document.querySelectorAll('[data-command]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const nodeId = button.dataset.nodeId === undefined ? undefined : Number(button.dataset.nodeId);
+        send(button.dataset.command, Number.isFinite(nodeId) ? nodeId : undefined);
+      });
+    });
+    document.querySelectorAll('[data-tab]').forEach((button) => {
+      button.addEventListener('click', () => send('setTab', undefined, button.dataset.tab));
+    });
   </script>
 </body>
 </html>`;
@@ -817,7 +854,7 @@ function getPersistedContentHashes(
         tree.nodes
             .filter((node): node is typeof node & { storage: { kind: 'checkpoint'; contentHash: string } } =>
                 node.storage.kind === 'checkpoint')
-            .map((node) => node.storage.contentHash)
+            .map((node) => requireValidContentHash(node.storage.contentHash))
     );
     const totalFullBytes = tree.nodes.reduce((sum, node) => {
         if (node.storage.kind === 'full') {
@@ -832,7 +869,7 @@ function getPersistedContentHashes(
 
     tree.nodes
         .filter((node) => node.storage.kind === 'full' && node.storage.content !== '')
-        .forEach((node) => hashes.add(node.hash));
+        .forEach((node) => hashes.add(requireValidContentHash(node.hash)));
     return hashes;
 }
 
@@ -847,6 +884,13 @@ function findSerializedFullContentByHash(tree: SerializedUndoTree, hash: string)
         }
     }
     return undefined;
+}
+
+function requireValidContentHash(hash: string): string {
+    if (!isValidContentHash(hash)) {
+        throw new Error(`Invalid checkpoint content hash: ${hash}`);
+    }
+    return hash;
 }
 
 async function readPersistedContentHashesFromTreeFile(
@@ -865,7 +909,7 @@ async function readPersistedContentHashesFromTreeFile(
         nodes
             .filter((node): node is typeof node & { storage: { kind: 'checkpoint'; contentHash: string } } =>
                 node.storage.kind === 'checkpoint')
-            .map((node) => node.storage.contentHash)
+            .map((node) => requireValidContentHash(node.storage.contentHash))
     );
 }
 
@@ -1725,8 +1769,19 @@ function schedulePersistState(context: vscode.ExtensionContext) {
             .then((result) => {
                 syncPersistedUris(result.persistedUris);
                 manager?.clearDirty(dirtyUris);
+                autoPersistFailureCount = 0;
+                autoPersistWarningShown = false;
             })
-            .catch(() => {})
+            .catch((error) => {
+                autoPersistFailureCount++;
+                manager?.debugLog?.(`[persist] auto save failed for ${dirtyUris.size} dirty URI(s): ${String(error)}`);
+                if (autoPersistFailureCount >= 3 && !autoPersistWarningShown) {
+                    autoPersistWarningShown = true;
+                    void vscode.window.showWarningMessage(
+                        tr('Undo Tree: automatic history persistence has failed repeatedly. See Output for details.')
+                    );
+                }
+            })
             .finally(() => {
                 persistTimer = undefined;
             });
@@ -1769,11 +1824,9 @@ async function flushPersistedUri(context: vscode.ExtensionContext, uri: vscode.U
         syncPersistedUris(result.persistedUris);
         manager.clearDirty([uri.toString()]);
     }
-}
-
-function matchesGlob(filename: string, pattern: string): boolean {
-    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-    return new RegExp(`^${escaped}$`, 'i').test(filename);
+    if (manager.getDirtyUris().size > 0) {
+        schedulePersistState(context);
+    }
 }
 
 function isExcluded(document: vscode.TextDocument): boolean {
@@ -1955,7 +2008,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     manager.contentResolver = (hash) => {
-        const contentPath = path.join(treesDir, 'content', hash);
+        const contentPath = path.join(treesDir, 'content', requireValidContentHash(hash));
         try {
             return readCheckpointContentBuffer(contentPath).toString('utf8');
         } catch (error) {
@@ -1963,7 +2016,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     };
     manager.asyncContentResolver = async (hash) => {
-        const contentPath = path.join(treesDir, 'content', hash);
+        const contentPath = path.join(treesDir, 'content', requireValidContentHash(hash));
         try {
             const buf = await fs.readFile(contentPath);
             const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
@@ -2007,7 +2060,9 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
         if (!editor || !isTracked(editor.document)) {
-            compactPreviewPanel.webview.html = `<!DOCTYPE html><html><body style="font-family:var(--vscode-font-family);padding:16px;color:var(--vscode-foreground);opacity:0.7;">${tr('Undo Tree preview is only available for tracked text files.')}</body></html>`;
+            compactPreviewPanel.webview.html = buildWebviewMessageHtml(
+                tr('Undo Tree preview is only available for tracked text files.')
+            );
             return;
         }
         await ensureTreeLoaded(context, manager, editor.document).catch(() => {});
@@ -2801,4 +2856,3 @@ export const __test__ = {
     loadPersistedTreeFromDisk,
     readPersistedManifest,
 };
-

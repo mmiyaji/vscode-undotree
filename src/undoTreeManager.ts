@@ -2,6 +2,7 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import { isValidContentHash } from './contentHash';
 
 type Diff = {
     offset: number;
@@ -374,7 +375,7 @@ export class UndoTreeManager implements vscode.Disposable {
             clearInterval(this.autosaveTimer);
             this.autosaveTimer = undefined;
         }
-        // 0 = 無効
+        // 0 disables autosave.
         if (ms > 0) {
             this.autosaveTimer = setInterval(() => this.autosave(), this.autosaveIntervalMs);
         }
@@ -410,7 +411,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 tree.hashMap.delete(root.hash);
                 root.storage.content = initialContent;
                 root.hash = this.hashContent(initialContent);
-                tree.hashMap.set(root.hash, 0);
+                tree.hashMap.set(root.hash, root.id);
                 Object.assign(root, this.computeSizeMetrics(initialContent));
             }
         }
@@ -576,7 +577,7 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
 
-        // DAG収束: 既存ノードと同一ハッシュなら新ノードを作らずそこへ移動
+        // DAG convergence: reuse an existing node with identical content.
         const existingId = tree.hashMap.get(hash);
         if (existingId !== undefined && tree.nodes.has(existingId)) {
             tree.currentId = existingId;
@@ -595,11 +596,17 @@ export class UndoTreeManager implements vscode.Disposable {
             tree.hashMap.delete(currentNode.hash);
             currentNode.storage = { kind: 'full', content };
             currentNode.hash = hash;
-            tree.hashMap.set(hash, 0);
+            tree.hashMap.set(hash, currentNode.id);
             Object.assign(currentNode, this.computeSizeMetrics(content));
+            tree.currentId = currentNode.id;
+            this.diffBuffer.delete(key);
+            this.jumpSuppressedHashes.delete(key);
+            this.dirtyTrees.add(key);
+            this.onRefresh?.();
+            return;
         }
 
-        const storage: UndoNodeStorage = (isCurrentEmptyRoot || this.shouldStoreFull(diffs, content.length))
+        const storage: UndoNodeStorage = this.shouldStoreFull(diffs, content.length)
             ? { kind: 'full', content }
             : { kind: 'delta', diffs };
 
@@ -737,7 +744,7 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private hashContent(content: string): string {
-        return crypto.createHash('sha1').update(content).digest('hex').slice(0, 8);
+        return crypto.createHash('sha1').update(content).digest('hex');
     }
 
     private computeSizeMetrics(content: string): { lineCount: number; byteCount: number } {
@@ -818,16 +825,25 @@ export class UndoTreeManager implements vscode.Disposable {
 
     compact(tree: UndoTree): number {
         let removed = 0;
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const [, node] of tree.nodes) {
-                if (this.isCompressible(tree, node)) {
-                    this.removeNode(tree, node);
-                    removed++;
-                    changed = true;
-                    break;
+        while (true) {
+            const candidates = Array.from(tree.nodes.values())
+                .filter((node) => this.isCompressible(tree, node))
+                .map((node) => node.id);
+            if (candidates.length === 0) {
+                break;
+            }
+            let passRemoved = 0;
+            for (const nodeId of candidates) {
+                const node = tree.nodes.get(nodeId);
+                if (!node || !this.isCompressible(tree, node)) {
+                    continue;
                 }
+                this.removeNode(tree, node);
+                removed++;
+                passRemoved++;
+            }
+            if (passRemoved === 0) {
+                break;
             }
         }
         return removed;
@@ -835,25 +851,44 @@ export class UndoTreeManager implements vscode.Disposable {
 
     compactWithOverrides(tree: UndoTree, overrides: Map<number, 'remove' | 'keep'>): CompactApplyResult {
         let removed = 0;
-        let changed = true;
-        while (changed) {
-            changed = false;
-            for (const [, node] of tree.nodes) {
+        while (true) {
+            const candidates = Array.from(tree.nodes.values())
+                .filter((node) => {
+                    if (overrides.get(node.id) === 'keep') {
+                        return false;
+                    }
+                    if (overrides.get(node.id) === 'remove') {
+                        return this.canManuallyRemove(tree, node);
+                    }
+                    return this.isCompressible(tree, node);
+                })
+                .map((node) => node.id);
+            if (candidates.length === 0) {
+                break;
+            }
+            let passRemoved = 0;
+            for (const nodeId of candidates) {
+                const node = tree.nodes.get(nodeId);
+                if (!node) {
+                    continue;
+                }
                 if (overrides.get(node.id) === 'keep') {
                     continue;
                 }
                 if (overrides.get(node.id) === 'remove' && this.canManuallyRemove(tree, node)) {
                     this.removeNode(tree, node);
                     removed++;
-                    changed = true;
-                    break;
+                    passRemoved++;
+                    continue;
                 }
                 if (overrides.get(node.id) !== 'remove' && this.isCompressible(tree, node)) {
                     this.removeNode(tree, node);
                     removed++;
-                    changed = true;
-                    break;
+                    passRemoved++;
                 }
+            }
+            if (passRemoved === 0) {
+                break;
             }
         }
         const skipped = Array.from(overrides.entries()).filter(([id, action]) =>
@@ -955,7 +990,7 @@ export class UndoTreeManager implements vscode.Disposable {
             return { kind: 'full', content: candidate.content };
         }
         if (candidate.kind === 'checkpoint') {
-            if (typeof candidate.contentHash !== 'string' || candidate.contentHash.length === 0) {
+            if (typeof candidate.contentHash !== 'string' || !isValidContentHash(candidate.contentHash)) {
                 throw new Error('Invalid checkpoint content hash');
             }
             return { kind: 'checkpoint', contentHash: candidate.contentHash };
@@ -1492,6 +1527,14 @@ export class UndoTreeManager implements vscode.Disposable {
         const thresholdMs = maxAgeDays * 86_400_000;
         const now = Date.now();
         const latestNodeId = this.getLatestNodeId(tree);
+        const latestAncestors = new Set<number>();
+        let latestAncestorId: number | undefined = latestNodeId;
+        while (latestAncestorId !== undefined) {
+            if (latestAncestors.has(latestAncestorId)) { break; }
+            latestAncestors.add(latestAncestorId);
+            const node = tree.nodes.get(latestAncestorId);
+            latestAncestorId = node && node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
+        }
 
         // Step 1: current の祖先を保護対象に
         const currentAncestors = new Set<number>();
@@ -1519,23 +1562,27 @@ export class UndoTreeManager implements vscode.Disposable {
         // Step 3: 削除対象サブツリーを収集（DFS）
         const toDelete = new Set<number>();
 
-        const markSubtree = (nodeId: number) => {
+        const markSubtree = (nodeId: number, visited = new Set<number>()) => {
+            if (visited.has(nodeId)) { return; }
+            visited.add(nodeId);
             const node = tree.nodes.get(nodeId);
             if (!node) { return; }
             toDelete.add(nodeId);
             for (const childId of node.children) {
-                markSubtree(childId);
+                markSubtree(childId, visited);
             }
         };
 
-        const dfs = (nodeId: number) => {
+        const dfs = (nodeId: number, visited = new Set<number>()) => {
+            if (visited.has(nodeId)) { return; }
+            visited.add(nodeId);
             const node = tree.nodes.get(nodeId);
             if (!node) { return; }
 
             if (currentAncestors.has(nodeId)) {
                 // current の祖先: 削除しないが子を辿る
                 for (const childId of node.children) {
-                    dfs(childId);
+                    dfs(childId, visited);
                 }
                 return;
             }
@@ -1544,6 +1591,7 @@ export class UndoTreeManager implements vscode.Disposable {
             const isProtected = nodeId === latestNodeId
                 || node.note
                 || node.pinned
+                || latestAncestors.has(nodeId)
                 || hasNotedAncestor.has(nodeId)
                 || hasPinnedAncestor.has(nodeId);
 
@@ -1551,7 +1599,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 markSubtree(nodeId);
             } else {
                 for (const childId of node.children) {
-                    dfs(childId);
+                    dfs(childId, visited);
                 }
             }
         };
@@ -1768,6 +1816,14 @@ export class UndoTreeManager implements vscode.Disposable {
         const now = Date.now();
         const latestNodeId = this.getLatestNodeId(tree);
         const currentAncestors = this.collectCurrentAncestors(tree);
+        const latestAncestors = new Set<number>();
+        let latestAncestorId: number | undefined = latestNodeId;
+        while (latestAncestorId !== undefined) {
+            if (latestAncestors.has(latestAncestorId)) { break; }
+            latestAncestors.add(latestAncestorId);
+            const node = tree.nodes.get(latestAncestorId);
+            latestAncestorId = node && node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
+        }
         const hasNotedAncestor = this.collectNotedAncestors(tree);
         const hasPinnedAncestor = this.collectPinnedAncestors(tree);
         const keptAncestors = new Set<number>();
@@ -1818,6 +1874,7 @@ export class UndoTreeManager implements vscode.Disposable {
             const isProtected = nodeId === latestNodeId
                 || node.note
                 || node.pinned
+                || latestAncestors.has(nodeId)
                 || hasNotedAncestor.has(nodeId)
                 || hasPinnedAncestor.has(nodeId)
                 || keptAncestors.has(nodeId);
@@ -1840,6 +1897,16 @@ export class UndoTreeManager implements vscode.Disposable {
         const ageMs = Date.now() - node.timestamp;
         const latestNodeId = this.getLatestNodeId(tree);
         const currentAncestors = this.collectCurrentAncestors(tree);
+        const latestAncestors = new Set<number>();
+        let latestAncestorId: number | undefined = latestNodeId;
+        while (latestAncestorId !== undefined) {
+            if (latestAncestors.has(latestAncestorId)) { break; }
+            latestAncestors.add(latestAncestorId);
+            const latestAncestorNode = tree.nodes.get(latestAncestorId);
+            latestAncestorId = latestAncestorNode && latestAncestorNode.parents.length > 0
+                ? latestAncestorNode.parents[latestAncestorNode.parents.length - 1]
+                : undefined;
+        }
         const hasNotedAncestor = this.collectNotedAncestors(tree);
         const hasPinnedAncestor = this.collectPinnedAncestors(tree);
         if (node.id === tree.currentId) {
@@ -1847,6 +1914,9 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         if (node.id === latestNodeId) {
             return 'latest node';
+        }
+        if (latestAncestors.has(node.id)) {
+            return 'ancestor of latest node';
         }
         if (currentAncestors.has(node.id)) {
             return 'current path';

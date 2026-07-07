@@ -132,4 +132,26 @@ describe('persisted storage integration', () => {
         expect(loaded?.tree.nodes.find((node) => node.id === 1)?.hash).toBe('persisted-a');
         expect(vscode.window.showWarningMessage).toHaveBeenCalled();
     });
+
+    it('rejects checkpoint content hashes that are not hex file names', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const uri = 'file:///bad-checkpoint.md';
+
+        const tree = makeTree([
+            {
+                id: 0, parents: [], children: [1], timestamp: 1, label: 'initial', hash: '01234567',
+                storage: { kind: 'full', content: 'root' }, lineCount: 1, byteCount: 4,
+            },
+            {
+                id: 1, parents: [0], children: [], timestamp: 2, label: 'checkpoint', hash: '89abcdef',
+                storage: { kind: 'checkpoint', contentHash: '..\\..\\outside' }, lineCount: 1, byteCount: 8,
+            },
+        ], 1);
+
+        await expect(extension.__test__.persistStateToDisk(context, {
+            nextId: 2,
+            trees: { [uri]: tree },
+        }, false)).rejects.toThrow('Invalid checkpoint content hash');
+    });
 });

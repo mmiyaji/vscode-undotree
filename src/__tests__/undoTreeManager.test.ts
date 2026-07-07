@@ -158,6 +158,36 @@ describe('persisted state validation', () => {
         expect(tree.nodes.get(0)?.children).toContain(1);
         expect(tree.nodes.get(1)?.parents).toContain(0);
     });
+
+    it('rejects checkpoint content hashes that are not hex content addresses', () => {
+        const manager = new UndoTreeManager();
+
+        expect(() => manager.importTree('file:///bad-checkpoint.md', {
+            nodes: [
+                {
+                    id: 0,
+                    parents: [],
+                    children: [1],
+                    timestamp: 0,
+                    label: 'initial',
+                    hash: '01234567',
+                    storage: { kind: 'full', content: 'root' },
+                },
+                {
+                    id: 1,
+                    parents: [0],
+                    children: [],
+                    timestamp: 1,
+                    label: 'checkpoint',
+                    hash: '89abcdef',
+                    storage: { kind: 'checkpoint', contentHash: '..\\..\\outside' },
+                },
+            ],
+            hashMap: [['01234567', 0], ['89abcdef', 1]],
+            currentId: 1,
+            rootId: 0,
+        })).toThrow('Invalid checkpoint content hash');
+    });
 });
 
 describe('保存時のノード追加', () => {
@@ -166,8 +196,9 @@ describe('保存時のノード追加', () => {
         const doc = makeDocument('Hello');
         manager.onDidSaveTextDocument(doc);
         const tree = manager.getTree(doc.uri);
-        expect(tree.nodes.size).toBe(2);
-        expect(tree.currentId).toBe(1);
+        expect(tree.nodes.size).toBe(1);
+        expect(tree.currentId).toBe(0);
+        expect(manager.reconstructContent(tree, tree.rootId)).toBe('Hello');
     });
 
     it('内容が変わらなければノードは追加されない', () => {
@@ -176,7 +207,7 @@ describe('保存時のノード追加', () => {
         manager.onDidSaveTextDocument(doc);
         manager.onDidSaveTextDocument(doc); // 同じ内容で再保存
         const tree = manager.getTree(doc.uri);
-        expect(tree.nodes.size).toBe(2); // rootと1ノードのまま
+        expect(tree.nodes.size).toBe(1); // root only
     });
 
     it('内容が変われば新しいノードが追加される', () => {
@@ -186,7 +217,7 @@ describe('保存時のノード追加', () => {
         manager.onDidSaveTextDocument(doc1);
         manager.onDidSaveTextDocument(doc2);
         const tree = manager.getTree(makeUri());
-        expect(tree.nodes.size).toBe(3);
+        expect(tree.nodes.size).toBe(2);
     });
 
     it('jumpToNode直後のautosave相当ではノードを追加しない', async () => {
@@ -198,11 +229,11 @@ describe('保存時のノード追加', () => {
         const tree = manager.getTree(uri);
         const editor = makeEditor('B', 'file:///jump-save.md');
 
-        await manager.jumpToNode(1, editor, tree);
+        await manager.jumpToNode(0, editor, tree);
         manager.onDidSaveTextDocument(editor.document);
 
-        expect(tree.currentId).toBe(1);
-        expect(tree.nodes.size).toBe(3);
+        expect(tree.currentId).toBe(0);
+        expect(tree.nodes.size).toBe(2);
     });
 
     it('jumpToNode後に実編集が入れば次のsaveでノードを追加する', async () => {
@@ -214,16 +245,16 @@ describe('保存時のノード追加', () => {
         const tree = manager.getTree(uri);
         const editor = makeEditor('B', 'file:///jump-edit.md');
 
-        await manager.jumpToNode(1, editor, tree);
+        await manager.jumpToNode(0, editor, tree);
         editor.setContent('A!');
         manager.onDidChangeTextDocument(
             makeChangeEvent(editor.document, [{ offset: 1, removeLength: 0, text: '!' }])
         );
         manager.onDidSaveTextDocument(editor.document);
 
-        expect(tree.nodes.size).toBe(4);
-        expect(tree.currentId).not.toBe(1);
-        expect(tree.nodes.get(tree.currentId)?.parents).toContain(1);
+        expect(tree.nodes.size).toBe(3);
+        expect(tree.currentId).not.toBe(0);
+        expect(tree.nodes.get(tree.currentId)?.parents).toContain(0);
     });
 });
 
@@ -236,7 +267,7 @@ describe('ストレージ種別の判定', () => {
         const doc = makeDocument('Hello');
         manager.onDidSaveTextDocument(doc);
         const tree = manager.getTree(doc.uri);
-        const node = tree.nodes.get(1)!;
+        const node = tree.nodes.get(tree.rootId)!;
         expect(node.storage.kind).toBe('full');
     });
 
@@ -256,7 +287,7 @@ describe('ストレージ種別の判定', () => {
         manager.onDidSaveTextDocument(doc2);
 
         const tree = manager.getTree(makeUri());
-        const node = tree.nodes.get(2)!;
+        const node = tree.nodes.get(1)!;
         expect(node.storage.kind).toBe('delta');
     });
 
@@ -275,7 +306,7 @@ describe('ストレージ種別の判定', () => {
         manager.onDidSaveTextDocument(doc2);
 
         const tree = manager.getTree(makeUri());
-        const node = tree.nodes.get(2)!;
+        const node = tree.nodes.get(1)!;
         expect(node.storage.kind).toBe('full');
     });
 });
@@ -300,10 +331,10 @@ describe('分岐点の全量昇格', () => {
 
         const tree = manager.getTree(makeUri());
         const node1 = tree.nodes.get(1)!;
-        expect(node1.storage.kind).toBe('full'); // まだ子が1つなのでfull（初回保存はfull）
+        expect(node1.storage.kind).toBe('delta');
 
         // currentIdをnode1に戻して別の内容を保存（分岐）
-        tree.currentId = 1;
+        tree.currentId = 0;
         const content3 = base + 'c';
         const doc3 = makeDocument(content3);
         manager.onDidChangeTextDocument(
@@ -311,15 +342,16 @@ describe('分岐点の全量昇格', () => {
         );
         manager.onDidSaveTextDocument(doc3);
 
-        // node1は2つの子を持つ → 全量に昇格済みであること
-        expect(node1.storage.kind).toBe('full');
-        expect(node1.children.length).toBe(2);
+        const root = tree.nodes.get(0)!;
+        expect(root.storage.kind).toBe('full');
+        expect(root.children.length).toBe(2);
     });
 
     it('uses checkpoint storage for large branch parents when the threshold is exceeded', () => {
         const manager = new UndoTreeManager();
         manager.setMemoryCheckpointThreshold(32);
         const base = 'a'.repeat(256);
+        manager.getTree(makeUri(), 'seed');
         manager.onDidSaveTextDocument(makeDocument(base));
 
         const tree = manager.getTree(makeUri());
@@ -358,7 +390,7 @@ describe('既存ファイルを開いた場合', () => {
         manager.onDidSaveTextDocument(doc);
 
         const tree = manager.getTree(makeUri());
-        const node = tree.nodes.get(1)!;
+        const node = tree.nodes.get(tree.rootId)!;
         // 空ルートの直後なのでfullで保存されていること
         expect(node.storage.kind).toBe('full');
     });
@@ -374,7 +406,7 @@ describe('既存ファイルを開いた場合', () => {
         manager.onDidSaveTextDocument(doc);
 
         const tree = manager.getTree(makeUri());
-        const content = manager.reconstructContent(tree, 1);
+        const content = manager.reconstructContent(tree, tree.rootId);
         expect(content).toBe(newContent);
     });
 });
@@ -396,7 +428,7 @@ describe('DAG収束', () => {
         manager.onDidSaveTextDocument(doc2);
         manager.onDidSaveTextDocument(doc3); // Helloノードに収束
 
-        expect(tree.nodes.size).toBe(3); // root + Hello + HelloWorld のみ
+        expect(tree.nodes.size).toBe(2); // Hello root + HelloWorld
         expect(tree.currentId).toBe(helloNodeId);
     });
 });
@@ -410,7 +442,7 @@ describe('reconstructContent', () => {
         const doc = makeDocument('Hello');
         manager.onDidSaveTextDocument(doc);
         const tree = manager.getTree(makeUri());
-        const content = manager.reconstructContent(tree, 1);
+        const content = manager.reconstructContent(tree, tree.rootId);
         expect(content).toBe('Hello');
     });
 
@@ -428,10 +460,10 @@ describe('reconstructContent', () => {
         manager.onDidSaveTextDocument(doc2);
 
         const tree = manager.getTree(makeUri());
-        const node2 = tree.nodes.get(2)!;
+        const node2 = tree.nodes.get(1)!;
         expect(node2.storage.kind).toBe('delta');
 
-        const content = manager.reconstructContent(tree, 2);
+        const content = manager.reconstructContent(tree, 1);
         expect(content).toBe(changed);
     });
 
@@ -458,10 +490,10 @@ describe('reconstructContent', () => {
         manager.onDidSaveTextDocument(makeDocument(step3));
 
         const tree = manager.getTree(makeUri());
-        const node = tree.nodes.get(2)!;
+        const node = tree.nodes.get(1)!;
         expect(node.storage.kind).toBe('delta');
 
-        const content = manager.reconstructContent(tree, 2);
+        const content = manager.reconstructContent(tree, 1);
         expect(content).toBe(step3); // 'a'.repeat(100) + 'xyz' であること
     });
 
@@ -483,7 +515,7 @@ describe('reconstructContent', () => {
         manager.onDidSaveTextDocument(makeDocument(step2));
 
         const tree = manager.getTree(makeUri());
-        const content = manager.reconstructContent(tree, 3);
+        const content = manager.reconstructContent(tree, 2);
         expect(content).toBe(step2);
     });
 });
@@ -502,7 +534,7 @@ describe('オートセーブ', () => {
         jest.advanceTimersByTime(30_000);
 
         const tree = manager.getTree(doc.uri);
-        expect(tree.nodes.size).toBe(2);
+        expect(tree.nodes.size).toBe(1);
     });
 
     it('内容が変わっていなければオートセーブでノードは追加されない', () => {
@@ -516,7 +548,7 @@ describe('オートセーブ', () => {
         jest.advanceTimersByTime(30_000); // 2回目: 同じ内容 → スキップ
 
         const tree = manager.getTree(doc.uri);
-        expect(tree.nodes.size).toBe(2); // root + 1ノードのまま
+        expect(tree.nodes.size).toBe(1); // root only
     });
 });
 
@@ -537,7 +569,7 @@ describe('DAG循環防止', () => {
         manager.onDidSaveTextDocument(docA); // Aに収束 → node1へジャンプ
 
         const tree = manager.getTree(makeUri());
-        expect(tree.nodes.size).toBe(3); // root + A + B のみ
+        expect(tree.nodes.size).toBe(2); // A root + B
     });
 
     it('先祖ノードへのリンクはスキップされる（循環グラフにならない）', () => {
@@ -552,7 +584,7 @@ describe('DAG循環防止', () => {
         manager.onDidSaveTextDocument(docA); // node1はnode3の先祖 → リンクしない
 
         const tree = manager.getTree(makeUri());
-        const node3 = tree.nodes.get(3)!;
+        const node3 = tree.nodes.get(2)!;
         // node3の子にnode1は追加されないこと
         expect(node3.children).not.toContain(1);
     });
@@ -613,12 +645,12 @@ describe('compact', () => {
         // n5: leaf → 非圧縮
         // → 2件削除: root, n1, n2, n5 の4ノードが残る
         const { manager, tree, finalContent } = makeInsertChain(4);
-        expect(tree.nodes.size).toBe(6);
+        expect(tree.nodes.size).toBe(5);
 
         const removed = manager.compact(tree);
 
         expect(removed).toBe(2);
-        expect(tree.nodes.size).toBe(4);
+        expect(tree.nodes.size).toBe(3);
         expect(manager.reconstructContent(tree, tree.currentId)).toBe(finalContent);
     });
 
@@ -632,9 +664,9 @@ describe('compact', () => {
         const { manager, tree } = makeInsertChain(4);
         // currentId をn3（中間ノード）に移動
         // n3のidはrootが0, n1=1, n2=2, n3=3
-        tree.currentId = 3;
+        tree.currentId = 2;
         manager.compact(tree);
-        expect(tree.nodes.has(3)).toBe(true);
+        expect(tree.nodes.has(2)).toBe(true);
     });
 
     it('分岐点は削除されない', () => {
@@ -650,7 +682,7 @@ describe('compact', () => {
         manager.onDidSaveTextDocument(makeDocument(content2));
 
         const tree = manager.getTree(makeUri());
-        tree.currentId = 1; // n1に戻して分岐作成
+        tree.currentId = 0; // rootに戻して分岐作成
 
         const content3 = base + 'c';
         manager.onDidChangeTextDocument(
@@ -658,12 +690,12 @@ describe('compact', () => {
         );
         manager.onDidSaveTextDocument(makeDocument(content3));
 
-        // n1はchildren.length===2の分岐点
-        const n1 = tree.nodes.get(1)!;
+        // root is the branch point
+        const n1 = tree.nodes.get(0)!;
         expect(n1.children.length).toBe(2);
 
         manager.compact(tree);
-        expect(tree.nodes.has(1)).toBe(true); // 分岐点は残る
+        expect(tree.nodes.has(0)).toBe(true); // 分岐点は残る
     });
 
     it('終点（leaf）は削除されない', () => {
@@ -755,8 +787,8 @@ describe('cleanup', () => {
         manager.onDidCloseTextDocument(doc);
 
         const tree = manager.getTree(doc.uri);
-        expect(tree.nodes.size).toBe(2);
-        expect(tree.currentId).toBe(1);
+        expect(tree.nodes.size).toBe(1);
+        expect(tree.currentId).toBe(0);
         expect(manager.reconstructContent(tree, tree.currentId)).toBe('Hello');
     });
 
@@ -1010,8 +1042,8 @@ describe('DAG収束', () => {
         // id=1(aaa)はcompact対象: 親=root,子=2,insertのみ → compressible
         // ただし今のcurrentId=2なのでid=1は圧縮可能
         // 手動でid=1をhashMapから削除してcompactなしでシミュレート
-        const node1 = tree.nodes.get(1)!;
-        tree.hashMap.delete(node1.hash);
+        const root = tree.nodes.get(tree.rootId)!;
+        tree.hashMap.delete(root.hash);
 
         const sizeBefore = tree.nodes.size;
         manager.onDidSaveTextDocument(makeDocument('aaa')); // node1と同内容だがhashMapにない
@@ -1197,7 +1229,7 @@ describe('persisted tree reconciliation', () => {
         const restoreNode = tree.nodes.get(tree.currentId)!;
 
         expect(restoreNode.label).toBe('restore');
-        expect(restoreNode.parents).toEqual([2]);
+        expect(restoreNode.parents).toEqual([1]);
         expect(restored.reconstructContent(tree, tree.currentId)).toBe('disk version');
     });
 
@@ -1214,8 +1246,8 @@ describe('persisted tree reconciliation', () => {
 
         const tree = restored.syncDocumentState(uri, 'latest');
 
-        expect(tree.nodes.size).toBe(3);
-        expect(tree.currentId).toBe(2);
+        expect(tree.nodes.size).toBe(2);
+        expect(tree.currentId).toBe(1);
         expect(tree.nodes.get(tree.currentId)?.label).toBe('save');
     });
 
@@ -1823,5 +1855,32 @@ describe('hardCompact', () => {
 
         expect(removed).toBe(0);
         expect(tree.nodes.has(branchId)).toBe(true);
+    });
+
+    it('protects ancestors of the latest node during hard compact', () => {
+        const manager = new UndoTreeManager();
+        const now = Date.now();
+        manager.onDidSaveTextDocument(makeDocument('base'));
+        const tree = manager.getTree(makeUri());
+        const baseId = tree.currentId;
+
+        manager.onDidSaveTextDocument(makeDocument('main'));
+        const mainId = tree.currentId;
+
+        tree.currentId = baseId;
+        manager.onDidSaveTextDocument(makeDocument('latest-parent'));
+        const latestParentId = tree.currentId;
+        tree.nodes.get(latestParentId)!.timestamp = now - 60 * DAY_MS;
+
+        manager.onDidSaveTextDocument(makeDocument('latest-leaf'));
+        const latestId = tree.currentId;
+        tree.nodes.get(latestId)!.timestamp = now;
+
+        tree.currentId = mainId;
+        const removed = manager.hardCompact(tree, 30);
+
+        expect(removed).toBe(0);
+        expect(tree.nodes.has(latestParentId)).toBe(true);
+        expect(tree.nodes.has(latestId)).toBe(true);
     });
 });

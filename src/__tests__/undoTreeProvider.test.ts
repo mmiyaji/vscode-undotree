@@ -134,7 +134,17 @@ describe('UndoTreeProvider initialization', () => {
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).not.toContain('const isLinear');
-        expect(html).toContain('renderNode(0, [], false, 0);');
+        expect(html).toContain('renderNode(rootId, [], false, 0);');
+    });
+
+    it('passes a non-zero rootId into the webview render state', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const html = (provider as any).buildHtml([], 42, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false, 'blue', 'tree', '', '', 41);
+
+        expect(html).toContain('let rootId = 41;');
+        expect(html).toContain('renderNode(rootId, [], false, 0);');
     });
 
     it('renders the settings gear as a menu trigger', () => {
@@ -271,8 +281,8 @@ describe('UndoTreeProvider initialization', () => {
         restored.importState(state);
         const tree = restored.syncDocumentState(makeUri(), 'new text');
 
-        expect(tree.currentId).toBe(2);
-        expect(tree.nodes.get(2)?.label).toBe('restore');
+        expect(tree.currentId).toBe(1);
+        expect(tree.nodes.get(1)?.label).toBe('restore');
         expect(restored.reconstructContent(tree, tree.currentId)).toBe('new text');
     });
 
@@ -558,7 +568,7 @@ describe('UndoTreeProvider initialization', () => {
 
         expect(html).toContain('Content-Security-Policy');
         expect(html).toContain("script-src 'nonce-");
-        expect(html).toContain("style-src undefined 'nonce-");
+        expect(html).toContain("style-src vscode-resource: 'nonce-");
     });
 
     it('escapes label and formatted time values before injecting HTML', () => {

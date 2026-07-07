@@ -63,7 +63,7 @@ describe('空・特殊コンテンツ', () => {
         const manager = new UndoTreeManager();
         manager.onDidSaveTextDocument(makeDocument('\n\n\n'));
         const tree = manager.getTree(makeUri());
-        expect(tree.nodes.size).toBe(2);
+        expect(tree.nodes.size).toBe(1);
     });
 
     it('NULLバイトを含むコンテンツを扱える', () => {
@@ -90,7 +90,7 @@ describe('差分バッファの異常系', () => {
 
         // バッファなし → full保存になる
         const tree = manager.getTree(makeUri());
-        const node = tree.nodes.get(2)!;
+        const node = tree.nodes.get(1)!;
         expect(node.storage.kind).toBe('full');
     });
 
@@ -110,7 +110,7 @@ describe('差分バッファの異常系', () => {
         manager.onDidSaveTextDocument(doc);
 
         const tree = manager.getTree(makeUri());
-        const node = tree.nodes.get(2)!;
+        const node = tree.nodes.get(1)!;
         // 2文字追加: 2/1002 ≈ 0.2% < 30% → delta
         expect(node.storage.kind).toBe('delta');
         if (node.storage.kind === 'delta') {
@@ -131,7 +131,7 @@ describe('差分バッファの異常系', () => {
         manager.onDidSaveTextDocument(makeDocument('File A content here long enough!', 'file:///a.md'));
 
         const treeA = manager.getTree(makeUri('file:///a.md'));
-        const node = treeA.nodes.get(2)!;
+        const node = treeA.nodes.get(1)!;
         // AのバッファにBのdiffは入っていないのでfull
         expect(node.storage.kind).toBe('full');
     });
@@ -189,11 +189,11 @@ describe('undo/redo の境界値', () => {
             },
         } as any;
 
-        await manager.jumpToNode(1, editor, tree);
+        await manager.jumpToNode(0, editor, tree);
 
-        expect(tree.currentId).toBe(3);
-        expect(tree.nodes.get(1)?.children).toContain(3);
-        expect(tree.nodes.get(2)?.children).not.toContain(3);
+        expect(tree.currentId).toBe(2);
+        expect(tree.nodes.get(0)?.children).toContain(2);
+        expect(tree.nodes.get(1)?.children).not.toContain(2);
     });
 });
 
@@ -217,7 +217,8 @@ describe('reconstructContentの境界値', () => {
     it('deltaノードのdiffが空でも復元できる', () => {
         const manager = new UndoTreeManager();
         const base = 'a'.repeat(1000);
-        manager.onDidSaveTextDocument(makeDocument(base));
+        manager.getTree(makeUri(), base);
+        manager.onDidSaveTextDocument(makeDocument(`${base}x`));
 
         // changeEventを送らずにsave（→full保存）してからdeltaを手動で作る
         const tree = manager.getTree(makeUri());
@@ -286,8 +287,8 @@ describe('複数ファイルの独立性', () => {
         const treeA = manager.getTree(makeUri('file:///a.md'));
         const treeB = manager.getTree(makeUri('file:///b.md'));
 
-        expect(treeA.nodes.size).toBe(3); // root + A + A v2
-        expect(treeB.nodes.size).toBe(2); // root + B
+        expect(treeA.nodes.size).toBe(2); // A root + A v2
+        expect(treeB.nodes.size).toBe(1); // B root
         expect(treeA.currentId).not.toBe(treeB.currentId);
     });
 
@@ -301,6 +302,6 @@ describe('複数ファイルの独立性', () => {
         manager.onDidCloseTextDocument(docA);
 
         const treeB = manager.getTree(makeUri('file:///b.md'));
-        expect(treeB.nodes.size).toBe(2);
+        expect(treeB.nodes.size).toBe(1);
     });
 });
