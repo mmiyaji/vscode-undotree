@@ -3,6 +3,7 @@ src/**
 out/**
 scripts/**
 .github/**
+media/undotree-readme-hero.png
 test-report.json
 test-report.md
 test-report.txt

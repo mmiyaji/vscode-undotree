@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.7
+
+### Fixes
+
+- Hardened undo-tree content addressing by using full SHA-1 hashes and validating persisted checkpoint file names.
+- Fixed excluded-file glob handling for `?` patterns and shared the matcher between the extension and sidebar provider.
+- Prevented sidebar node jumps from targeting the wrong active editor by validating the source document URI.
+- Fixed hard compact protection for latest-node ancestors and added cycle guards during pruning.
+- Fixed duplicate node creation on the first save from an empty root.
+- Improved automatic persistence failure reporting and rescheduling after explicit flushes.
+- Added Content Security Policy coverage to diagnostics and compact preview panels.
+- Fixed sidebar rendering for trees whose root node id is not `0`.
+
 ## 0.3.3
 
 ### New features
