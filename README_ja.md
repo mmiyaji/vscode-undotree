@@ -10,7 +10,7 @@ VS Code 上で、保存を基準にした Undo 履歴をツリーとして可視
 
 履歴は主にファイル保存時と定期 autosave チェックポイントで記録されます。VS Code 標準の undo スタックを置き換えるのではなく、意味のある保存状態をたどるための別レイヤーとして動作します。
 
-![Undo Tree パネル](./media/undotree.png)
+![Undo Tree パネル](./media/undotree-readme-hero.png)
 
 ## カラーテーマ
 

@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { UndoTreeManager } from '../undoTreeManager';
 
 jest.mock('vscode');
@@ -73,7 +74,7 @@ describe('大量保存パフォーマンス', () => {
             manager.onDidSaveTextDocument(doc);
         }
         const tree = manager.getTree(makeUri());
-        expect(tree.nodes.size).toBe(102); // root + node1(base) + 100ノード
+        expect(tree.nodes.size).toBe(101); // the empty root is initialized in-place with base + 100 nodes
     });
 });
 
@@ -429,7 +430,12 @@ describe('ハッシュ計算パフォーマンス（ファイルサイズ別）'
 // -----------------------------------------------
 // ヘルパー: checkpointノードを持つツリーを importTree で注入
 // -----------------------------------------------
-function importCheckpointTree(manager: ReturnType<typeof createManager>, uriStr: string, contentHash: string) {
+function checkpointHash(seed: string): string {
+    return crypto.createHash('sha1').update(seed).digest('hex');
+}
+
+function importCheckpointTree(manager: ReturnType<typeof createManager>, uriStr: string, contentKey: string): string {
+    const contentHash = checkpointHash(contentKey);
     manager.importTree(uriStr, {
         nodes: [
             { id: 0, parents: [],  children: [1], timestamp: 0, label: 'root', hash: 'root-hash-' + uriStr, storage: { kind: 'full',       content: ''         } },
@@ -439,6 +445,7 @@ function importCheckpointTree(manager: ReturnType<typeof createManager>, uriStr:
         currentId: 1,
         rootId: 0,
     });
+    return contentHash;
 }
 
 // -----------------------------------------------
@@ -552,10 +559,15 @@ describe('LRUキャッシュエビクションパフォーマンス', () => {
         manager.setContentCacheMax(2 * 1024 * 1024); // 2MB
 
         let calls = 0;
-        manager.contentResolver = (hash) => { calls++; return contents[parseInt(hash)]; };
+        const contentsByHash = new Map<string, string>();
+        manager.contentResolver = (hash) => {
+            calls++;
+            return contentsByHash.get(hash)!;
+        };
 
         for (let i = 0; i < 5; i++) {
-            importCheckpointTree(manager, `file:///f${i}.md`, String(i));
+            const contentHash = importCheckpointTree(manager, `file:///f${i}.md`, String(i));
+            contentsByHash.set(contentHash, contents[i]);
         }
 
         const ms = elapsed(() => {
@@ -657,7 +669,7 @@ describe('チェックポイントを含む複合ツリー操作', () => {
             timestamp: Date.now(),
             label: 'checkpoint-injected',
             hash: 'cp-hash',
-            storage: { kind: 'checkpoint', contentHash: 'cp-content-hash' },
+            storage: { kind: 'checkpoint', contentHash: checkpointHash('cp-content-hash') },
         });
         tree.currentId = cpId;
 
@@ -681,7 +693,7 @@ describe('チェックポイントを含む複合ツリー操作', () => {
             { id: 0, parents: [], children: [1], timestamp: 0, label: 'root', hash: 'h0',
               storage: { kind: 'full', content: baseContent } },
             { id: 1, parents: [0], children: [2], timestamp: 1, label: 'cp', hash: 'h1',
-              storage: { kind: 'checkpoint', contentHash: 'cp-hash' } },
+              storage: { kind: 'checkpoint', contentHash: checkpointHash('cp-hash') } },
         ];
         let prev = cpContent;
         for (let i = 2; i <= 9; i++) {

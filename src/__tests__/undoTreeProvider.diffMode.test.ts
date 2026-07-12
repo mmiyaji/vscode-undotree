@@ -2,6 +2,7 @@ import { UndoTreeManager } from '../undoTreeManager';
 import { UndoTreeProvider } from '../undoTreeProvider';
 
 jest.mock('vscode');
+jest.useFakeTimers();
 
 describe('UndoTreeProvider diff mode', () => {
     function makeEditor(path: string) {
@@ -60,6 +61,8 @@ describe('UndoTreeProvider diff mode', () => {
         expect(html).toContain("} else if (e.key === 'b') {");
         expect(html).toContain("} else if (e.key === 'c') {");
         expect(html).toContain('diff-base-badge');
+        expect(html).toContain("send('undo', { sourceUri })");
+        expect(html).toContain("send('redo', { sourceUri })");
     });
 
     it('cancels diff mode when switching to another file', () => {
@@ -72,5 +75,41 @@ describe('UndoTreeProvider diff mode', () => {
         provider.setActiveEditor(makeEditor('file:///two.md'));
 
         expect((provider as any).mode).toBe('navigate');
+    });
+
+    it('routes sidebar undo and redo to the remembered source editor while an Undo Tree diff is active', async () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const sourceEditor = makeEditor('file:///one.md');
+        sourceEditor.document.fileName = '/workspace/one.md';
+        sourceEditor.document.isUntitled = false;
+        sourceEditor.document.getText = () => 'one';
+        const diffEditor = makeEditor('undotree:node/1');
+        let receiveMessage: ((message: any) => Promise<void>) | undefined;
+        const view = {
+            visible: true,
+            onDidChangeVisibility: jest.fn(),
+            webview: {
+                options: {},
+                html: '',
+                postMessage: jest.fn(),
+                onDidReceiveMessage: jest.fn((callback) => { receiveMessage = callback; }),
+            },
+        } as any;
+        const undo = jest.spyOn(manager, 'undo').mockResolvedValue(undefined);
+        const redo = jest.spyOn(manager, 'redo').mockResolvedValue(undefined);
+
+        provider.setActiveEditor(sourceEditor);
+        vscode.workspace.textDocuments = [sourceEditor.document, diffEditor.document];
+        vscode.window.activeTextEditor = diffEditor;
+        vscode.window.visibleTextEditors = [diffEditor];
+        provider.resolveWebviewView(view);
+
+        await receiveMessage?.({ command: 'undo', sourceUri: 'file:///one.md' });
+        await receiveMessage?.({ command: 'redo', sourceUri: 'file:///one.md' });
+
+        expect(undo).toHaveBeenCalledWith(sourceEditor.document);
+        expect(redo).toHaveBeenCalledWith(sourceEditor.document);
     });
 });

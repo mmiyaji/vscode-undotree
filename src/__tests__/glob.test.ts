@@ -3,7 +3,9 @@ import { matchesGlob } from '../glob';
 describe('matchesGlob', () => {
     it('treats ? as a one-character glob wildcard', () => {
         expect(matchesGlob('aconfig.txt', '?config.txt')).toBe(true);
+        expect(matchesGlob('😀config.txt', '?config.txt')).toBe(true);
         expect(matchesGlob('abconfig.txt', '?config.txt')).toBe(false);
+        expect(matchesGlob('😀xconfig.txt', '?config.txt')).toBe(false);
         expect(() => matchesGlob('aconfig.txt', '?config.txt')).not.toThrow();
     });
 

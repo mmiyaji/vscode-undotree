@@ -1,6 +1,7 @@
 ﻿'use strict';
 
 import * as vscode from 'vscode';
+import { randomBytes } from 'crypto';
 import { format as formatDate } from 'date-fns';
 import { UndoTreeManager } from './undoTreeManager';
 import { t as tr } from './runtimeL10n';
@@ -10,13 +11,17 @@ type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<n
     ? T & { formattedTime: string; isEmpty: boolean }
     : never;
 
+type NotTrackedReason = '' | 'extension' | 'excludePattern';
+
 function getNonce(): string {
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let nonce = '';
-    for (let i = 0; i < 32; i++) {
-        nonce += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
-    }
-    return nonce;
+    return randomBytes(16).toString('hex');
+}
+
+function serializeForInlineScript(value: unknown): string {
+    return (JSON.stringify(value) ?? 'null')
+        .replace(/</g, '\\u003c')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
 }
 
 export class UndoTreeProvider implements vscode.WebviewViewProvider {
@@ -138,12 +143,30 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (message) => {
             try {
                 switch (message.command) {
-                    case 'undo':
-                        await this.manager.undo();
+                    case 'undo': {
+                        const sourceUri = typeof message.sourceUri === 'string' && message.sourceUri
+                            ? message.sourceUri
+                            : undefined;
+                        const contextTarget = this.getContextEditTarget(sourceUri);
+                        if (contextTarget) {
+                            await this.manager.undo(contextTarget);
+                        } else if (!sourceUri) {
+                            await this.manager.undo();
+                        }
                         break;
-                    case 'redo':
-                        await this.manager.redo();
+                    }
+                    case 'redo': {
+                        const sourceUri = typeof message.sourceUri === 'string' && message.sourceUri
+                            ? message.sourceUri
+                            : undefined;
+                        const contextTarget = this.getContextEditTarget(sourceUri);
+                        if (contextTarget) {
+                            await this.manager.redo(contextTarget);
+                        } else if (!sourceUri) {
+                            await this.manager.redo();
+                        }
                         break;
+                    }
                     case 'jumpToNode': {
                         const sourceUri = typeof message.sourceUri === 'string' ? message.sourceUri : '';
                         const contextEditor = sourceUri ? this.getContextEditor(sourceUri) : undefined;
@@ -163,6 +186,9 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                         break;
                     case 'openSettings':
                         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
+                        break;
+                    case 'openExcludeSettings':
+                        await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree.excludePatterns');
                         break;
                     case 'openDisplaySettings':
                         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree undotree.timeFormat');
@@ -272,6 +298,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 state.colorTheme,
                 state.view,
                 state.notTrackedExt,
+                state.notTrackedReason,
                 state.sourceUri,
                 state.rootId
             );
@@ -309,6 +336,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 showStorageKind,
                 colorTheme,
                 notTrackedExt: '',
+                notTrackedReason: '' as NotTrackedReason,
                 sourceUri: '',
                 rootId: 0,
             };
@@ -327,11 +355,13 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 showStorageKind,
                 colorTheme,
                 notTrackedExt: '',
+                notTrackedReason: '' as NotTrackedReason,
                 sourceUri: '',
                 rootId: 0,
             };
         }
-        if (!this.isTrackedDocument(document)) {
+        const trackingStatus = this.getTrackingStatus(document);
+        if (!trackingStatus.tracked) {
             const fileName = document.isUntitled ? '' : document.fileName.replace(/.*[\\/]/, '');
             const ext = fileName.match(/\.[^.]+$/)?.[0] ?? '';
             return {
@@ -347,6 +377,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 showStorageKind,
                 colorTheme,
                 notTrackedExt: ext,
+                notTrackedReason: trackingStatus.reason,
                 sourceUri: document.uri.toString(),
                 rootId: 0,
             };
@@ -370,6 +401,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             showStorageKind,
             colorTheme,
             notTrackedExt: '',
+            notTrackedReason: '' as NotTrackedReason,
             sourceUri: document.uri.toString(),
             rootId: tree.rootId,
         };
@@ -481,6 +513,22 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return active;
     }
 
+    private getContextEditTarget(expectedUri?: string): vscode.TextEditor | vscode.TextDocument | undefined {
+        const contextEditor = this.getContextEditor(expectedUri);
+        if (!expectedUri) {
+            return contextEditor;
+        }
+        const visibleEditor = (vscode.window.visibleTextEditors ?? []).find(
+            (editor) => this.isContextEditor(editor, expectedUri)
+        );
+        if (visibleEditor) {
+            return visibleEditor;
+        }
+        return vscode.workspace.textDocuments.find(
+            (document) => this.isSidebarContextDocument(document) && document.uri.toString() === expectedUri
+        );
+    }
+
     private getActiveTabUri(): string | undefined {
         const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
         const input = (activeTab as { input?: { uri?: vscode.Uri } } | undefined)?.input;
@@ -519,7 +567,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     private getNodeSizeMetricBase(): 'current' | 'initial' | 'parent' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('nodeSizeMetricBase');
-        if (value === 'initial' || value === 'parent') {
+        if (value === 'current' || value === 'initial' || value === 'parent') {
             return value;
         }
         return 'parent';
@@ -553,12 +601,17 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     }
 
     private isTrackedDocument(document: vscode.TextDocument): boolean {
+        return this.getTrackingStatus(document).tracked;
+    }
+
+    private getTrackingStatus(document: vscode.TextDocument): { tracked: boolean; reason: NotTrackedReason } {
         const fileName = document.fileName.replace(/.*[\\/]/, '');
         if (this.getExcludePatterns().some((pattern) => matchesGlob(fileName, pattern))) {
-            return false;
+            return { tracked: false, reason: 'excludePattern' };
         }
         const ext = fileName.match(/\.[^.]+$/)?.[0]?.toLowerCase() ?? '';
-        return this.getEnabledExtensions().map((value) => value.toLowerCase()).includes(ext);
+        const tracked = this.getEnabledExtensions().map((value) => value.toLowerCase()).includes(ext);
+        return { tracked, reason: tracked ? '' : 'extension' };
     }
 
     private formatTimestamp(
@@ -655,12 +708,13 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         colorTheme: 'auto' | 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red' = 'blue',
         initialView: 'loading' | 'empty' | 'notTracked' | 'tree' = nodes ? 'tree' : 'empty',
         initialNotTrackedExt = '',
+        initialNotTrackedReason: NotTrackedReason = '',
         initialSourceUri = '',
         initialRootId = 0
     ): string {
         const nonce = getNonce();
         const cspSource = this.getCspSource();
-        const nodesJson = nodes ? JSON.stringify(nodes) : 'null';
+        const nodesJson = serializeForInlineScript(nodes);
         return `<!DOCTYPE html>
 <html>
 <head>
@@ -901,51 +955,54 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   const vscode = acquireVsCodeApi();
   let nodes = ${nodesJson};
   let currentId = ${currentId};
-  let mode = ${JSON.stringify(mode)};
-  let timeFormat = ${JSON.stringify(timeFormat)};
-  let timeFormatCustom = ${JSON.stringify(timeFormatCustom)};
-  let nodeSizeMetric = ${JSON.stringify(nodeSizeMetric)};
-  let nodeSizeMetricBase = ${JSON.stringify(nodeSizeMetricBase)};
-  let showStorageKind = ${JSON.stringify(showStorageKind)};
-  let colorTheme = ${JSON.stringify(colorTheme)};
-  let sourceUri = ${JSON.stringify(initialSourceUri)};
-  let rootId = ${JSON.stringify(initialRootId)};
+  let mode = ${serializeForInlineScript(mode)};
+  let timeFormat = ${serializeForInlineScript(timeFormat)};
+  let timeFormatCustom = ${serializeForInlineScript(timeFormatCustom)};
+  let nodeSizeMetric = ${serializeForInlineScript(nodeSizeMetric)};
+  let nodeSizeMetricBase = ${serializeForInlineScript(nodeSizeMetricBase)};
+  let showStorageKind = ${serializeForInlineScript(showStorageKind)};
+  let colorTheme = ${serializeForInlineScript(colorTheme)};
+  let sourceUri = ${serializeForInlineScript(initialSourceUri)};
+  let rootId = ${serializeForInlineScript(initialRootId)};
   let diffCompareMode = 'current';
   let diffBaseNodeId = null;
   const i18n = {
-    noteDoubleClickToEdit: ${JSON.stringify(tr(' (double-click to edit)'))},
-    noteAdd: ${JSON.stringify(tr('Add note'))},
-    pinNode: ${JSON.stringify(tr('Pin node'))},
-    unpinNode: ${JSON.stringify(tr('Unpin node'))},
-    pinnedNodes: ${JSON.stringify(tr('Pinned'))},
-    loading: ${JSON.stringify(tr('Loading...'))},
-    textEditorsOnly: ${JSON.stringify(tr('Undo Tree is only available for text editors.'))},
-    notTrackedWithExt: ${JSON.stringify(tr('Undo Tree: {0} is not tracked', '{ext}'))},
-    notTrackedGeneric: ${JSON.stringify(tr('Undo Tree: this file is not tracked'))},
-    notTrackedHintWithExt: ${JSON.stringify(tr('To enable tracking for {0} files, click the status bar item or open Settings.', '{ext}'))},
-    notTrackedHintGeneric: ${JSON.stringify(tr('To enable tracking for this file, click the status bar item or open Settings.'))},
-    enableTrackingWithExt: ${JSON.stringify(tr('Enable tracking for {0}', '{ext}'))},
-    enableTrackingGeneric: ${JSON.stringify(tr('Enable tracking for this file'))},
-    openSettings: ${JSON.stringify(tr('Open Settings'))},
-    basePrefix: ${JSON.stringify(tr('Base: '))},
-    pairDiffNeedsBase: ${JSON.stringify(tr('Select a base node first or press B.'))},
-    contextJump: ${JSON.stringify(tr('Jump'))},
-    contextDiffCurrent: ${JSON.stringify(tr('Compare with Current'))},
-    contextSetBase: ${JSON.stringify(tr('Set Pair Diff Base'))},
-    contextPin: ${JSON.stringify(tr('Pin'))},
-    contextUnpin: ${JSON.stringify(tr('Unpin'))},
-    contextEditNote: ${JSON.stringify(tr('Edit Note'))},
-    contextDisplaySettings: ${JSON.stringify(tr('Display Settings'))},
-    contextMenuFor: ${JSON.stringify(tr('Node: '))},
-    titleClickDiff: ${JSON.stringify(tr('Click to compare with current'))},
-    titleClickJump: ${JSON.stringify(tr('Click to jump to this node'))},
-    badgeBase: ${JSON.stringify(tr('Base'))},
-    badgeDiff: ${JSON.stringify(tr('Diff'))},
-    headerNode: ${JSON.stringify(tr('Node'))},
-    headerDiff: ${JSON.stringify(tr('Diff'))},
-    headerLines: ${JSON.stringify(tr('Lines'))},
-    headerSize: ${JSON.stringify(tr('Size'))},
-    headerTime: ${JSON.stringify(tr('Time'))},
+    noteDoubleClickToEdit: ${serializeForInlineScript(tr(' (double-click to edit)'))},
+    noteAdd: ${serializeForInlineScript(tr('Add note'))},
+    pinNode: ${serializeForInlineScript(tr('Pin node'))},
+    unpinNode: ${serializeForInlineScript(tr('Unpin node'))},
+    pinnedNodes: ${serializeForInlineScript(tr('Pinned'))},
+    loading: ${serializeForInlineScript(tr('Loading...'))},
+    textEditorsOnly: ${serializeForInlineScript(tr('Undo Tree is only available for text editors.'))},
+    notTrackedWithExt: ${serializeForInlineScript(tr('Undo Tree: {0} is not tracked', '{ext}'))},
+    notTrackedGeneric: ${serializeForInlineScript(tr('Undo Tree: this file is not tracked'))},
+    notTrackedHintWithExt: ${serializeForInlineScript(tr('To enable tracking for {0} files, click the status bar item or open Settings.', '{ext}'))},
+    notTrackedHintGeneric: ${serializeForInlineScript(tr('To enable tracking for this file, click the status bar item or open Settings.'))},
+    enableTrackingWithExt: ${serializeForInlineScript(tr('Enable tracking for {0}', '{ext}'))},
+    enableTrackingGeneric: ${serializeForInlineScript(tr('Enable tracking for this file'))},
+    excludedByPattern: ${serializeForInlineScript(tr('Undo Tree: this file is excluded by a pattern'))},
+    excludedByPatternHint: ${serializeForInlineScript(tr('This file matches undotree.excludePatterns. Edit that setting to track it.'))},
+    editExcludePatterns: ${serializeForInlineScript(tr('Edit exclude patterns'))},
+    openSettings: ${serializeForInlineScript(tr('Open Settings'))},
+    basePrefix: ${serializeForInlineScript(tr('Base: '))},
+    pairDiffNeedsBase: ${serializeForInlineScript(tr('Select a base node first or press B.'))},
+    contextJump: ${serializeForInlineScript(tr('Jump'))},
+    contextDiffCurrent: ${serializeForInlineScript(tr('Compare with Current'))},
+    contextSetBase: ${serializeForInlineScript(tr('Set Pair Diff Base'))},
+    contextPin: ${serializeForInlineScript(tr('Pin'))},
+    contextUnpin: ${serializeForInlineScript(tr('Unpin'))},
+    contextEditNote: ${serializeForInlineScript(tr('Edit Note'))},
+    contextDisplaySettings: ${serializeForInlineScript(tr('Display Settings'))},
+    contextMenuFor: ${serializeForInlineScript(tr('Node: '))},
+    titleClickDiff: ${serializeForInlineScript(tr('Click to compare with current'))},
+    titleClickJump: ${serializeForInlineScript(tr('Click to jump to this node'))},
+    badgeBase: ${serializeForInlineScript(tr('Base'))},
+    badgeDiff: ${serializeForInlineScript(tr('Diff'))},
+    headerNode: ${serializeForInlineScript(tr('Node'))},
+    headerDiff: ${serializeForInlineScript(tr('Diff'))},
+    headerLines: ${serializeForInlineScript(tr('Lines'))},
+    headerSize: ${serializeForInlineScript(tr('Size'))},
+    headerTime: ${serializeForInlineScript(tr('Time'))},
   };
 
   function replaceExt(template, ext) {
@@ -955,9 +1012,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
 
   const undoButton = document.getElementById('btn-undo');
-  if (undoButton) { undoButton.addEventListener('click', () => send('undo')); }
+  if (undoButton) { undoButton.addEventListener('click', () => send('undo', { sourceUri })); }
   const redoButton = document.getElementById('btn-redo');
-  if (redoButton) { redoButton.addEventListener('click', () => send('redo')); }
+  if (redoButton) { redoButton.addEventListener('click', () => send('redo', { sourceUri })); }
   const pauseButton = document.getElementById('btn-pause');
   if (pauseButton) { pauseButton.addEventListener('click', () => send('togglePause')); }
   const modeButton = document.getElementById('btn-mode');
@@ -1277,9 +1334,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     } else if (e.key === 'Tab') {
       e.preventDefault(); moveSibling(e.shiftKey ? -1 : 1);
     } else if (e.key === 'u') {
-      e.preventDefault(); send('undo');
+      e.preventDefault(); send('undo', { sourceUri });
     } else if (e.key === 'r') {
-      e.preventDefault(); send('redo');
+      e.preventDefault(); send('redo', { sourceUri });
     } else if (e.key === 'd') {
       e.preventDefault(); send('toggleMode');
     } else if (e.key === 'b') {
@@ -1529,11 +1586,22 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         renderDiffTools();
       }
 
-  function renderNotTracked(ext) {
+  function renderNotTracked(ext, reason) {
     const treeEl = document.getElementById('tree');
     const pinnedEl = document.getElementById('pinned');
     if (pinnedEl) { pinnedEl.innerHTML = ''; }
     treeEl.classList.add('plain-view');
+    if (reason === 'excludePattern') {
+      treeEl.innerHTML =
+        '<div class="msg">' + escHtml(i18n.excludedByPattern) + '</div>' +
+        '<div class="hint">' + escHtml(i18n.excludedByPatternHint) + '</div>' +
+        '<button class="btn" id="open-exclude-settings-btn">' + escHtml(i18n.editExcludePatterns) + '</button>';
+      document.getElementById('open-exclude-settings-btn')?.addEventListener('click', () => send('openExcludeSettings'));
+      nodeEls = [];
+      nodeIds = [];
+      treeMap = {};
+      return;
+    }
     treeEl.innerHTML =
       '<div class="msg">' + escHtml(ext ? replaceExt(i18n.notTrackedWithExt, ext) : i18n.notTrackedGeneric) + '</div>' +
       '<div class="hint">' + escHtml(ext ? replaceExt(i18n.notTrackedHintWithExt, ext) : i18n.notTrackedHintGeneric) + '</div>' +
@@ -1574,13 +1642,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     }
 
     const pauseButton = document.querySelector('.btn-pause');
-    const pauseTitle = state.paused ? ${JSON.stringify(tr('Resume tracking'))} : ${JSON.stringify(tr('Pause tracking'))};
+    const pauseTitle = state.paused ? ${serializeForInlineScript(tr('Resume tracking'))} : ${serializeForInlineScript(tr('Pause tracking'))};
     pauseButton.innerHTML = state.paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>';
     pauseButton.title = pauseTitle;
     pauseButton.setAttribute('aria-label', pauseTitle);
 
     const modeButton = document.querySelector('.btn-mode');
-    const modeTitle = mode === 'navigate' ? ${JSON.stringify(tr('Switch to Diff mode'))} : ${JSON.stringify(tr('Switch to Navigate mode'))};
+    const modeTitle = mode === 'navigate' ? ${serializeForInlineScript(tr('Switch to Diff mode'))} : ${serializeForInlineScript(tr('Switch to Navigate mode'))};
     modeButton.innerHTML = mode === 'navigate' ? '<span class="icon-glyph">&#8644;</span>' : '<span class="icon-glyph">&#9776;</span>';
     modeButton.title = modeTitle;
     modeButton.setAttribute('aria-label', modeTitle);
@@ -1593,7 +1661,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         pausedBadge.className = 'paused-badge';
         document.querySelector('.actions').insertAdjacentElement('afterend', pausedBadge);
       }
-      pausedBadge.textContent = ${JSON.stringify(tr('Tracking paused - history is frozen'))};
+      pausedBadge.textContent = ${serializeForInlineScript(tr('Tracking paused - history is frozen'))};
     } else if (pausedBadge) {
       pausedBadge.remove();
     }
@@ -1610,7 +1678,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
           document.querySelector('.actions').insertAdjacentElement('afterend', diffBadge);
         }
       }
-      diffBadge.textContent = ${JSON.stringify(tr('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing'))};
+      diffBadge.textContent = ${serializeForInlineScript(tr('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing'))};
     } else if (diffBadge) {
       diffBadge.remove();
     }
@@ -1630,17 +1698,17 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       return;
     }
     if (state.view === 'notTracked') {
-      renderNotTracked(state.notTrackedExt || '');
+      renderNotTracked(state.notTrackedExt || '', state.notTrackedReason || 'extension');
       return;
     }
     buildTree(state.nodes, state.currentId, rootId);
   }
 
   renderState({
-    view: ${JSON.stringify(initialView)},
+    view: ${serializeForInlineScript(initialView)},
     nodes,
     currentId,
-    paused: ${JSON.stringify(paused)},
+    paused: ${serializeForInlineScript(paused)},
     mode,
     timeFormat,
     timeFormatCustom,
@@ -1648,7 +1716,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     nodeSizeMetricBase,
     showStorageKind,
     colorTheme,
-    notTrackedExt: ${JSON.stringify(initialNotTrackedExt)},
+    notTrackedExt: ${serializeForInlineScript(initialNotTrackedExt)},
+    notTrackedReason: ${serializeForInlineScript(initialNotTrackedReason)},
     sourceUri,
     rootId
   });
@@ -1657,4 +1726,3 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
 </html>`;
     }
 }
-

@@ -51,13 +51,15 @@ describe('UndoTreeProvider initialization', () => {
     });
 
     function makeView() {
+        let receiveMessage: ((message: any) => Promise<void>) | undefined;
         return {
             visible: true,
             onDidChangeVisibility: jest.fn(),
+            receiveMessage: (message: any) => receiveMessage?.(message),
             webview: {
                 options: {},
                 html: '',
-                onDidReceiveMessage: jest.fn(),
+                onDidReceiveMessage: jest.fn((callback) => { receiveMessage = callback; }),
                 postMessage: jest.fn(),
             },
         } as any;
@@ -141,7 +143,7 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        const html = (provider as any).buildHtml([], 42, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false, 'blue', 'tree', '', '', 41);
+        const html = (provider as any).buildHtml([], 42, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false, 'blue', 'tree', '', '', '', 41);
 
         expect(html).toContain('let rootId = 41;');
         expect(html).toContain('renderNode(rootId, [], false, 0);');
@@ -305,6 +307,51 @@ describe('UndoTreeProvider initialization', () => {
         expect(view.webview.html).toContain('Open Settings');
         expect(view.webview.html).toContain('enableTrackingWithExt');
         expect(view.webview.html).toContain('".js"');
+        expect(view.webview.html).toContain('notTrackedReason: "extension"');
+    });
+
+    it('distinguishes excludePatterns from an unregistered extension and only offers settings', async () => {
+        const vscode = require('vscode');
+        vscode.commands.executeCommand.mockClear();
+        vscode.workspace.getConfiguration = jest.fn(() => ({
+            get: jest.fn((key: string) => {
+                if (key === 'enabledExtensions') { return ['.md']; }
+                if (key === 'excludePatterns') { return ['secret.*']; }
+                return undefined;
+            }),
+        }));
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        const document = {
+            ...makeDocument('secret', 'file:///secret.md'),
+            fileName: '/workspace/secret.md',
+        };
+
+        vscode.window.activeTextEditor = { document };
+        vscode.workspace.textDocuments = [document];
+        provider.resolveWebviewView(view);
+
+        expect(view.webview.html).toContain('notTrackedReason: "excludePattern"');
+        expect(view.webview.html).toContain('this file is excluded by a pattern');
+        expect(view.webview.html).toContain('matches undotree.excludePatterns');
+        expect(view.webview.html).toContain("send('openExcludeSettings')");
+
+        await view.receiveMessage({ command: 'openExcludeSettings' });
+        expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
+            'workbench.action.openSettings',
+            'undotree.excludePatterns'
+        );
+    });
+
+    it('honors current as nodeSizeMetricBase', () => {
+        const vscode = require('vscode');
+        vscode.workspace.getConfiguration = jest.fn(() => ({
+            get: jest.fn((key: string) => key === 'nodeSizeMetricBase' ? 'current' : undefined),
+        }));
+        const provider = new UndoTreeProvider({} as any, new UndoTreeManager());
+
+        expect((provider as any).getNodeSizeMetricBase()).toBe('current');
     });
 
     it('prefers the active untracked file over a stale tracked editor', () => {
@@ -569,6 +616,31 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain('Content-Security-Policy');
         expect(html).toContain("script-src 'nonce-");
         expect(html).toContain("style-src vscode-resource: 'nonce-");
+    });
+
+    it('uses a fresh cryptographic nonce for each webview shell', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+
+        const first = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
+        const second = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
+        const firstNonce = first.match(/script-src 'nonce-([a-f0-9]{32})'/)?.[1];
+        const secondNonce = second.match(/script-src 'nonce-([a-f0-9]{32})'/)?.[1];
+
+        expect(firstNonce).toHaveLength(32);
+        expect(secondNonce).toHaveLength(32);
+        expect(secondNonce).not.toBe(firstNonce);
+    });
+
+    it('escapes closing script tags in initial webview JSON', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const malicious = '</script><script>alert(1)</script>';
+
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'custom', malicious, 'none', 'current', false);
+
+        expect(html).not.toContain(`let timeFormatCustom = "${malicious}"`);
+        expect(html).toContain('let timeFormatCustom = "\\u003c/script>\\u003cscript>alert(1)\\u003c/script>";');
     });
 
     it('escapes label and formatted time values before injecting HTML', () => {

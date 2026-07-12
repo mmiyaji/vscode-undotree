@@ -71,6 +71,10 @@ let statusBarItem: vscode.StatusBarItem | undefined;
 let statusBarEditor: vscode.TextEditor | undefined;
 let persistTimer: ReturnType<typeof setTimeout> | undefined;
 const PERSIST_DEBOUNCE_MS = 1000;
+const PERSIST_LOCK_RETRY_MS = 50;
+const PERSIST_LOCK_TIMEOUT_MS = 10_000;
+const PERSIST_LOCK_HEARTBEAT_MS = 5_000;
+let persistWriteQueue: Promise<void> = Promise.resolve();
 let compactPreviewPanel: vscode.WebviewPanel | undefined;
 let diagnosticsPanel: vscode.WebviewPanel | undefined;
 let compactPreviewOverrides = new Map<number, 'remove' | 'keep'>();
@@ -88,8 +92,21 @@ const multiWindowLockUris = new Set<string>();
 const multiWindowWarnedUris = new Set<string>();
 let multiWindowLockWriteWarningShown = false;
 const persistedUris = new Set<string>();
+const knownPersistedTreeRevisions = new Map<string, string>();
+const knownPersistedDestructiveGenerations = new Map<string, number>();
 const pendingRenameOldUris = new Set<string>();
 const persistRootMismatchWarnedUris = new Set<string>();
+const destructivePersistGenerations = new Map<string, number>();
+const destructivePersistChanges = new Map<string, DestructivePersistChange>();
+const documentLifecycleGenerations = new Map<string, number>();
+const documentTaskQueues = new Map<string, Promise<void>>();
+const treeLoadPromises = new Map<string, Promise<void>>();
+let documentTaskEpoch = 0;
+let resetInProgress = false;
+let storageEpochRebaseInProgress = false;
+let windowStorageEpoch: number | undefined;
+let windowStorageEpochLoad: Promise<number> | undefined;
+const staleDestructiveGenerationWarnedUris = new Set<string>();
 let autoPersistFailureCount = 0;
 let autoPersistWarningShown = false;
 let deactivateHandler: (() => Promise<void>) | undefined;
@@ -137,6 +154,28 @@ type ManifestReadResult = {
         trees: Array<{ uri: string; file: string }>;
     };
 };
+
+type PersistOptions = {
+    /** Only these resident trees are written. Omit to write every eligible resident tree. */
+    dirtyUris?: ReadonlySet<string>;
+    /** These trees are authoritative snapshots (used by destructive compaction). */
+    replaceUris?: ReadonlySet<string>;
+    /** Disk revision observed before compaction, used for destructive CAS. */
+    destructiveChanges?: ReadonlyMap<string, DestructivePersistChange>;
+    /** Per-window destructive generation captured when the request was created. */
+    expectedDestructiveGenerations?: ReadonlyMap<string, number>;
+};
+
+type DestructivePersistChange = {
+    baseRevision: string | null;
+};
+
+class StorageEpochMismatchError extends Error {
+    constructor(readonly currentEpoch: number) {
+        super(`Undo Tree storage epoch changed to ${currentEpoch}`);
+        this.name = 'StorageEpochMismatchError';
+    }
+}
 
 type DiagnosticsSnapshot = {
     manifestStatus: ManifestReadResult['status'];
@@ -190,7 +229,9 @@ async function notifyManifestReadStatus(
     status: ManifestReadResult['status'],
     outputChannel: vscode.OutputChannel
 ) {
-    if (status === 'ok' || status === 'missing') {
+    const hasUnmanifestedTrees = status === 'missing' &&
+        await hasUnmanifestedPersistedTreeFiles(context);
+    if (status === 'ok' || (status === 'missing' && !hasUnmanifestedTrees)) {
         return;
     }
 
@@ -213,7 +254,12 @@ async function notifyManifestReadStatus(
         return;
     }
 
-    outputChannel.appendLine('[manifest] manifest.json and manifest.json.bak could not be read. Persisted history was not loaded, and pruning is disabled to avoid deleting orphaned data.');
+    autoPersistWarningShown = true;
+    outputChannel.appendLine(
+        status === 'missing'
+            ? '[manifest] manifest files are missing while persisted tree files remain. Saving and pruning are blocked to avoid overwriting recoverable data.'
+            : '[manifest] manifest.json and manifest.json.bak could not be read. Persisted history was not loaded, and pruning is disabled to avoid deleting orphaned data.'
+    );
     const picked = await vscode.window.showWarningMessage(
         tr('Undo Tree could not read persisted history metadata. Existing persisted files will be left untouched to avoid data loss. You can inspect the storage folder or run Reset All State if you want to discard broken metadata.'),
         { modal: true },
@@ -228,6 +274,17 @@ async function notifyManifestReadStatus(
     } else if (picked === openOutputLabel) {
         outputChannel.show(true);
     }
+}
+
+async function hasUnmanifestedPersistedTreeFiles(
+    context: vscode.ExtensionContext
+): Promise<boolean> {
+    const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
+    const entries = await fs.readdir(treesDir, { withFileTypes: true })
+        .catch(() => [] as import('fs').Dirent[]);
+    return entries.some((entry) => entry.isFile() &&
+        entry.name !== 'manifest.json' &&
+        entry.name !== 'manifest.json.bak');
 }
 
 function makeTreeFileName(uri: string): string {
@@ -877,6 +934,89 @@ function getSerializedRootHash(tree: SerializedUndoTree): string | undefined {
     return tree.nodes.find((node) => node.id === tree.rootId)?.hash;
 }
 
+function getSerializedTreeRevision(tree: SerializedUndoTree): string {
+    const canonical = {
+        rootId: tree.rootId,
+        currentId: tree.currentId,
+        nodes: [...tree.nodes]
+            .sort((a, b) => a.id - b.id)
+            .map((node) => [
+                node.id,
+                [...node.parents].sort((a, b) => a - b),
+                [...node.children].sort((a, b) => a - b),
+                node.timestamp,
+                node.label,
+                node.hash,
+                node.lineCount ?? null,
+                node.byteCount ?? null,
+                node.note ?? null,
+                node.noteUpdatedAt ?? null,
+                node.pinned ?? null,
+                node.pinnedUpdatedAt ?? null,
+            ]),
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+async function writeGenerationConflictSnapshot(
+    treesDir: string,
+    uri: string,
+    tree: SerializedUndoTree,
+    nextId: number,
+    expectedGeneration: number,
+    actualGeneration: number,
+    actualTreeRevision: string
+): Promise<{ filePath: string; checkpointHashes: Set<string> }> {
+    const contentDir = path.join(treesDir, 'content');
+    const checkpointHashes = new Set<string>();
+    const nodes = await Promise.all(tree.nodes.map(async (node) => {
+        if (node.storage.kind !== 'checkpoint') {
+            return { ...node, parents: [...node.parents], children: [...node.children] };
+        }
+        const hash = requireValidContentHash(node.storage.contentHash);
+        checkpointHashes.add(hash);
+        let content: string | undefined;
+        try {
+            content = manager?.getCheckpointContent(hash);
+        } catch {
+            // Fall through to the durable content blob.
+        }
+        if (content === undefined) {
+            const buffer = await readFileWithWriteBackupFallback(path.join(contentDir, hash));
+            const isGzip = buffer[0] === 0x1f && buffer[1] === 0x8b;
+            content = isGzip ? (await gunzip(buffer)).toString('utf8') : buffer.toString('utf8');
+        }
+        const mainContentPath = path.join(contentDir, hash);
+        try {
+            await fs.access(mainContentPath);
+        } catch {
+            await writeFileSafely(mainContentPath, await gzip(Buffer.from(content, 'utf8')));
+        }
+        return {
+            ...node,
+            parents: [...node.parents],
+            children: [...node.children],
+            storage: { kind: 'full' as const, content },
+        };
+    }));
+    const conflictDir = path.join(treesDir, 'conflicts');
+    const fileName = `${crypto.createHash('sha1').update(uri).digest('hex')}-${multiWindowSessionId}.json.gz`;
+    const filePath = path.join(conflictDir, fileName);
+    const payload = JSON.stringify({
+        version: 1,
+        uri,
+        sessionId: multiWindowSessionId,
+        savedAt: Date.now(),
+        expectedDestructiveGeneration: expectedGeneration,
+        actualDestructiveGeneration: actualGeneration,
+        actualTreeRevision,
+        nextId,
+        tree: { ...tree, nodes },
+    }, null, 2);
+    await writeFileSafely(filePath, await gzip(Buffer.from(payload, 'utf8')));
+    return { filePath, checkpointHashes };
+}
+
 function findSerializedFullContentByHash(tree: SerializedUndoTree, hash: string): string | undefined {
     for (const node of tree.nodes) {
         if (node.hash === hash && node.storage.kind === 'full') {
@@ -898,7 +1038,7 @@ async function readPersistedContentHashesFromTreeFile(
     fileName: string
 ): Promise<Set<string>> {
     const treePath = path.join(treesDir, fileName);
-    const buf = await fs.readFile(treePath);
+    const buf = await readFileWithWriteBackupFallback(treePath);
     const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
     const raw = isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
     const parsed = JSON.parse(raw) as {
@@ -911,6 +1051,29 @@ async function readPersistedContentHashesFromTreeFile(
                 node.storage.kind === 'checkpoint')
             .map((node) => requireValidContentHash(node.storage.contentHash))
     );
+}
+
+async function readFileWithWriteBackupFallback(filePath: string): Promise<Buffer> {
+    try {
+        return await fs.readFile(filePath);
+    } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+            throw error;
+        }
+        // writeFileSafely temporarily renames the previous file while replacing
+        // it. Readers do not take the writer lock, so use that verified previous
+        // generation instead of treating the tree as absent/fresh.
+        try {
+            return await fs.readFile(`${filePath}.bak-write`);
+        } catch (backupError: unknown) {
+            if ((backupError as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+                throw backupError;
+            }
+            // The writer may have installed the new primary and removed the
+            // backup between our two reads. Retry the primary once.
+            return fs.readFile(filePath);
+        }
+    }
 }
 
 async function writeFileSafely(
@@ -959,12 +1122,331 @@ async function writeFileSafely(
     }
 }
 
-async function persistStateToDisk(
+function getStorageEpochPath(context: vscode.ExtensionContext): string {
+    return path.join(context.globalStorageUri.fsPath, '.undo-trees.epoch');
+}
+
+type StorageEpochRecord = {
+    epoch: number;
+    state: 'resetting' | 'committed';
+};
+
+async function readStorageEpochRecord(context: vscode.ExtensionContext): Promise<StorageEpochRecord> {
+    try {
+        const raw = (await readFileWithWriteBackupFallback(getStorageEpochPath(context))).toString('utf8');
+        const trimmed = raw.trim();
+        // Accept the short-lived numeric format written by earlier builds as a
+        // committed epoch, then migrate on the next reset.
+        if (/^\d+$/.test(trimmed)) {
+            return { epoch: Number(trimmed), state: 'committed' };
+        }
+        const parsed = JSON.parse(trimmed) as Partial<StorageEpochRecord>;
+        if (
+            !Number.isSafeInteger(parsed.epoch) ||
+            (parsed.epoch as number) < 0 ||
+            (parsed.state !== 'resetting' && parsed.state !== 'committed')
+        ) {
+            throw new Error('Invalid Undo Tree storage epoch');
+        }
+        return { epoch: parsed.epoch as number, state: parsed.state };
+    } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            return { epoch: 0, state: 'committed' };
+        }
+        throw error;
+    }
+}
+
+async function writeStorageEpochRecord(
+    context: vscode.ExtensionContext,
+    record: StorageEpochRecord
+): Promise<void> {
+    await writeFileSafely(getStorageEpochPath(context), JSON.stringify(record), 'utf8');
+}
+
+async function recoverStorageEpochUnderLock(context: vscode.ExtensionContext): Promise<number> {
+    const record = await readStorageEpochRecord(context);
+    if (record.state === 'resetting') {
+        await removePersistedState(context);
+        await writeStorageEpochRecord(context, { epoch: record.epoch, state: 'committed' });
+    }
+    return record.epoch;
+}
+
+async function ensureWindowStorageEpoch(context: vscode.ExtensionContext): Promise<number> {
+    if (windowStorageEpoch === undefined) {
+        windowStorageEpochLoad ??= withPersistStorageLock(
+            context,
+            () => recoverStorageEpochUnderLock(context)
+        );
+        const load = windowStorageEpochLoad;
+        try {
+            windowStorageEpoch = await load;
+        } finally {
+            if (windowStorageEpochLoad === load) {
+                windowStorageEpochLoad = undefined;
+            }
+        }
+    }
+    return windowStorageEpoch;
+}
+
+async function resetStorageUnderLock(context: vscode.ExtensionContext): Promise<number> {
+    const nextEpoch = (await recoverStorageEpochUnderLock(context)) + 1;
+    await writeStorageEpochRecord(context, { epoch: nextEpoch, state: 'resetting' });
+    await removePersistedState(context);
+    await writeStorageEpochRecord(context, { epoch: nextEpoch, state: 'committed' });
+    return nextEpoch;
+}
+
+function rebaseManagerForStorageEpoch(currentEpoch: number): void {
+    windowStorageEpoch = currentEpoch;
+    windowStorageEpochLoad = undefined;
+    documentTaskEpoch++;
+    documentLifecycleGenerations.clear();
+    knownPersistedTreeRevisions.clear();
+    knownPersistedDestructiveGenerations.clear();
+    persistedUris.clear();
+    destructivePersistGenerations.clear();
+    destructivePersistChanges.clear();
+    staleDestructiveGenerationWarnedUris.clear();
+    if (!manager) {
+        return;
+    }
+
+    storageEpochRebaseInProgress = true;
+    try {
+        manager.resetAll();
+        manager.paused = false;
+        for (const document of vscode.workspace.textDocuments) {
+            if (isTracked(document)) {
+                manager.getTree(document.uri, document.getText());
+            }
+        }
+    } finally {
+        storageEpochRebaseInProgress = false;
+    }
+}
+
+type PersistLockRecord = {
+    owner?: string;
+    pid?: number;
+    createdAt?: number;
+};
+
+type PersistLockSnapshot = {
+    raw: string;
+    record?: PersistLockRecord;
+    stat: Awaited<ReturnType<typeof fs.stat>>;
+};
+
+async function readPersistLockSnapshot(filePath: string): Promise<PersistLockSnapshot | undefined> {
+    try {
+        const [raw, stat] = await Promise.all([
+            fs.readFile(filePath, 'utf8'),
+            fs.stat(filePath),
+        ]);
+        let record: PersistLockRecord | undefined;
+        try {
+            record = JSON.parse(raw) as PersistLockRecord;
+        } catch {
+            // Invalid records are recoverable only after a grace period.
+        }
+        return { raw, record, stat };
+    } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            return undefined;
+        }
+        throw error;
+    }
+}
+
+function isPersistLockOwnerAlive(record: PersistLockRecord | undefined): boolean | undefined {
+    if (!Number.isSafeInteger(record?.pid) || (record?.pid as number) <= 0) {
+        return undefined;
+    }
+    try {
+        process.kill(record!.pid!, 0);
+        return true;
+    } catch (error: unknown) {
+        return (error as NodeJS.ErrnoException)?.code !== 'ESRCH';
+    }
+}
+
+function canRecoverPersistLock(snapshot: PersistLockSnapshot): boolean {
+    const ownerAlive = isPersistLockOwnerAlive(snapshot.record);
+    // An ownerless/partial record can be the short interval between exclusive
+    // creation and writing the claim. Its age cannot prove that the creator is
+    // gone (the process or machine may have been suspended), so fail closed.
+    // A recorded PID that the OS confirms is gone is the only safe recovery.
+    return ownerAlive === false;
+}
+
+function isSamePersistLockSnapshot(
+    initial: PersistLockSnapshot,
+    current: PersistLockSnapshot
+): boolean {
+    const initialOwner = initial.record?.owner;
+    if (typeof initialOwner === 'string' && initialOwner.length > 0) {
+        return current.record?.owner === initialOwner;
+    }
+    // Invalid records have no owner token. Compare both their bytes and stable
+    // file identity so a newly-created lock with the same partial bytes is not
+    // removed by an older recovery attempt.
+    return current.raw === initial.raw &&
+        current.stat.size === initial.stat.size &&
+        current.stat.birthtimeMs === initial.stat.birthtimeMs &&
+        current.stat.ino === initial.stat.ino;
+}
+
+async function tryRecoverPersistLock(filePath: string): Promise<boolean> {
+    const initial = await readPersistLockSnapshot(filePath);
+    if (!initial) {
+        return true;
+    }
+    if (!canRecoverPersistLock(initial)) {
+        return false;
+    }
+
+    // Re-read immediately before deletion. Another process may have replaced
+    // the stale file while we were probing its PID or waiting on I/O.
+    const current = await readPersistLockSnapshot(filePath);
+    if (!current) {
+        return true;
+    }
+    if (!isSamePersistLockSnapshot(initial, current)) {
+        return false;
+    }
+    try {
+        await fs.unlink(filePath);
+        return true;
+    } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            return true;
+        }
+        throw error;
+    }
+}
+
+async function releaseOwnedPersistLock(filePath: string, owner: string): Promise<void> {
+    try {
+        const snapshot = await readPersistLockSnapshot(filePath);
+        if (snapshot?.record?.owner === owner) {
+            await fs.unlink(filePath).catch(() => undefined);
+        }
+    } catch {
+        // A stale-lock recovery or process shutdown may already have removed it.
+    }
+}
+
+async function withPersistStorageLock<T>(
+    context: vscode.ExtensionContext,
+    operation: () => Promise<T>
+): Promise<T> {
+    const rootDir = context.globalStorageUri.fsPath;
+    await fs.mkdir(rootDir, { recursive: true });
+    const lockPath = path.join(rootDir, '.undo-trees.persist.lock');
+    const recoveryLockPath = `${lockPath}.recovery`;
+    const owner = `${multiWindowSessionId}:${process.pid}:${crypto.randomBytes(8).toString('hex')}`;
+    const deadline = Date.now() + PERSIST_LOCK_TIMEOUT_MS;
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+
+    while (!handle) {
+        try {
+            handle = await fs.open(lockPath, 'wx');
+            try {
+                await handle.writeFile(JSON.stringify({ owner, pid: process.pid, createdAt: Date.now() }), 'utf8');
+            } catch (writeError) {
+                await handle.close().catch(() => undefined);
+                handle = undefined;
+                await fs.unlink(lockPath).catch(() => undefined);
+                throw writeError;
+            }
+        } catch (error: unknown) {
+            const nodeError = error as NodeJS.ErrnoException;
+            if (nodeError?.code !== 'EEXIST') {
+                throw error;
+            }
+            let recoveryHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
+            const recoveryOwner = `${owner}:recovery`;
+            try {
+                recoveryHandle = await fs.open(recoveryLockPath, 'wx');
+                try {
+                    await recoveryHandle.writeFile(JSON.stringify({
+                        owner: recoveryOwner,
+                        pid: process.pid,
+                        createdAt: Date.now(),
+                    }), 'utf8');
+                } catch (writeError) {
+                    await recoveryHandle.close().catch(() => undefined);
+                    recoveryHandle = undefined;
+                    await fs.unlink(recoveryLockPath).catch(() => undefined);
+                    throw writeError;
+                }
+            } catch (recoveryError: unknown) {
+                if ((recoveryError as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+                    throw recoveryError;
+                }
+                if (await tryRecoverPersistLock(recoveryLockPath)) {
+                    continue;
+                }
+            }
+            if (recoveryHandle) {
+                let recovered = false;
+                try {
+                    recovered = await tryRecoverPersistLock(lockPath);
+                } finally {
+                    await recoveryHandle.close().catch(() => undefined);
+                    await releaseOwnedPersistLock(recoveryLockPath, recoveryOwner);
+                }
+                if (recovered) {
+                    continue;
+                }
+            }
+            if (Date.now() >= deadline) {
+                throw new Error('Timed out waiting for Undo Tree persistence lock');
+            }
+            await new Promise((resolve) => setTimeout(resolve, PERSIST_LOCK_RETRY_MS));
+        }
+    }
+
+    const heartbeat = setInterval(() => {
+        void handle?.utimes(new Date(), new Date()).catch(() => undefined);
+    }, PERSIST_LOCK_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    try {
+        return await operation();
+    } finally {
+        clearInterval(heartbeat);
+        await handle.close().catch(() => undefined);
+        await releaseOwnedPersistLock(lockPath, owner);
+    }
+}
+
+async function withPersistStorageEpochLock<T>(
+    context: vscode.ExtensionContext,
+    operation: () => Promise<T>
+): Promise<T> {
+    const expectedEpoch = await ensureWindowStorageEpoch(context);
+    return withPersistStorageLock(context, async () => {
+        const currentEpoch = await recoverStorageEpochUnderLock(context);
+        if (currentEpoch !== expectedEpoch) {
+            throw new StorageEpochMismatchError(currentEpoch);
+        }
+        return operation();
+    });
+}
+
+async function persistStateToDiskUnderLock(
     context: vscode.ExtensionContext,
     state: ReturnType<UndoTreeManager['exportState']>,
     paused: boolean,
-    dirtyUris?: Set<string>  // undefined = 全ツリーを保存（手動保存時）
+    options: PersistOptions = {}
 ) {
+    const dirtyUris = options.dirtyUris;
+    const replaceUris = options.replaceUris ?? new Set<string>();
+    const destructiveChanges = options.destructiveChanges ?? new Map<string, DestructivePersistChange>();
+    const expectedDestructiveGenerations = options.expectedDestructiveGenerations ?? new Map<string, number>();
     const rootDir = context.globalStorageUri.fsPath;
     const treesDir = path.join(rootDir, 'undo-trees');
     const contentDir = path.join(treesDir, 'content');
@@ -974,10 +1456,30 @@ async function persistStateToDisk(
     const checkpointThreshold = getCheckpointThresholdBytes();
     const allEntries = Object.entries(state.trees);
     const referencedContentHashes = new Set<string>();
+    const persistedContentHashesByUri = new Map<string, Set<string>>();
 
     // メモリにないツリーを既存 manifest から保持（上書き保存で消えないようにする）
     const existingManifestResult = await readPersistedManifest(context);
     const existingManifest = existingManifestResult.manifest;
+    const hasUnmanifestedTreeFiles = existingManifestResult.status === 'missing' &&
+        await hasUnmanifestedPersistedTreeFiles(context);
+    if (existingManifestResult.status === 'invalid' || hasUnmanifestedTreeFiles) {
+        return {
+            rootDir,
+            treesDir,
+            treeCount: allEntries.length,
+            writtenCount: 0,
+            persistedUris: Array.from(persistedUris),
+            persistedContentHashesByUri: new Map<string, Set<string>>(),
+            persistedTreeRevisionsByUri: new Map<string, string>(),
+            snapshotCompatibleUris: new Set<string>(),
+            persistedDestructiveGenerationsByUri: new Map<string, number>(),
+            staleDestructiveGenerationUris: new Set<string>(),
+            conflictPersistedPathsByUri: new Map<string, string>(),
+            unpersistedUris: new Set(dirtyUris ?? allEntries.map(([uri]) => uri)),
+            manifestInvalid: true as const,
+        };
+    }
     const existingUris = new Set((existingManifest?.trees ?? []).map((entry) => entry.uri));
     const persistedEntries = allEntries.filter(([uri, tree]) =>
         existingUris.has(uri) || tree.nodes.length > 1
@@ -992,19 +1494,127 @@ async function persistStateToDisk(
     const preservedEntries = (existingManifest?.trees ?? []).filter(e => !inMemoryUris.has(e.uri));
 
     const preparedWriteEntries: Array<[string, NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>]> = [];
-    let persistedNextId = state.nextId;
-    const persistOutcomes: Array<{ uri: string; action: 'written' | 'merged' | 'preserved-existing'; nodes: number; details?: string }> = [];
+    const skippedDestructiveUris = new Set<string>();
+    // nextId is storage-global. Even a request that skips every tree because of
+    // a generation conflict must never roll it back below the durable manifest.
+    let persistedNextId = Math.max(state.nextId, existingManifest?.nextId ?? 1);
+    const unpersistedUris = new Set<string>();
+    const persistedTreeRevisionsByUri = new Map<string, string>();
+    const snapshotCompatibleUris = new Set<string>();
+    const persistedDestructiveGenerationsByUri = new Map<string, number>();
+    const staleDestructiveGenerationUris = new Set<string>();
+    const conflictPersistedPathsByUri = new Map<string, string>();
+    const persistOutcomes: Array<{ uri: string; action: 'written' | 'merged' | 'replaced' | 'preserved-existing'; nodes: number; details?: string }> = [];
     for (const [uri, tree] of writeEntries) {
         let treeToWrite = tree;
-        let action: 'written' | 'merged' | 'preserved-existing' = 'written';
+        let action: 'written' | 'merged' | 'replaced' | 'preserved-existing' = 'written';
         let details: string | undefined;
+        const expectedDestructiveGeneration = expectedDestructiveGenerations.get(uri) ?? 0;
+        let destructiveGenerationToWrite = expectedDestructiveGeneration;
+        const destructiveChange = destructiveChanges.get(uri);
+        if (destructiveChange && !existingUris.has(uri) && destructiveChange.baseRevision !== null) {
+            unpersistedUris.add(uri);
+            skippedDestructiveUris.add(uri);
+            persistOutcomes.push({
+                uri,
+                action: 'preserved-existing',
+                nodes: 0,
+                details: `destructive-revision-missing expected=${destructiveChange.baseRevision}`,
+            });
+            continue;
+        }
         if (existingUris.has(uri)) {
             try {
                 const existing = await loadPersistedTreeFromDisk(context, vscode.Uri.parse(uri));
+                if (!existing?.tree) {
+                    unpersistedUris.add(uri);
+                    persistOutcomes.push({
+                        uri,
+                        action: 'preserved-existing',
+                        nodes: 0,
+                        details: 'validation-failed existing-tree-missing',
+                    });
+                    continue;
+                }
                 if (existing?.tree) {
                     const existingRootHash = getSerializedRootHash(existing.tree);
                     const incomingRootHash = getSerializedRootHash(tree);
-                    if (existingRootHash && incomingRootHash && existingRootHash === incomingRootHash) {
+                    const existingRevision = getSerializedTreeRevision(existing.tree);
+                    destructiveGenerationToWrite = existing.destructiveGeneration;
+                    if (expectedDestructiveGeneration !== existing.destructiveGeneration) {
+                        unpersistedUris.add(uri);
+                        staleDestructiveGenerationUris.add(uri);
+                        persistedDestructiveGenerationsByUri.set(uri, existing.destructiveGeneration);
+                        const conflict = await writeGenerationConflictSnapshot(
+                            treesDir,
+                            uri,
+                            tree,
+                            state.nextId,
+                            expectedDestructiveGeneration,
+                            existing.destructiveGeneration,
+                            existingRevision
+                        );
+                        conflictPersistedPathsByUri.set(uri, conflict.filePath);
+                        persistedContentHashesByUri.set(uri, conflict.checkpointHashes);
+                        persistOutcomes.push({
+                            uri,
+                            action: 'preserved-existing',
+                            nodes: existing.tree.nodes.length,
+                            details: `stale-destructive-generation expected=${expectedDestructiveGeneration} actual=${existing.destructiveGeneration}`,
+                        });
+                        continue;
+                    } else if (destructiveChange && destructiveChange.baseRevision === existingRevision) {
+                        treeToWrite = tree;
+                        destructiveGenerationToWrite = existing.destructiveGeneration + 1;
+                        persistedNextId = Math.max(persistedNextId, existing.nextId);
+                        action = 'replaced';
+                        details = `existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} revision=${existingRevision}`;
+                        persistRootMismatchWarnedUris.delete(uri);
+                        manager?.debugLog?.(
+                            `[persist-merge] uri=${uri} mode=replace-cas existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} revision=${existingRevision}`
+                        );
+                    } else if (destructiveChange) {
+                        if (existingRootHash && incomingRootHash && existingRootHash === incomingRootHash) {
+                            // The resident tree is stale. Abandon only the destructive
+                            // deletion and fall back to the normal additive merge so
+                            // both windows' branches remain durable and the URI does
+                            // not stay permanently dirty/resident.
+                            const merged = mergeSerializedTrees(
+                                existing.tree,
+                                tree,
+                                Math.max(existing.nextId, state.nextId)
+                            );
+                            treeToWrite = merged.tree;
+                            persistedNextId = Math.max(persistedNextId, merged.nextId);
+                            action = 'merged';
+                            details = `destructive-cas-abandoned expected=${destructiveChange.baseRevision ?? 'missing'} actual=${existingRevision}`;
+                            manager?.debugLog?.(
+                                `[persist-merge] uri=${uri} mode=merge reason=destructive-cas-abandoned expected=${destructiveChange.baseRevision ?? 'missing'} actual=${existingRevision}`
+                            );
+                            if (!persistRootMismatchWarnedUris.has(uri)) {
+                                persistRootMismatchWarnedUris.add(uri);
+                                void vscode.window.showWarningMessage(
+                                    tr('Undo Tree: compact was not applied because saved history changed in another window. Both histories were merged; reload before compacting again.')
+                                );
+                            }
+                        } else {
+                            treeToWrite = existing.tree;
+                            unpersistedUris.add(uri);
+                            persistedNextId = Math.max(persistedNextId, existing.nextId);
+                            action = 'preserved-existing';
+                            details = `destructive-root-mismatch existingRoot=${existingRootHash ?? 'missing'} incomingRoot=${incomingRootHash ?? 'missing'}`;
+                        }
+                    } else if (replaceUris.has(uri)) {
+                        treeToWrite = tree;
+                        destructiveGenerationToWrite = existing.destructiveGeneration + 1;
+                        persistedNextId = Math.max(persistedNextId, existing.nextId);
+                        action = 'replaced';
+                        details = `existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length}`;
+                        persistRootMismatchWarnedUris.delete(uri);
+                        manager?.debugLog?.(
+                            `[persist-merge] uri=${uri} mode=replace existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length}`
+                        );
+                    } else if (existingRootHash && incomingRootHash && existingRootHash === incomingRootHash) {
                         const merged = mergeSerializedTrees(existing.tree, tree, Math.max(existing.nextId, state.nextId));
                         treeToWrite = merged.tree;
                         persistedNextId = Math.max(persistedNextId, merged.nextId);
@@ -1016,6 +1626,7 @@ async function persistStateToDisk(
                         );
                     } else {
                         treeToWrite = existing.tree;
+                        unpersistedUris.add(uri);
                         persistedNextId = Math.max(persistedNextId, existing.nextId);
                         action = 'preserved-existing';
                         details = `existingRoot=${existingRootHash ?? 'missing'} incomingRoot=${incomingRootHash ?? 'missing'}`;
@@ -1034,12 +1645,33 @@ async function persistStateToDisk(
                 manager?.debugLog?.(
                     `[persist-merge] uri=${uri} mode=skip-existing reason=load-failed error=${String(error)}`
                 );
+                unpersistedUris.add(uri);
+                persistOutcomes.push({
+                    uri,
+                    action: 'preserved-existing',
+                    nodes: 0,
+                    details: `validation-failed error=${String(error)}`,
+                });
+                continue;
             }
         }
+        if (!existingUris.has(uri) && (destructiveChange || replaceUris.has(uri))) {
+            destructiveGenerationToWrite = expectedDestructiveGeneration + 1;
+        }
         preparedWriteEntries.push([uri, treeToWrite]);
+        persistedDestructiveGenerationsByUri.set(uri, destructiveGenerationToWrite);
         persistOutcomes.push({ uri, action, nodes: treeToWrite.nodes.length, ...(details ? { details } : {}) });
         for (const hash of getPersistedContentHashes(treeToWrite, checkpointThreshold)) {
             referencedContentHashes.add(hash);
+        }
+    }
+
+    for (const [uri, tree] of preparedWriteEntries) {
+        const revision = getSerializedTreeRevision(tree);
+        persistedTreeRevisionsByUri.set(uri, revision);
+        const incoming = state.trees[uri];
+        if (incoming && getSerializedTreeRevision(incoming) === revision && !unpersistedUris.has(uri)) {
+            snapshotCompatibleUris.add(uri);
         }
     }
 
@@ -1049,14 +1681,18 @@ async function persistStateToDisk(
         nextId: persistedNextId,
         paused,
         trees: [
-            ...persistedEntries.map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
+            ...persistedEntries
+                .filter(([uri]) => !skippedDestructiveUris.has(uri))
+                .map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
             ...preservedEntries,
         ],
     };
 
-    let canPruneTreeFiles = existingManifestResult.status !== 'invalid' && existingManifestResult.status !== 'backup';
-    let canPruneContentFiles = existingManifestResult.status !== 'invalid' && existingManifestResult.status !== 'backup';
-    await Promise.all(preservedEntries.map(async (entry) => {
+    let canPruneTreeFiles = existingManifestResult.status !== 'backup';
+    let canPruneContentFiles = existingManifestResult.status !== 'backup';
+    const writtenUris = new Set(preparedWriteEntries.map(([uri]) => uri));
+    const diskBackedFinalEntries = manifest.trees.filter((entry) => !writtenUris.has(entry.uri));
+    await Promise.all(diskBackedFinalEntries.map(async (entry) => {
         try {
             for (const hash of await readPersistedContentHashesFromTreeFile(treesDir, entry.file)) {
                 referencedContentHashes.add(hash);
@@ -1068,6 +1704,7 @@ async function persistStateToDisk(
 
     await Promise.all(preparedWriteEntries.map(async ([uri, tree]) => {
         const contentHashes = getPersistedContentHashes(tree, checkpointThreshold);
+        persistedContentHashesByUri.set(uri, new Set(contentHashes));
         const useCheckpoint = contentHashes.size > 0;
         const totalFullBytes = tree.nodes.reduce((sum, node) => {
             if (node.storage.kind === 'full') {
@@ -1106,7 +1743,11 @@ async function persistStateToDisk(
             }));
         }
 
-        const json = JSON.stringify({ uri, tree: { ...tree, nodes: serializedNodes } }, null, 2);
+        const json = JSON.stringify({
+            uri,
+            destructiveGeneration: persistedDestructiveGenerationsByUri.get(uri) ?? 0,
+            tree: { ...tree, nodes: serializedNodes },
+        }, null, 2);
         const filePath = path.join(treesDir, makeTreeFileName(uri));
 
         if (useCompression) {
@@ -1133,12 +1774,11 @@ async function persistStateToDisk(
             .map((entry) => fs.unlink(path.join(treesDir, entry.name))));
     }
 
-    if (canPruneContentFiles) {
-        const existingContentFiles = await fs.readdir(contentDir, { withFileTypes: true });
-        await Promise.all(existingContentFiles
-            .filter((entry) => entry.isFile() && !referencedContentHashes.has(entry.name))
-            .map((entry) => fs.unlink(path.join(contentDir, entry.name))));
-    }
+    // Content blobs are intentionally not pruned during automatic/manual saves.
+    // Another window may still hold a checkpoint that was removed from the main
+    // tree by compaction. Diagnostics > Prune Orphan Files remains the explicit,
+    // coordinated cleanup path once no window needs those recovery blobs.
+    void canPruneContentFiles;
 
     manager?.debugLog?.(
         `[persist] treeCount=${allEntries.length} persistedCount=${persistedEntries.length} writtenCount=${writeEntries.length} paused=${paused}`
@@ -1159,8 +1799,97 @@ async function persistStateToDisk(
         treesDir,
         treeCount: allEntries.length,
         writtenCount: writeEntries.length,
-        persistedUris: persistedEntries.map(([uri]) => uri),
+        persistedUris: manifest.trees.map((entry) => entry.uri),
+        persistedContentHashesByUri,
+        persistedTreeRevisionsByUri,
+        snapshotCompatibleUris,
+        persistedDestructiveGenerationsByUri,
+        staleDestructiveGenerationUris,
+        conflictPersistedPathsByUri,
+        unpersistedUris,
     };
+}
+
+async function persistStateToDiskNow(
+    context: vscode.ExtensionContext,
+    state: ReturnType<UndoTreeManager['exportState']>,
+    paused: boolean,
+    expectedEpoch: number,
+    options: PersistOptions = {}
+) {
+    return withPersistStorageLock(context, async () => {
+        const currentEpoch = await recoverStorageEpochUnderLock(context);
+        if (currentEpoch !== expectedEpoch) {
+            throw new StorageEpochMismatchError(currentEpoch);
+        }
+        return persistStateToDiskUnderLock(context, state, paused, options);
+    });
+}
+
+/**
+ * Serialize every persisted-state mutation in invocation order. The queue is
+ * deliberately kept alive after a failed write so a transient failure cannot
+ * prevent later close/deactivate/manual saves from running.
+ */
+function enqueuePersistOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = persistWriteQueue.then(operation, operation);
+    persistWriteQueue = queued.then(() => undefined, () => undefined);
+    return queued;
+}
+
+async function persistStateToDisk(
+    context: vscode.ExtensionContext,
+    state: ReturnType<UndoTreeManager['exportState']>,
+    paused: boolean,
+    dirtyUris?: Set<string>,
+    replaceUris?: Set<string>,
+    destructiveChanges?: Map<string, DestructivePersistChange>
+) {
+    const requestEpoch = await ensureWindowStorageEpoch(context);
+    const expectedDestructiveGenerations = new Map(
+        Object.keys(state.trees).map((uri) => [
+            uri,
+            knownPersistedDestructiveGenerations.get(uri) ?? 0,
+        ])
+    );
+    const options: PersistOptions = {
+        ...(dirtyUris ? { dirtyUris: new Set(dirtyUris) } : {}),
+        ...(replaceUris ? { replaceUris: new Set(replaceUris) } : {}),
+        ...(destructiveChanges ? {
+            destructiveChanges: new Map(Array.from(destructiveChanges, ([uri, change]) => [
+                uri,
+                { ...change },
+            ])),
+        } : {}),
+        expectedDestructiveGenerations,
+    };
+    try {
+        return await enqueuePersistOperation(() =>
+            persistStateToDiskNow(context, state, paused, requestEpoch, options)
+        );
+    } catch (error) {
+        if (!(error instanceof StorageEpochMismatchError)) {
+            throw error;
+        }
+        if (windowStorageEpoch !== error.currentEpoch) {
+            rebaseManagerForStorageEpoch(error.currentEpoch);
+        }
+        return {
+            rootDir: context.globalStorageUri.fsPath,
+            treesDir: path.join(context.globalStorageUri.fsPath, 'undo-trees'),
+            treeCount: Object.keys(state.trees).length,
+            writtenCount: 0,
+            persistedUris: [] as string[],
+            persistedContentHashesByUri: new Map<string, Set<string>>(),
+            persistedTreeRevisionsByUri: new Map<string, string>(),
+            snapshotCompatibleUris: new Set<string>(),
+            persistedDestructiveGenerationsByUri: new Map<string, number>(),
+            staleDestructiveGenerationUris: new Set<string>(),
+            conflictPersistedPathsByUri: new Map<string, string>(),
+            unpersistedUris: new Set(Object.keys(state.trees)),
+            skippedForStorageEpoch: true as const,
+        };
+    }
 }
 
 function syncPersistedUris(uris: Iterable<string>): void {
@@ -1232,6 +1961,7 @@ async function loadPersistedTreeFromDisk(
     uri: vscode.Uri
 ): Promise<{
     nextId: number;
+    destructiveGeneration: number;
     tree: NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>;
 } | undefined> {
     const manifestResult = await readPersistedManifest(context);
@@ -1247,12 +1977,13 @@ async function loadPersistedTreeFromDisk(
 
     const treePath = path.join(context.globalStorageUri.fsPath, 'undo-trees', entry.file);
     try {
-        const buf = await fs.readFile(treePath);
+        const buf = await readFileWithWriteBackupFallback(treePath);
         // gzipマジックバイトで自動判別
         const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
         const raw = isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
         const parsed = JSON.parse(raw) as {
             tree?: ReturnType<UndoTreeManager['exportState']>['trees'][string];
+            destructiveGeneration?: number;
         };
         if (!parsed.tree) {
             return undefined;
@@ -1264,6 +1995,10 @@ async function loadPersistedTreeFromDisk(
 
         return {
             nextId: manifest.nextId,
+            destructiveGeneration: Number.isSafeInteger(parsed.destructiveGeneration) &&
+                (parsed.destructiveGeneration as number) >= 0
+                ? parsed.destructiveGeneration as number
+                : 0,
             tree: parsed.tree,
         };
     } catch (error: unknown) {
@@ -1275,33 +2010,71 @@ async function loadPersistedTreeFromDisk(
     }
 }
 
-async function ensureTreeLoaded(
+async function ensureTreeLoadedOnce(
     context: vscode.ExtensionContext,
     treeManager: UndoTreeManager,
-    document: vscode.TextDocument
+    document: vscode.TextDocument,
+    expectedTaskEpoch: number
 ) {
     if (!treeManager.hasTree(document.uri)) {
         let persisted;
         try {
             persisted = await loadPersistedTreeFromDisk(context, document.uri);
-        } catch {
-            // ファイル読み込み失敗は無視して新規ツリーで継続
+        } catch (error) {
+            knownPersistedTreeRevisions.delete(document.uri.toString());
+            knownPersistedDestructiveGenerations.delete(document.uri.toString());
+            treeManager.debugLog?.(
+                `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted-load-failed error=${String(error)}`
+            );
+            void vscode.window.showWarningMessage(
+                tr('Undo Tree: saved history could not be read. A new tree was not created to avoid overwriting recoverable data.')
+            );
+            return;
         }
         if (persisted) {
+            if (
+                expectedTaskEpoch !== documentTaskEpoch ||
+                resetInProgress ||
+                storageEpochRebaseInProgress ||
+                manager !== treeManager
+            ) {
+                return;
+            }
             const beforeSyncNodeCount = persisted.tree.nodes.length;
             try {
                 treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
                 const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+                knownPersistedTreeRevisions.set(
+                    document.uri.toString(),
+                    getSerializedTreeRevision(persisted.tree)
+                );
+                knownPersistedDestructiveGenerations.set(
+                    document.uri.toString(),
+                    persisted.destructiveGeneration
+                );
                 treeManager.debugLog?.(
                     `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
                 );
                 return;
             } catch (error) {
+                knownPersistedTreeRevisions.delete(document.uri.toString());
+                knownPersistedDestructiveGenerations.delete(document.uri.toString());
                 treeManager.debugLog?.(
                     `[ensureTreeLoaded] uri=${document.uri.toString()} source=persisted-import-failed error=${String(error)}`
                 );
             }
         }
+        knownPersistedTreeRevisions.delete(document.uri.toString());
+        knownPersistedDestructiveGenerations.delete(document.uri.toString());
+    }
+
+    if (
+        expectedTaskEpoch !== documentTaskEpoch ||
+        resetInProgress ||
+        storageEpochRebaseInProgress ||
+        manager !== treeManager
+    ) {
+        return;
     }
 
     const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
@@ -1310,25 +2083,126 @@ async function ensureTreeLoaded(
     );
 }
 
+async function ensureTreeLoaded(
+    context: vscode.ExtensionContext,
+    treeManager: UndoTreeManager,
+    document: vscode.TextDocument
+): Promise<void> {
+    const key = document.uri.toString();
+    const pending = treeLoadPromises.get(key);
+    if (pending) {
+        await pending;
+        return;
+    }
+
+    const expectedTaskEpoch = documentTaskEpoch;
+    const load = ensureTreeLoadedOnce(context, treeManager, document, expectedTaskEpoch);
+    treeLoadPromises.set(key, load);
+    try {
+        await load;
+    } finally {
+        if (treeLoadPromises.get(key) === load) {
+            treeLoadPromises.delete(key);
+        }
+    }
+}
+
+function bumpDocumentLifecycle(uri: vscode.Uri): number {
+    const key = uri.toString();
+    const generation = (documentLifecycleGenerations.get(key) ?? 0) + 1;
+    documentLifecycleGenerations.set(key, generation);
+    return generation;
+}
+
+function enqueueDocumentTask(uri: vscode.Uri, operation: () => Promise<void>): Promise<void> {
+    const key = uri.toString();
+    const taskEpoch = documentTaskEpoch;
+    const previous = documentTaskQueues.get(key) ?? Promise.resolve();
+    const runIfCurrent = async () => {
+        if (resetInProgress || taskEpoch !== documentTaskEpoch) {
+            return;
+        }
+        await operation();
+    };
+    const queued = previous.then(runIfCurrent, runIfCurrent);
+    const settled = queued.catch((error) => {
+        manager?.debugLog?.(`[document-task] uri=${key} failed: ${String(error)}`);
+    });
+    documentTaskQueues.set(key, settled);
+    void settled.finally(() => {
+        if (documentTaskQueues.get(key) === settled) {
+            documentTaskQueues.delete(key);
+        }
+    });
+    return settled;
+}
+
+async function drainDocumentTasks(): Promise<void> {
+    // Re-read the maps after each pass. Tasks already running when reset starts
+    // are allowed to settle; newly queued tasks carry a stale/reset epoch and
+    // become no-ops, but still need to leave the queue cleanly.
+    while (documentTaskQueues.size > 0 || treeLoadPromises.size > 0) {
+        await Promise.all([
+            ...Array.from(documentTaskQueues.values()),
+            ...Array.from(treeLoadPromises.values()),
+        ]);
+    }
+}
+
+function canUnloadTreeAfterFlush(
+    treeManager: UndoTreeManager,
+    currentManager: UndoTreeManager | undefined,
+    uri: vscode.Uri,
+    closeGeneration: number,
+    currentLifecycleGeneration: number | undefined
+): boolean {
+    return currentManager === treeManager &&
+        currentLifecycleGeneration === closeGeneration &&
+        !treeManager.getDirtyUris().has(uri.toString());
+}
+
 async function restoreTreeForDocument(
     context: vscode.ExtensionContext,
     treeManager: UndoTreeManager,
     document: vscode.TextDocument
 ): Promise<boolean> {
+    const expectedTaskEpoch = documentTaskEpoch;
     const persisted = await loadPersistedTreeFromDisk(context, document.uri);
     if (!persisted) {
+        return false;
+    }
+    if (
+        expectedTaskEpoch !== documentTaskEpoch ||
+        resetInProgress ||
+        storageEpochRebaseInProgress ||
+        manager !== treeManager
+    ) {
         return false;
     }
 
     const beforeSyncNodeCount = persisted.tree.nodes.length;
     try {
         treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
+        treeManager.clearDirty([document.uri.toString()]);
+        destructivePersistGenerations.delete(document.uri.toString());
+        destructivePersistChanges.delete(document.uri.toString());
+        staleDestructiveGenerationWarnedUris.delete(document.uri.toString());
         const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+        knownPersistedTreeRevisions.set(
+            document.uri.toString(),
+            getSerializedTreeRevision(persisted.tree)
+        );
+        knownPersistedDestructiveGenerations.set(
+            document.uri.toString(),
+            persisted.destructiveGeneration
+        );
         treeManager.debugLog?.(
             `[restore] uri=${document.uri.toString()} beforeNodes=${beforeSyncNodeCount} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
         );
         return true;
     } catch (error) {
+        knownPersistedTreeRevisions.delete(document.uri.toString());
+        knownPersistedDestructiveGenerations.delete(document.uri.toString());
         treeManager.debugLog?.(
             `[restore] uri=${document.uri.toString()} source=persisted-import-failed error=${String(error)}`
         );
@@ -1615,17 +2489,28 @@ async function simulateManifestInvalid(context: vscode.ExtensionContext): Promis
     ]);
 }
 
-async function pruneOrphanPersistedFiles(context: vscode.ExtensionContext): Promise<{ treeFiles: number; contentFiles: number }> {
+async function pruneOrphanPersistedFiles(context: vscode.ExtensionContext): Promise<{
+    treeFiles: number;
+    contentFiles: number;
+    contentSkippedForLiveWindow: boolean;
+}> {
     const snapshot = await collectDiagnosticsSnapshot(context);
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     const contentDir = path.join(treesDir, 'content');
 
+    // The lock file is URI-scoped (not session-scoped), so a heartbeat from this
+    // window can overwrite another live owner's record. Treat any live lock,
+    // including an apparently owned one, as a reason to leave content blobs.
+    const hasLiveWindow = snapshot.locks.items.some((item) => item.isLive);
     await Promise.all(snapshot.orphanTreeFiles.map((fileName) => fs.unlink(path.join(treesDir, fileName)).catch(() => {})));
-    await Promise.all(snapshot.orphanContentFiles.map((fileName) => fs.unlink(path.join(contentDir, fileName)).catch(() => {})));
+    if (!hasLiveWindow) {
+        await Promise.all(snapshot.orphanContentFiles.map((fileName) => fs.unlink(path.join(contentDir, fileName)).catch(() => {})));
+    }
 
     return {
         treeFiles: snapshot.orphanTreeFiles.length,
-        contentFiles: snapshot.orphanContentFiles.length,
+        contentFiles: hasLiveWindow ? 0 : snapshot.orphanContentFiles.length,
+        contentSkippedForLiveWindow: hasLiveWindow,
     };
 }
 
@@ -1647,7 +2532,7 @@ async function rebuildPersistedManifestFromTreeFiles(
     for (const fileName of treeFiles) {
         const treePath = path.join(treesDir, fileName);
         try {
-            const buf = await fs.readFile(treePath);
+            const buf = await readFileWithWriteBackupFallback(treePath);
             const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
             const raw = isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
             const parsed = JSON.parse(raw) as {
@@ -1754,8 +2639,157 @@ function getAutosaveIntervalMs(): number {
     return Math.max(5, seconds) * 1000;
 }
 
+type PersistRequestSnapshot = {
+    manager: UndoTreeManager;
+    state: ReturnType<UndoTreeManager['exportState']>;
+    dirtyUris: Set<string>;
+    dirtyGenerations: Map<string, number>;
+    replaceGenerations: Map<string, number>;
+    destructiveChanges: Map<string, DestructivePersistChange>;
+};
+
+function markDestructivePersist(uri: vscode.Uri, change: DestructivePersistChange): void {
+    const key = uri.toString();
+    destructivePersistGenerations.set(key, (destructivePersistGenerations.get(key) ?? 0) + 1);
+    destructivePersistChanges.set(key, { ...change });
+}
+
+async function captureDestructiveBaseRevision(
+    _context: vscode.ExtensionContext,
+    uri: vscode.Uri
+): Promise<string | null> {
+    // Wait for this window's writes, then use only a revision known to match the
+    // resident tree. Reading disk here would incorrectly bless another window's
+    // new branch while this window still holds stale memory.
+    await persistWriteQueue;
+    await Promise.resolve();
+    return knownPersistedTreeRevisions.get(uri.toString()) ?? null;
+}
+
+function capturePersistRequest(
+    treeManager: UndoTreeManager,
+    dirtyUris = treeManager.getDirtyUris()
+): PersistRequestSnapshot {
+    const state = treeManager.exportState();
+    const dirtyGenerations = treeManager.getDirtyGenerations(dirtyUris);
+    const replaceGenerations = new Map<string, number>();
+    const destructiveChanges = new Map<string, DestructivePersistChange>();
+    for (const uri of dirtyUris) {
+        const generation = destructivePersistGenerations.get(uri);
+        if (generation !== undefined) {
+            replaceGenerations.set(uri, generation);
+        }
+        const change = destructivePersistChanges.get(uri);
+        if (change) {
+            destructiveChanges.set(uri, { ...change });
+        }
+    }
+    return {
+        manager: treeManager,
+        state,
+        dirtyUris: new Set(dirtyUris),
+        dirtyGenerations,
+        replaceGenerations,
+        destructiveChanges,
+    };
+}
+
+function captureFullPersistRequest(treeManager: UndoTreeManager): PersistRequestSnapshot {
+    const request = capturePersistRequest(treeManager);
+    for (const [uri, generation] of destructivePersistGenerations) {
+        if (request.state.trees[uri]) {
+            request.replaceGenerations.set(uri, generation);
+            const change = destructivePersistChanges.get(uri);
+            if (change) {
+                request.destructiveChanges.set(uri, { ...change });
+            }
+        }
+    }
+    return request;
+}
+
+function finishPersistRequest(
+    request: PersistRequestSnapshot,
+    persistedContentHashesByUri: ReadonlyMap<string, ReadonlySet<string>>,
+    persistedTreeRevisionsByUri: ReadonlyMap<string, string>,
+    snapshotCompatibleUris: ReadonlySet<string>,
+    persistedDestructiveGenerationsByUri: ReadonlyMap<string, number>,
+    conflictPersistedPathsByUri: ReadonlyMap<string, string>,
+    unpersistedUris: ReadonlySet<string>
+): void {
+    // A save can take long enough for another node/note to be created for the
+    // same URI. Clear only the exact mutation generation that reached disk.
+    if (!resetInProgress && manager === request.manager) {
+        for (const [uri, hashes] of persistedContentHashesByUri) {
+            if (!unpersistedUris.has(uri) || conflictPersistedPathsByUri.has(uri)) {
+                request.manager.markCheckpointPersistedForUri(uri, hashes);
+            }
+        }
+        for (const [uri, revision] of persistedTreeRevisionsByUri) {
+            if (snapshotCompatibleUris.has(uri)) {
+                knownPersistedTreeRevisions.set(uri, revision);
+            } else {
+                knownPersistedTreeRevisions.delete(uri);
+            }
+        }
+        for (const uri of unpersistedUris) {
+            knownPersistedTreeRevisions.delete(uri);
+        }
+        for (const [uri, generation] of persistedDestructiveGenerationsByUri) {
+            if (!unpersistedUris.has(uri)) {
+                knownPersistedDestructiveGenerations.set(uri, generation);
+            }
+        }
+        for (const [uri, generation] of request.dirtyGenerations) {
+            if (!unpersistedUris.has(uri) || conflictPersistedPathsByUri.has(uri)) {
+                request.manager.clearDirtyIfGeneration(uri, generation);
+            }
+        }
+        for (const [uri, generation] of request.replaceGenerations) {
+            if (
+                (!unpersistedUris.has(uri) || conflictPersistedPathsByUri.has(uri)) &&
+                destructivePersistGenerations.get(uri) === generation
+            ) {
+                destructivePersistGenerations.delete(uri);
+                destructivePersistChanges.delete(uri);
+            }
+        }
+    }
+}
+
+async function rebaseStaleDestructiveGenerationUris(
+    context: vscode.ExtensionContext,
+    request: PersistRequestSnapshot,
+    staleUris: ReadonlySet<string>,
+    _persistedGenerations: ReadonlyMap<string, number>,
+    conflictPaths: ReadonlyMap<string, string>
+): Promise<void> {
+    if (manager !== request.manager) {
+        return;
+    }
+    for (const uri of staleUris) {
+        if (!staleDestructiveGenerationWarnedUris.has(uri)) {
+            staleDestructiveGenerationWarnedUris.add(uri);
+            const conflictPath = conflictPaths.get(uri) ?? path.join(
+                context.globalStorageUri.fsPath,
+                'undo-trees',
+                'conflicts'
+            );
+            const openStorageLabel = tr('Open Storage Folder');
+            void Promise.resolve(vscode.window.showWarningMessage(
+                tr('Undo Tree: saved history was compacted in another window. The saved history was left unchanged, and a full recovery snapshot was saved to {0}. It is not restored automatically.', conflictPath),
+                openStorageLabel
+            )).then(async (picked) => {
+                if (picked === openStorageLabel) {
+                    await openStorageFolder(context);
+                }
+            });
+        }
+    }
+}
+
 function schedulePersistState(context: vscode.ExtensionContext) {
-    if (!manager || getPersistenceMode() !== 'auto') {
+    if (resetInProgress || storageEpochRebaseInProgress || !manager || getPersistenceMode() !== 'auto') {
         return;
     }
 
@@ -1763,18 +2797,65 @@ function schedulePersistState(context: vscode.ExtensionContext) {
         clearTimeout(persistTimer);
     }
 
-    const dirtyUris = manager!.getDirtyUris();
     persistTimer = setTimeout(() => {
-        void persistStateToDisk(context, manager!.exportState(), manager!.paused, dirtyUris)
-            .then((result) => {
+        persistTimer = undefined;
+        const treeManager = manager;
+        if (!treeManager) {
+            return;
+        }
+        const request = capturePersistRequest(treeManager);
+        void persistStateToDisk(
+            context,
+            request.state,
+            treeManager.paused,
+            request.dirtyUris,
+            new Set(request.replaceGenerations.keys()),
+            request.destructiveChanges
+        )
+            .then(async (result) => {
                 syncPersistedUris(result.persistedUris);
-                manager?.clearDirty(dirtyUris);
+                finishPersistRequest(
+                    request,
+                    result.persistedContentHashesByUri,
+                    result.persistedTreeRevisionsByUri,
+                    result.snapshotCompatibleUris,
+                    result.persistedDestructiveGenerationsByUri,
+                    result.conflictPersistedPathsByUri,
+                    result.unpersistedUris
+                );
+                await rebaseStaleDestructiveGenerationUris(
+                    context,
+                    request,
+                    result.staleDestructiveGenerationUris,
+                    result.persistedDestructiveGenerationsByUri,
+                    result.conflictPersistedPathsByUri
+                );
+                if ('manifestInvalid' in result) {
+                    manager?.debugLog?.('[persist] auto save blocked because persisted manifest metadata is missing or unreadable');
+                    if (!autoPersistWarningShown) {
+                        autoPersistWarningShown = true;
+                        const openStorageLabel = tr('Open Storage Folder');
+                        const openDiagnosticsLabel = tr('Open Diagnostics');
+                        void vscode.window.showWarningMessage(
+                            tr('Undo Tree: automatic history persistence is blocked because the storage manifest is missing or unreadable while history files remain. Existing files were left untouched.'),
+                            openStorageLabel,
+                            openDiagnosticsLabel
+                        ).then(async (picked) => {
+                            if (picked === openStorageLabel) {
+                                await openStorageFolder(context);
+                            } else if (picked === openDiagnosticsLabel) {
+                                await vscode.commands.executeCommand('undotree.openDiagnostics');
+                            }
+                        });
+                    }
+                    return;
+                }
                 autoPersistFailureCount = 0;
                 autoPersistWarningShown = false;
             })
             .catch((error) => {
                 autoPersistFailureCount++;
-                manager?.debugLog?.(`[persist] auto save failed for ${dirtyUris.size} dirty URI(s): ${String(error)}`);
+                manager?.debugLog?.(`[persist] auto save failed for ${request.dirtyUris.size} dirty URI(s): ${String(error)}`);
                 if (autoPersistFailureCount >= 3 && !autoPersistWarningShown) {
                     autoPersistWarningShown = true;
                     void vscode.window.showWarningMessage(
@@ -1782,14 +2863,12 @@ function schedulePersistState(context: vscode.ExtensionContext) {
                     );
                 }
             })
-            .finally(() => {
-                persistTimer = undefined;
-            });
+            .finally(() => undefined);
     }, PERSIST_DEBOUNCE_MS);
 }
 
 async function flushPersistState(context: vscode.ExtensionContext) {
-    if (!manager || getPersistenceMode() !== 'auto') {
+    if (resetInProgress || !manager || getPersistenceMode() !== 'auto') {
         return;
     }
 
@@ -1798,19 +2877,37 @@ async function flushPersistState(context: vscode.ExtensionContext) {
         persistTimer = undefined;
     }
 
-    const dirtyUris = manager.getDirtyUris();
-    if (dirtyUris.size === 0) {
-        return;
-    }
-
-    const result = await persistStateToDisk(context, manager.exportState(), manager.paused, dirtyUris);
+    const request = capturePersistRequest(manager);
+    const result = await persistStateToDisk(
+        context,
+        request.state,
+        manager.paused,
+        request.dirtyUris,
+        new Set(request.replaceGenerations.keys()),
+        request.destructiveChanges
+    );
     syncPersistedUris(result.persistedUris);
-    manager.clearDirty(dirtyUris);
+    finishPersistRequest(
+        request,
+        result.persistedContentHashesByUri,
+        result.persistedTreeRevisionsByUri,
+        result.snapshotCompatibleUris,
+        result.persistedDestructiveGenerationsByUri,
+        result.conflictPersistedPathsByUri,
+        result.unpersistedUris
+    );
+    await rebaseStaleDestructiveGenerationUris(
+        context,
+        request,
+        result.staleDestructiveGenerationUris,
+        result.persistedDestructiveGenerationsByUri,
+        result.conflictPersistedPathsByUri
+    );
 }
 
-async function flushPersistedUri(context: vscode.ExtensionContext, uri: vscode.Uri) {
-    if (!manager || getPersistenceMode() !== 'auto') {
-        return;
+async function flushPersistedUri(context: vscode.ExtensionContext, uri: vscode.Uri, force = false): Promise<boolean> {
+    if (resetInProgress || !manager || (!force && getPersistenceMode() !== 'auto')) {
+        return false;
     }
 
     if (persistTimer) {
@@ -1818,15 +2915,42 @@ async function flushPersistedUri(context: vscode.ExtensionContext, uri: vscode.U
         persistTimer = undefined;
     }
 
+    const key = uri.toString();
     const dirtyUris = manager.getDirtyUris();
-    if (dirtyUris.has(uri.toString())) {
-        const result = await persistStateToDisk(context, manager.exportState(), manager.paused, new Set([uri.toString()]));
+    let didPersist = !dirtyUris.has(key);
+    if (dirtyUris.has(key)) {
+        const request = capturePersistRequest(manager, new Set([key]));
+        const result = await persistStateToDisk(
+            context,
+            request.state,
+            manager.paused,
+            request.dirtyUris,
+            new Set(request.replaceGenerations.keys()),
+            request.destructiveChanges
+        );
         syncPersistedUris(result.persistedUris);
-        manager.clearDirty([uri.toString()]);
+        finishPersistRequest(
+            request,
+            result.persistedContentHashesByUri,
+            result.persistedTreeRevisionsByUri,
+            result.snapshotCompatibleUris,
+            result.persistedDestructiveGenerationsByUri,
+            result.conflictPersistedPathsByUri,
+            result.unpersistedUris
+        );
+        await rebaseStaleDestructiveGenerationUris(
+            context,
+            request,
+            result.staleDestructiveGenerationUris,
+            result.persistedDestructiveGenerationsByUri,
+            result.conflictPersistedPathsByUri
+        );
+        didPersist = !result.unpersistedUris.has(key);
     }
     if (manager.getDirtyUris().size > 0) {
         schedulePersistState(context);
     }
+    return didPersist;
 }
 
 function isExcluded(document: vscode.TextDocument): boolean {
@@ -1893,13 +3017,20 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         ? tr('$(history) Undo Tree: ON')
         : tr('$(circle-slash) Undo Tree: OFF');
     statusBarItem.tooltip = [
-        tracked
+        excluded
+            ? tr('Excluded by pattern. Click to edit exclude patterns.')
+            : tracked
             ? tr('Tracking {0}. Click to disable.', ext)
             : tr('Not tracking {0}. Click to enable.', ext),
         tr('Enabled: {0}', enabled.join(', ') || '(none)'),
-        excluded ? tr('Excluded by pattern') : '',
     ].filter(Boolean).join('\n');
-    statusBarItem.command = 'undotree.toggleTracking';
+    statusBarItem.command = excluded
+        ? {
+            command: 'workbench.action.openSettings',
+            title: tr('Open Exclude Settings'),
+            arguments: [getSettingSearchQuery('undotree.excludePatterns')],
+        }
+        : 'undotree.toggleTracking';
     statusBarItem.show();
 }
 
@@ -1934,6 +3065,10 @@ function getCompactPreviewContextEditor(editor: vscode.TextEditor | undefined): 
                 viewColumn: vscode.window.activeTextEditor?.viewColumn,
             } as vscode.TextEditor;
         }
+        // A preview action must never silently switch to whatever editor became
+        // active after the preview was opened. If its target was closed, require
+        // the user to reopen/refresh the preview instead of compacting another file.
+        return undefined;
     }
     return getTrackedContextEditor(editor);
 }
@@ -1981,6 +3116,20 @@ async function resolveTrackedDocumentContext(sourceUri?: string): Promise<{ docu
 
 export async function activate(context: vscode.ExtensionContext) {
     initializeRuntimeL10n(context);
+    windowStorageEpoch = await withPersistStorageLock(
+        context,
+        () => recoverStorageEpochUnderLock(context)
+    );
+    windowStorageEpochLoad = undefined;
+    documentTaskEpoch++;
+    resetInProgress = false;
+    destructivePersistGenerations.clear();
+    destructivePersistChanges.clear();
+    knownPersistedTreeRevisions.clear();
+    knownPersistedDestructiveGenerations.clear();
+    documentLifecycleGenerations.clear();
+    documentTaskQueues.clear();
+    treeLoadPromises.clear();
     manager = new UndoTreeManager();
     const provider = new UndoTreeProvider(context, manager);
     const contentProvider = new UndoTreeDocumentContentProvider();
@@ -2188,14 +3337,26 @@ export async function activate(context: vscode.ExtensionContext) {
                         case 'validate':
                             break;
                         case 'pruneOrphans': {
-                            const result = await pruneOrphanPersistedFiles(context);
+                            const result = await enqueuePersistOperation(() =>
+                                withPersistStorageEpochLock(context, () => pruneOrphanPersistedFiles(context))
+                            );
                             vscode.window.showInformationMessage(
                                 tr('Undo Tree: pruned {0} orphan tree file(s) and {1} orphan content file(s).', result.treeFiles, result.contentFiles)
                             );
+                            if (result.contentSkippedForLiveWindow) {
+                                vscode.window.showWarningMessage(
+                                    tr('Undo Tree: orphan content blobs were not pruned because another window is actively using persisted history.')
+                                );
+                            }
                             break;
                         }
                         case 'rebuildManifest': {
-                            const result = await rebuildPersistedManifestFromTreeFiles(context, manager?.paused === true);
+                            const result = await enqueuePersistOperation(() =>
+                                withPersistStorageEpochLock(
+                                    context,
+                                    () => rebuildPersistedManifestFromTreeFiles(context, manager?.paused === true)
+                                )
+                            );
                             syncPersistedUris((await readPersistedManifest(context)).manifest?.trees.map((entry) => entry.uri) ?? []);
                             vscode.window.showInformationMessage(
                                 tr('Undo Tree: rebuilt manifest from {0} persisted tree file(s).', result.rebuilt)
@@ -2209,11 +3370,18 @@ export async function activate(context: vscode.ExtensionContext) {
                             outputChannel.show(true);
                             break;
                         case 'simulateBackup':
-                            await simulateManifestBackupFallback(context, manager?.paused === true);
+                            await enqueuePersistOperation(() =>
+                                withPersistStorageEpochLock(
+                                    context,
+                                    () => simulateManifestBackupFallback(context, manager?.paused === true)
+                                )
+                            );
                             await notifyManifestReadStatus(context, 'backup', outputChannel);
                             break;
                         case 'simulateInvalid':
-                            await simulateManifestInvalid(context);
+                            await enqueuePersistOperation(() =>
+                                withPersistStorageEpochLock(context, () => simulateManifestInvalid(context))
+                            );
                             await notifyManifestReadStatus(context, 'invalid', outputChannel);
                             break;
                         case 'resetAll':
@@ -2279,12 +3447,47 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('undotree.savePersistedState', async () => {
-            if (!manager) {
+            if (resetInProgress || !manager) {
                 return;
             }
-            const state = manager.exportState();
-            const result = await persistStateToDisk(context, state, manager.paused);
+            const request = captureFullPersistRequest(manager);
+            const result = await persistStateToDisk(
+                context,
+                request.state,
+                manager.paused,
+                undefined,
+                new Set(request.replaceGenerations.keys()),
+                request.destructiveChanges
+            );
             syncPersistedUris(result.persistedUris);
+            finishPersistRequest(
+                request,
+                result.persistedContentHashesByUri,
+                result.persistedTreeRevisionsByUri,
+                result.snapshotCompatibleUris,
+                result.persistedDestructiveGenerationsByUri,
+                result.conflictPersistedPathsByUri,
+                result.unpersistedUris
+            );
+            await rebaseStaleDestructiveGenerationUris(
+                context,
+                request,
+                result.staleDestructiveGenerationUris,
+                result.persistedDestructiveGenerationsByUri,
+                result.conflictPersistedPathsByUri
+            );
+            if ('skippedForStorageEpoch' in result) {
+                vscode.window.showWarningMessage(
+                    tr('Undo Tree: persisted history was reset in another window. Stale history was discarded and open documents were rebased.')
+                );
+                return;
+            }
+            if ('manifestInvalid' in result) {
+                vscode.window.showWarningMessage(
+                    tr('Undo Tree: persisted history was not saved because its manifest is missing or unreadable while history files remain. Existing files were left untouched.')
+                );
+                return;
+            }
             vscode.window.showInformationMessage(
                 tr('Undo Tree: saved {0} tree(s) to {1}', result.treeCount, result.treesDir)
             );
@@ -2295,9 +3498,10 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('undotree.resetAllState', async () => {
-            if (!manager) {
+            if (resetInProgress || !manager) {
                 return;
             }
+            const treeManager = manager;
 
             const resetLabel = tr('Reset');
             const confirmed = await vscode.window.showWarningMessage(
@@ -2311,33 +3515,73 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            if (persistTimer) {
-                clearTimeout(persistTimer);
-                persistTimer = undefined;
-            }
+            resetInProgress = true;
+            documentTaskEpoch++;
+            try {
+                if (persistTimer) {
+                    clearTimeout(persistTimer);
+                    persistTimer = undefined;
+                }
 
-            compactPreviewOverrides.clear();
-            compactPreviewTargetUri = undefined;
-            contentProvider.clear();
-            if (compactPreviewPanel) {
-                compactPreviewPanel.dispose();
-                compactPreviewPanel = undefined;
-            }
-            if (diagnosticsPanel) {
-                diagnosticsPanel.dispose();
-                diagnosticsPanel = undefined;
-            }
+                compactPreviewOverrides.clear();
+                compactPreviewTargetUri = undefined;
+                contentProvider.clear();
+                if (compactPreviewPanel) {
+                    compactPreviewPanel.dispose();
+                    compactPreviewPanel = undefined;
+                }
+                if (diagnosticsPanel) {
+                    diagnosticsPanel.dispose();
+                    diagnosticsPanel = undefined;
+                }
 
-            await releaseAllMultiWindowLocks(context);
-            multiWindowWarnedUris.clear();
-            await removePersistedState(context);
-            syncPersistedUris([]);
-            manager.resetAll();
-            manager.paused = false;
+                // Let tasks that were already running settle. Queued old tasks
+                // and tasks arriving during reset are invalidated by the epoch.
+                await drainDocumentTasks();
 
-            const editor = vscode.window.activeTextEditor;
-            if (editor && isTracked(editor.document)) {
-                manager.getTree(editor.document.uri, editor.document.getText());
+                treeManager.resetAll();
+                treeManager.paused = false;
+                destructivePersistGenerations.clear();
+                destructivePersistChanges.clear();
+                staleDestructiveGenerationWarnedUris.clear();
+                knownPersistedTreeRevisions.clear();
+                knownPersistedDestructiveGenerations.clear();
+                pendingRenameOldUris.clear();
+                documentLifecycleGenerations.clear();
+
+                await releaseAllMultiWindowLocks(context);
+                multiWindowWarnedUris.clear();
+                // Removal is queued behind every persistence operation that
+                // started before reset, making deletion the final disk mutation.
+                await enqueuePersistOperation(() =>
+                    withPersistStorageLock(context, async () => {
+                        windowStorageEpoch = await resetStorageUnderLock(context);
+                        windowStorageEpochLoad = undefined;
+                    })
+                );
+                syncPersistedUris([]);
+
+                // Drop any no-op events received while deletion was in flight,
+                // then rebuild memory exclusively from documents that are open
+                // now. No pre-reset disk tree can survive this boundary.
+                await drainDocumentTasks();
+                treeManager.resetAll();
+                treeManager.paused = false;
+                knownPersistedTreeRevisions.clear();
+                knownPersistedDestructiveGenerations.clear();
+                documentLifecycleGenerations.clear();
+                pendingRenameOldUris.clear();
+                for (const document of vscode.workspace.textDocuments) {
+                    if (isTracked(document)) {
+                        provider.rememberDocument(document);
+                        treeManager.getTree(document.uri, document.getText());
+                    }
+                }
+            } finally {
+                // Invalidate tasks queued during reset even if disk deletion
+                // failed, then reopen the gate for fresh post-reset events.
+                documentTaskEpoch++;
+                resetInProgress = false;
             }
 
             provider.refresh();
@@ -2347,7 +3591,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.restorePersistedState', async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor || !manager) {
+            if (resetInProgress || !editor || !manager) {
                 return;
             }
             if (!isTracked(editor.document)) {
@@ -2463,12 +3707,19 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!editor || editor.document.isUntitled) {
                 return;
             }
+            if (isExcluded(editor.document)) {
+                await vscode.commands.executeCommand(
+                    'workbench.action.openSettings',
+                    getSettingSearchQuery('undotree.excludePatterns')
+                );
+                return;
+            }
             const ext = path.extname(editor.document.fileName).toLowerCase();
             if (!ext) {
                 vscode.window.showWarningMessage(tr('Cannot determine file extension.'));
                 return;
             }
-            const config = vscode.workspace.getConfiguration('undotree');
+            const config = vscode.workspace.getConfiguration('undotree', editor.document.uri);
             const current = config.get<string[]>('enabledExtensions', ['.txt', '.md']);
             const idx = current.map((e) => e.toLowerCase()).indexOf(ext);
             let updated: string[];
@@ -2479,7 +3730,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 updated = current.filter((_, i) => i !== idx);
                 vscode.window.showInformationMessage(tr('Undo Tree: disabled for {0}', ext));
             }
-            await config.update('enabledExtensions', updated, vscode.ConfigurationTarget.Global);
+            const inspected = config.inspect?.<string[]>('enabledExtensions');
+            const target = inspected?.workspaceFolderValue !== undefined
+                ? vscode.ConfigurationTarget.WorkspaceFolder
+                : inspected?.workspaceValue !== undefined
+                    ? vscode.ConfigurationTarget.Workspace
+                    : vscode.ConfigurationTarget.Global;
+            await config.update('enabledExtensions', updated, target);
             updateStatusBar(editor);
         }),
 
@@ -2547,21 +3804,26 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.compact', async () => {
             const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
-            if (!editor || !manager) {
+            if (resetInProgress || !editor || !manager) {
                 return;
             }
+            const baseRevision = await captureDestructiveBaseRevision(context, editor.document.uri);
             const tree = manager.getTree(editor.document.uri);
             const { removed, skipped } = compactPreviewOverrides.size > 0
                 ? manager.compactWithOverrides(tree, compactPreviewOverrides)
                 : { removed: manager.compact(tree), skipped: 0 };
             if (removed > 0) {
-                manager.markDirty(editor.document.uri);
+                markDestructivePersist(editor.document.uri, { baseRevision });
             }
             compactPreviewOverrides.clear();
             provider.refresh();
             if (removed > 0) {
                 try {
-                    await flushPersistState(context);
+                    await flushPersistedUri(
+                        context,
+                        editor.document.uri,
+                        persistedUris.has(editor.document.uri.toString())
+                    );
                 } catch {
                     vscode.window.showWarningMessage(tr('Undo Tree: compact succeeded, but persisted state could not be updated.'));
                 }
@@ -2575,15 +3837,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.compactDryRun', () => {
             const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
-            if (!editor || !manager) {
+            if (resetInProgress || !editor || !manager) {
                 return;
             }
             void showCompactPreviewPanel('compact');
         }),
 
         vscode.commands.registerCommand('undotree.hardCompact', async () => {
-            const editor = getTrackedContextEditor(vscode.window.activeTextEditor);
-            if (!editor || !manager) {
+            const editor = getCompactPreviewContextEditor(vscode.window.activeTextEditor);
+            if (resetInProgress || !editor || !manager) {
                 return;
             }
             const days = getHardCompactAfterDays();
@@ -2602,18 +3864,23 @@ export async function activate(context: vscode.ExtensionContext) {
             if (confirm !== deleteLabel) {
                 return;
             }
+            const baseRevision = await captureDestructiveBaseRevision(context, editor.document.uri);
             const tree = manager.getTree(editor.document.uri);
             const { removed, skipped } = compactPreviewOverrides.size > 0
                 ? manager.hardCompactWithOverrides(tree, days, compactPreviewOverrides)
                 : { removed: manager.hardCompact(tree, days), skipped: 0 };
             if (removed > 0) {
-                manager.markDirty(editor.document.uri);
+                markDestructivePersist(editor.document.uri, { baseRevision });
             }
             compactPreviewOverrides.clear();
             provider.refresh();
             if (removed > 0) {
                 try {
-                    await flushPersistState(context);
+                    await flushPersistedUri(
+                        context,
+                        editor.document.uri,
+                        persistedUris.has(editor.document.uri.toString())
+                    );
                 } catch {
                     vscode.window.showWarningMessage(tr('Undo Tree: hard compact succeeded, but persisted state could not be updated.'));
                 }
@@ -2627,7 +3894,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.hardCompactDryRun', () => {
             const editor = getTrackedContextEditor(vscode.window.activeTextEditor);
-            if (!editor || !manager) {
+            if (resetInProgress || !editor || !manager) {
                 return;
             }
             void showCompactPreviewPanel('hard');
@@ -2647,18 +3914,34 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.workspace.onDidChangeTextDocument((e) => {
-            if (isTracked(e.document)) {
+            if (!resetInProgress && isTracked(e.document)) {
                 manager?.onDidChangeTextDocument(e);
             }
         }),
 
         vscode.workspace.onDidSaveTextDocument((doc) => {
-            if (isTracked(doc)) {
-                manager?.onDidSaveTextDocument(doc);
+            const treeManager = manager;
+            const saveTaskEpoch = documentTaskEpoch;
+            if (!resetInProgress && isTracked(doc) && treeManager) {
+                void enqueueDocumentTask(doc.uri, async () => {
+                    if (manager !== treeManager) {
+                        return;
+                    }
+                    // Save All can include background documents whose persisted
+                    // tree has not been lazily loaded yet. Load first so saving
+                    // cannot replace it with a fresh one-node tree.
+                    await ensureTreeLoaded(context, treeManager, doc);
+                    if (manager === treeManager && saveTaskEpoch === documentTaskEpoch) {
+                        treeManager.onDidSaveTextDocument(doc);
+                    }
+                });
             }
         }),
 
         vscode.workspace.onWillRenameFiles((event) => {
+            if (resetInProgress) {
+                return;
+            }
             for (const file of event.files) {
                 pendingRenameOldUris.add(file.oldUri.toString());
                 manager?.debugLog?.(`[willRenameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()}`);
@@ -2666,43 +3949,74 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.workspace.onDidCloseTextDocument((doc) => {
-            manager?.debugLog?.(`[closeTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${manager?.hasTree(doc.uri) === true}`);
-            manager?.onDidCloseTextDocument(doc);
+            const treeManager = manager;
+            const closeGeneration = bumpDocumentLifecycle(doc.uri);
+            treeManager?.debugLog?.(`[closeTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${treeManager.hasTree(doc.uri)}`);
             contentProvider.releaseByPrefix(getDiffKeyBase(doc.uri));
             multiWindowLockUris.delete(doc.uri.toString());
             multiWindowWarnedUris.delete(doc.uri.toString());
             void releaseMultiWindowLock(context, doc.uri.toString());
-            void (async () => {
-                if (!manager || !isTracked(doc)) {
+            void enqueueDocumentTask(doc.uri, async () => {
+                if (!treeManager || manager !== treeManager) {
+                    return;
+                }
+                treeManager.onDidCloseTextDocument(doc);
+                if (!isTracked(doc)) {
                     return;
                 }
                 if (pendingRenameOldUris.has(doc.uri.toString())) {
-                    manager?.debugLog?.(`[closeTextDocument] skip-unload pendingRename uri=${doc.uri.toString()}`);
+                    treeManager.debugLog?.(`[closeTextDocument] skip-unload pendingRename uri=${doc.uri.toString()}`);
                     return;
                 }
-                if (getPersistenceMode() !== 'auto' || !manager.hasTree(doc.uri)) {
+                if (getPersistenceMode() !== 'auto' || !treeManager.hasTree(doc.uri)) {
                     return;
                 }
                 try {
                     await flushPersistedUri(context, doc.uri);
-                    manager.unloadTree(doc.uri);
+                    if (canUnloadTreeAfterFlush(
+                        treeManager,
+                        manager,
+                        doc.uri,
+                        closeGeneration,
+                        documentLifecycleGenerations.get(doc.uri.toString())
+                    )) {
+                        treeManager.unloadTree(doc.uri);
+                    } else if (treeManager.getDirtyUris().has(doc.uri.toString())) {
+                        treeManager.debugLog?.(
+                            `[closeTextDocument] keep-resident uri=${doc.uri.toString()} reason=dirty-after-flush`
+                        );
+                    }
                 } catch {
                     // Keep the in-memory tree if persisting fails.
                 }
-            })();
+            });
         }),
 
         vscode.workspace.onDidOpenTextDocument((doc) => {
-            manager?.debugLog?.(`[openTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${manager?.hasTree(doc.uri) === true}`);
-            void (async () => {
-                if (isTracked(doc) && manager) {
+            const treeManager = manager;
+            const openTaskEpoch = documentTaskEpoch;
+            const openGeneration = bumpDocumentLifecycle(doc.uri);
+            treeManager?.debugLog?.(`[openTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${treeManager.hasTree(doc.uri)}`);
+            if (resetInProgress) {
+                return;
+            }
+            void enqueueDocumentTask(doc.uri, async () => {
+                if (
+                    isTracked(doc) &&
+                    treeManager &&
+                    manager === treeManager &&
+                    documentLifecycleGenerations.get(doc.uri.toString()) === openGeneration
+                ) {
                     provider.rememberDocument(doc);
-                    await ensureTreeLoaded(context, manager, doc);
+                    await ensureTreeLoaded(context, treeManager, doc);
+                    if (openTaskEpoch !== documentTaskEpoch || manager !== treeManager) {
+                        return;
+                    }
                     await acquireMultiWindowLock(context, doc, outputChannel);
                     provider.captureWindowContext();
                     provider.refresh();
                 }
-            })();
+            });
         }),
 
         vscode.window.onDidChangeActiveTextEditor((e) => {
@@ -2712,6 +4026,10 @@ export async function activate(context: vscode.ExtensionContext) {
             updateStatusBar(e);
             if (compactPreviewPanel) {
                 void renderCompactPreviewPanel();
+            }
+            if (resetInProgress) {
+                provider.refresh();
+                return;
             }
             if (e && isTracked(e.document) && manager && !manager.hasTree(e.document.uri)) {
                 // 未ロードのファイル: ローディング表示してから非同期ロード
@@ -2745,6 +4063,8 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.showStorageKind') ||
                 e.affectsConfiguration('undotree.nodeSizeMetric') ||
                 e.affectsConfiguration('undotree.nodeSizeMetricBase') ||
+                e.affectsConfiguration('undotree.hardCompactAfterDays') ||
+                e.affectsConfiguration('undotree.colorTheme') ||
                 e.affectsConfiguration('undotree.enableDiagnostics') ||
                 e.affectsConfiguration('undotree.compressionThresholdKB') ||
                 e.affectsConfiguration('undotree.checkpointThresholdKB') ||
@@ -2766,7 +4086,13 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (e.affectsConfiguration('undotree.enableDiagnostics')) {
                     void updateDiagnosticsContext(context);
                 }
-                if (e.affectsConfiguration('undotree.language')) {
+                if (e.affectsConfiguration('undotree.hardCompactAfterDays') && compactPreviewPanel) {
+                    void renderCompactPreviewPanel();
+                }
+                if (
+                    e.affectsConfiguration('undotree.language') ||
+                    e.affectsConfiguration('undotree.colorTheme')
+                ) {
                     provider.resetShell();
                 }
                 if (e.affectsConfiguration('undotree.persistenceMode') || e.affectsConfiguration('undotree.warnOnMultiWindowConflict')) {
@@ -2782,7 +4108,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
                 unloadIdleResidentTrees(vscode.window.activeTextEditor);
                 updateStatusBar(vscode.window.activeTextEditor);
-                if (!e.affectsConfiguration('undotree.language')) {
+                if (
+                    !e.affectsConfiguration('undotree.language') &&
+                    !e.affectsConfiguration('undotree.colorTheme')
+                ) {
                     provider.refresh();
                 }
                 if (diagnosticsPanel) {
@@ -2792,6 +4121,12 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.workspace.onDidRenameFiles((event) => {
+            if (resetInProgress) {
+                for (const file of event.files) {
+                    pendingRenameOldUris.delete(file.oldUri.toString());
+                }
+                return;
+            }
             if (!manager) {
                 return;
             }
@@ -2801,8 +4136,23 @@ export async function activate(context: vscode.ExtensionContext) {
                     manager?.debugLog?.(`[renameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()} oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
                     manager?.renameTree(file.oldUri, file.newUri);
                     persistedUris.delete(file.oldUri.toString());
-                    if (await migratePersistedTreeForRename(context, file.oldUri, file.newUri)) {
+                    if (await enqueuePersistOperation(() =>
+                        withPersistStorageEpochLock(
+                            context,
+                            () => migratePersistedTreeForRename(context, file.oldUri, file.newUri)
+                        )
+                    )) {
                         persistedUris.add(file.newUri.toString());
+                        const knownRevision = knownPersistedTreeRevisions.get(file.oldUri.toString());
+                        const knownDestructiveGeneration = knownPersistedDestructiveGenerations.get(file.oldUri.toString());
+                        knownPersistedTreeRevisions.delete(file.oldUri.toString());
+                        knownPersistedDestructiveGenerations.delete(file.oldUri.toString());
+                        if (knownRevision) {
+                            knownPersistedTreeRevisions.set(file.newUri.toString(), knownRevision);
+                        }
+                        if (knownDestructiveGeneration !== undefined) {
+                            knownPersistedDestructiveGenerations.set(file.newUri.toString(), knownDestructiveGeneration);
+                        }
                     }
                     pendingRenameOldUris.delete(file.oldUri.toString());
                     manager?.debugLog?.(`[renameFiles] afterRename oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
@@ -2836,7 +4186,10 @@ export async function activate(context: vscode.ExtensionContext) {
             multiWindowLockTimer = undefined;
         }
         try {
+            await Promise.all(Array.from(documentTaskQueues.values()));
+            await Promise.all(Array.from(treeLoadPromises.values()));
             await flushPersistState(context);
+            await persistWriteQueue;
         } catch (error) {
             outputChannel.appendLine(`[deactivate] failed to flush persisted state: ${String(error)}`);
         }
@@ -2853,6 +4206,37 @@ export async function deactivate() {
 
 export const __test__ = {
     persistStateToDisk,
+    enqueuePersistOperation,
+    withPersistStorageLock,
+    simulateExternalStorageReset: (context: vscode.ExtensionContext) =>
+        withPersistStorageLock(context, async () => {
+            await resetStorageUnderLock(context);
+        }),
+    simulateInterruptedStorageReset: (context: vscode.ExtensionContext) =>
+        withPersistStorageLock(context, async () => {
+            const nextEpoch = (await recoverStorageEpochUnderLock(context)) + 1;
+            await writeStorageEpochRecord(context, { epoch: nextEpoch, state: 'resetting' });
+        }),
     loadPersistedTreeFromDisk,
     readPersistedManifest,
+    getSerializedTreeRevision,
+    getCompactPreviewContextEditor,
+    canUnloadTreeAfterFlush,
+    enqueueDocumentTask,
+    drainDocumentTasks,
+    rebaseStaleDestructiveGenerationUris,
+    setManagerForTest: (value: UndoTreeManager | undefined) => {
+        manager = value;
+    },
+    beginResetTaskEpoch: () => {
+        resetInProgress = true;
+        documentTaskEpoch++;
+    },
+    endResetTaskEpoch: () => {
+        documentTaskEpoch++;
+        resetInProgress = false;
+    },
+    setCompactPreviewTargetUri: (uri: string | undefined) => {
+        compactPreviewTargetUri = uri;
+    },
 };

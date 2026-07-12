@@ -28,6 +28,12 @@ const vscode = {
             public end: unknown
         ) {}
     },
+    WorkspaceEdit: class WorkspaceEdit {
+        edits: Array<{ uri: unknown; range: unknown; content: string }> = [];
+        replace(uri: unknown, range: unknown, content: string) {
+            this.edits.push({ uri, range, content });
+        }
+    },
     window: {
         activeTextEditor: undefined as unknown,
         visibleTextEditors: [] as unknown[],
@@ -42,6 +48,7 @@ const vscode = {
     },
     workspace: {
         textDocuments: [] as unknown[],
+        applyEdit: jest.fn(async () => true),
         getConfiguration: jest.fn(() => ({
             get: jest.fn(),
         })),

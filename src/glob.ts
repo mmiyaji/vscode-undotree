@@ -15,5 +15,7 @@ export function matchesGlob(filename: string, pattern: string): boolean {
             source += char;
         }
     }
-    return new RegExp(`^${source}$`, 'i').test(filename);
+    // Unicode mode makes `?` consume one code point rather than one UTF-16
+    // code unit, so a single emoji behaves like a single glob character.
+    return new RegExp(`^${source}$`, 'iu').test(filename);
 }

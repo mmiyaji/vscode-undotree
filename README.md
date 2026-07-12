@@ -10,7 +10,7 @@ Unlike standard linear undo/redo, **vscode-undotree** preserves branches. If you
 
 The extension records history on saves and periodic autosave checkpoints. It does not replace VS Code's native undo stack; it adds a separate history layer for navigating meaningful states.
 
-![Undo Tree hero](./media/undotree.png)
+![Undo Tree hero](./media/undotree-readme-hero.png)
 
 ## Color Themes
 

@@ -2,7 +2,8 @@
   "name": "vscode-undotree",
   "displayName": "UndoTree History",
   "description": "Visualize and navigate undo history as a tree",
-  "version": "0.3.7",
+  "version": "0.3.8",
+  "license": "MIT",
   "publisher": "mmiyaji",
   "repository": {
     "type": "git",

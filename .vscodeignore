@@ -3,7 +3,6 @@ src/**
 out/**
 scripts/**
 .github/**
-media/undotree-readme-hero.png
 test-report.json
 test-report.md
 test-report.txt
@@ -11,3 +10,4 @@ test-report.txt
 tsconfig.json
 webpack.config.js
 package-lock.json
+!THIRD_PARTY_NOTICES.md

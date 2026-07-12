@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.8
+
+### Improvements
+
+- Strengthened persisted-history coordination across windows with shared filesystem locking, reset epochs, conflict recovery snapshots, and generation-aware writes.
+- Expanded the VS Code E2E suite to cover undo/redo mutations, diff-editor routing, notes, collapsed-view context changes, exclusion patterns, restart persistence, and installed VSIX execution.
+- Added integrity and race-condition coverage for deep histories, damaged topology, stale snapshots, reset/import flows, rename/close interactions, and partial persistence failures.
+- Added third-party license notices and a reproducible README hero-image capture script.
+
+### Fixes
+
+- Repaired malformed or deeply nested history topology without recursive stack overflows, while preserving distinct branches that share content.
+- Prevented stale persistence snapshots from reviving reset histories or overwriting newer note, pin, and tree state.
+- Fixed Undo and Redo from an active diff editor by applying history changes to the source document even when its editor is hidden.
+- Fixed reset, restore, rename, close, and background-save races that could lose or resurrect persisted history.
+- Made missing or invalid manifests fail closed and retained recoverable tree files after partial-save failures.
+- Fixed generation-sensitive dirty and checkpoint caches, Unicode glob matching, current-size metrics, and several sidebar security and routing edge cases.
+
 ## 0.3.7
 
 ### Fixes
