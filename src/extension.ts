@@ -14,7 +14,14 @@ import { UndoTreeProvider } from './undoTreeProvider';
 import { CompactPreviewItem, CompactPreviewResult, SerializedUndoTree, UndoTreeManager, mergeSerializedTrees } from './undoTreeManager';
 import { initializeRuntimeL10n, t as tr } from './runtimeL10n';
 import { isValidContentHash } from './contentHash';
-import { matchesGlob } from './glob';
+import {
+    DEFAULT_ENABLED_EXTENSIONS,
+    DEFAULT_ENABLED_FILE_NAMES,
+    DEFAULT_EXCLUDE_PATTERNS,
+    getTrackingStatus,
+    isExcluded as matchesTrackingExclude,
+    TrackingStatus,
+} from './tracking';
 
 // バーチャルドキュメント（差分表示用）
 export class UndoTreeDocumentContentProvider implements vscode.TextDocumentContentProvider {
@@ -1017,15 +1024,6 @@ async function writeGenerationConflictSnapshot(
     return { filePath, checkpointHashes };
 }
 
-function findSerializedFullContentByHash(tree: SerializedUndoTree, hash: string): string | undefined {
-    for (const node of tree.nodes) {
-        if (node.hash === hash && node.storage.kind === 'full') {
-            return node.storage.content;
-        }
-    }
-    return undefined;
-}
-
 function requireValidContentHash(hash: string): string {
     if (!isValidContentHash(hash)) {
         throw new Error(`Invalid checkpoint content hash: ${hash}`);
@@ -1702,7 +1700,7 @@ async function persistStateToDiskUnderLock(
         }
     }));
 
-    await Promise.all(preparedWriteEntries.map(async ([uri, tree]) => {
+    for (const [uri, tree] of preparedWriteEntries) {
         const contentHashes = getPersistedContentHashes(tree, checkpointThreshold);
         persistedContentHashesByUri.set(uri, new Set(contentHashes));
         const useCheckpoint = contentHashes.size > 0;
@@ -1717,7 +1715,7 @@ async function persistStateToDiskUnderLock(
         // チェックポイントモード: fullコンテンツを別ファイルに分離
         const serializedNodes = useCheckpoint
             ? tree.nodes.map((node) => {
-                if (node.storage.kind !== 'full' || node.storage.content === '') {
+                if (node.storage.kind !== 'full' || !contentHashes.has(node.hash)) {
                     return node;
                 }
                 return { ...node, storage: { kind: 'checkpoint' as const, contentHash: node.hash } };
@@ -1726,21 +1724,32 @@ async function persistStateToDiskUnderLock(
 
         // コンテンツファイルの書き込み（既存ならスキップ、gzip圧縮）
         if (useCheckpoint) {
-            await Promise.all(Array.from(contentHashes).map(async (hash) => {
+            const fullContents = new Map(tree.nodes.flatMap(node =>
+                node.storage.kind === 'full' ? [[node.hash, node.storage.content] as const] : []));
+            const hashes = Array.from(contentHashes);
+            const writeContent = async (hash: string) => {
                 const filePath = path.join(contentDir, hash);
                 try {
                     await fs.access(filePath);
                 } catch {
                     const content =
-                        findSerializedFullContentByHash(tree, hash) ??
-                        manager?.getCheckpointContent(hash);
+                        fullContents.get(hash) ??
+                        await manager?.getCheckpointContentAsync(hash);
                     if (content === undefined) {
                         throw new Error(`Missing checkpoint content for hash ${hash}`);
                     }
                     const compressed = await gzip(Buffer.from(content, 'utf8'));
                     await writeFileSafely(filePath, compressed);
                 }
-            }));
+            };
+            // Bound decoded text and gzip buffers when a large history is first
+            // persisted. Wait for every started write before releasing the lock,
+            // including when one of the writes fails.
+            for (let start = 0; start < hashes.length; start += 4) {
+                const results = await Promise.allSettled(hashes.slice(start, start + 4).map(writeContent));
+                const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+                if (failure) { throw failure.reason; }
+            }
         }
 
         const json = JSON.stringify({
@@ -1756,7 +1765,7 @@ async function persistStateToDiskUnderLock(
         } else {
             await writeFileSafely(filePath, json, 'utf8');
         }
-    }));
+    }
 
     const manifestJson = JSON.stringify(manifest, null, 2);
     await writeFileSafely(path.join(treesDir, 'manifest.json'), manifestJson, 'utf8');
@@ -2016,6 +2025,11 @@ async function ensureTreeLoadedOnce(
     document: vscode.TextDocument,
     expectedTaskEpoch: number
 ) {
+    // Loading must not checkpoint a resident document. Saves and autosave own
+    // that operation, including the pause check and accumulated delta buffer.
+    if (treeManager.hasTree(document.uri)) {
+        return;
+    }
     if (!treeManager.hasTree(document.uri)) {
         let persisted;
         try {
@@ -2029,6 +2043,10 @@ async function ensureTreeLoadedOnce(
             void vscode.window.showWarningMessage(
                 tr('Undo Tree: saved history could not be read. A new tree was not created to avoid overwriting recoverable data.')
             );
+            return;
+        }
+        // A rename may have moved the resident tree while disk I/O was pending.
+        if (treeManager.hasTree(document.uri)) {
             return;
         }
         if (persisted) {
@@ -2218,6 +2236,38 @@ async function removePersistedState(context: vscode.ExtensionContext) {
     await fs.rm(treesDir, { recursive: true, force: true });
 }
 
+function expandFileRenames(
+    files: readonly { oldUri: vscode.Uri; newUri: vscode.Uri }[],
+    knownUris: Iterable<string>
+): Array<{ oldUri: vscode.Uri; newUri: vscode.Uri }> {
+    const result = new Map(files.map(file => [file.oldUri.toString(), file]));
+    for (const key of knownUris) {
+        const uri = vscode.Uri.parse(key);
+        for (const file of files) {
+            const prefix = file.oldUri.path.replace(/\/$/, '') + '/';
+            if (uri.scheme !== file.oldUri.scheme || uri.authority !== file.oldUri.authority ||
+                !uri.path.startsWith(prefix)) {
+                continue;
+            }
+            result.set(key, {
+                oldUri: uri,
+                newUri: uri.with({ path: file.newUri.path.replace(/\/$/, '') + '/' + uri.path.slice(prefix.length) }),
+            });
+            break;
+        }
+    }
+    return [...result.values()];
+}
+
+function getKnownHistoryUris(): Set<string> {
+    return new Set([
+        ...persistedUris,
+        ...(manager?.getResidentUris() ?? []),
+        ...vscode.workspace.textDocuments.map(document => document.uri.toString()),
+        ...pendingRenameOldUris,
+    ]);
+}
+
 async function migratePersistedTreeForRename(
     context: vscode.ExtensionContext,
     oldUri: vscode.Uri,
@@ -2249,14 +2299,12 @@ async function migratePersistedTreeForRename(
     const newPath = path.join(treesDir, newFile);
 
     if (oldFile !== newFile) {
-        try {
-            await fs.access(oldPath);
-            const buffer = await fs.readFile(oldPath);
-            await writeFileSafely(newPath, buffer);
-            await fs.rm(oldPath, { force: true });
-        } catch {
-            // persisted file migration is best-effort; manifest is still updated below
-        }
+        const buffer = await readFileWithWriteBackupFallback(oldPath);
+        const compressed = buffer[0] === 0x1f && buffer[1] === 0x8b;
+        const payload = JSON.parse((compressed ? await gunzip(buffer) : buffer).toString('utf8'));
+        payload.uri = newUriStr;
+        const renamed = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
+        await writeFileSafely(newPath, compressed ? await gzip(renamed) : renamed);
     }
 
     entry.uri = newUriStr;
@@ -2274,6 +2322,9 @@ async function migratePersistedTreeForRename(
     );
     await writeFileSafely(path.join(treesDir, 'manifest.json'), rawManifest, 'utf8');
     await writeFileSafely(path.join(treesDir, 'manifest.json.bak'), rawManifest, 'utf8');
+    if (oldFile !== newFile) {
+        await fs.rm(oldPath, { force: true });
+    }
     syncPersistedUris(manifest.trees.map((treeEntry) => treeEntry.uri));
     return true;
 }
@@ -2568,18 +2619,52 @@ async function rebuildPersistedManifestFromTreeFiles(
     return { rebuilt: trees.length };
 }
 
-function getEnabledExtensions(): string[] {
-    const value = vscode.workspace
-        .getConfiguration('undotree')
-        .get<string[]>('enabledExtensions');
-    return Array.isArray(value) ? value : ['.txt', '.md'];
+function getTrackingConfiguration(document: vscode.TextDocument) {
+    const config = vscode.workspace.getConfiguration('undotree', document.uri);
+    const extensions = config.get<string[]>('enabledExtensions', DEFAULT_ENABLED_EXTENSIONS);
+    const fileNames = config.get<string[]>('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES);
+    const exclusions = config.get<string[]>('excludePatterns', DEFAULT_EXCLUDE_PATTERNS);
+    const hasConfiguredValue = (key: string): boolean => {
+        const inspected = config.inspect<unknown>(key);
+        return !!inspected && (inspected.globalValue !== undefined || inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined);
+    };
+    return {
+        enabledExtensions: Array.isArray(extensions) ? extensions : DEFAULT_ENABLED_EXTENSIONS,
+        enabledFileNames: Array.isArray(fileNames) ? fileNames : DEFAULT_ENABLED_FILE_NAMES,
+        excludePatterns: Array.isArray(exclusions) ? exclusions : DEFAULT_EXCLUDE_PATTERNS,
+        extensionsExplicit: hasConfiguredValue('enabledExtensions'),
+        fileNamesExplicit: hasConfiguredValue('enabledFileNames'),
+    };
 }
 
-function getExcludePatterns(): string[] {
-    const value = vscode.workspace
-        .getConfiguration('undotree')
-        .get<string[]>('excludePatterns');
-    return Array.isArray(value) ? value : [];
+function getDocumentRelativePath(document: vscode.TextDocument): string {
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    return folder ? path.relative(folder.uri.fsPath, document.uri.fsPath) : document.uri.fsPath;
+}
+
+function getDocumentTrackingStatus(document: vscode.TextDocument): TrackingStatus {
+    return getTrackingStatus({
+        scheme: document.uri.scheme,
+        fileName: document.uri.scheme === 'file' ? document.uri.fsPath : document.fileName,
+        relativePath: getDocumentRelativePath(document),
+    }, getTrackingConfiguration(document));
+}
+
+function getTrackingConfigTarget(config: vscode.WorkspaceConfiguration): vscode.ConfigurationTarget {
+    const extensionScope = config.inspect<string[]>('enabledExtensions');
+    const fileNameScope = config.inspect<string[]>('enabledFileNames');
+    if (extensionScope?.workspaceFolderValue !== undefined || fileNameScope?.workspaceFolderValue !== undefined) {
+        return vscode.ConfigurationTarget.WorkspaceFolder;
+    }
+    if (extensionScope?.workspaceValue !== undefined || fileNameScope?.workspaceValue !== undefined) {
+        return vscode.ConfigurationTarget.Workspace;
+    }
+    return vscode.ConfigurationTarget.Global;
+}
+
+function hasTrackingConfigValue(config: vscode.WorkspaceConfiguration, key: string): boolean {
+    const inspected = config.inspect<unknown>(key);
+    return !!inspected && (inspected.globalValue !== undefined || inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined);
 }
 
 function getPersistenceMode(): 'manual' | 'auto' {
@@ -2954,16 +3039,15 @@ async function flushPersistedUri(context: vscode.ExtensionContext, uri: vscode.U
 }
 
 function isExcluded(document: vscode.TextDocument): boolean {
-    const basename = path.basename(document.fileName);
-    return getExcludePatterns().some((p) => matchesGlob(basename, p));
+    return matchesTrackingExclude({
+        scheme: document.uri.scheme,
+        fileName: document.uri.scheme === 'file' ? document.uri.fsPath : document.fileName,
+        relativePath: getDocumentRelativePath(document),
+    }, getTrackingConfiguration(document).excludePatterns);
 }
 
 function isTracked(document: vscode.TextDocument): boolean {
-    if (isExcluded(document)) {
-        return false;
-    }
-    const ext = path.extname(document.fileName).toLowerCase();
-    return getEnabledExtensions().map((e) => e.toLowerCase()).includes(ext);
+    return getDocumentTrackingStatus(document).tracked;
 }
 
 function describeEditor(editor: vscode.TextEditor | undefined): string {
@@ -3006,10 +3090,16 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         statusBarItem.show();
         return;
     }
-    const ext = path.extname(targetEditor.document.fileName).toLowerCase() || '(none)';
-    const enabled = getEnabledExtensions();
-    const excluded = isExcluded(targetEditor.document);
-    const tracked = !excluded && enabled.map(e => e.toLowerCase()).includes(ext);
+    const trackingStatus = getDocumentTrackingStatus(targetEditor.document);
+    const fileName = path.basename(targetEditor.document.fileName);
+    const ext = trackingStatus.matchedBy === 'fileName' ? fileName : trackingStatus.extension || fileName;
+    const trackingConfig = getTrackingConfiguration(targetEditor.document);
+    const enabled = trackingConfig.enabledExtensions;
+    const enabledFileNames = trackingConfig.fileNamesExplicit || !trackingConfig.extensionsExplicit
+        ? trackingConfig.enabledFileNames
+        : [];
+    const excluded = trackingStatus.reason === 'excludePattern';
+    const tracked = trackingStatus.tracked;
     manager.debugLog?.(
         `[statusBar] computed tracked=${tracked} ext=${ext} excluded=${excluded} enabled=${enabled.join(',')}`
     );
@@ -3023,6 +3113,7 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
             ? tr('Tracking {0}. Click to disable.', ext)
             : tr('Not tracking {0}. Click to enable.', ext),
         tr('Enabled: {0}', enabled.join(', ') || '(none)'),
+        enabledFileNames.length > 0 ? tr('Enabled file names: {0}', enabledFileNames.join(', ')) : '',
     ].filter(Boolean).join('\n');
     statusBarItem.command = excluded
         ? {
@@ -3439,11 +3530,11 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('undotree.undo', () => {
-            manager?.undo();
+            return manager?.undo();
         }),
 
         vscode.commands.registerCommand('undotree.redo', () => {
-            manager?.redo();
+            return manager?.redo();
         }),
 
         vscode.commands.registerCommand('undotree.savePersistedState', async () => {
@@ -3670,7 +3761,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 },
                 {
                     label: tr('$(symbol-file) Toggle Tracking for This Extension'),
-                    description: tr('Enable or disable tracking for the current file extension'),
+                    description: tr('Enable or disable tracking for the current file extension or exact file name'),
                     command: editor ? 'undotree.toggleTracking' : undefined,
                 },
                 {
@@ -3704,7 +3795,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.toggleTracking', async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor || editor.document.isUntitled) {
+            if (!editor || editor.document.isUntitled || editor.document.uri.scheme !== 'file') {
                 return;
             }
             if (isExcluded(editor.document)) {
@@ -3714,29 +3805,60 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
                 return;
             }
-            const ext = path.extname(editor.document.fileName).toLowerCase();
-            if (!ext) {
-                vscode.window.showWarningMessage(tr('Cannot determine file extension.'));
-                return;
-            }
             const config = vscode.workspace.getConfiguration('undotree', editor.document.uri);
-            const current = config.get<string[]>('enabledExtensions', ['.txt', '.md']);
-            const idx = current.map((e) => e.toLowerCase()).indexOf(ext);
-            let updated: string[];
-            if (idx === -1) {
-                updated = [...current, ext];
-                vscode.window.showInformationMessage(tr('Undo Tree: enabled for {0}', ext));
+            const status = getDocumentTrackingStatus(editor.document);
+            const currentExtensions = config.get<string[]>('enabledExtensions', DEFAULT_ENABLED_EXTENSIONS);
+            const currentFileNames = config.get<string[]>('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES);
+            const fileName = path.basename(editor.document.fileName);
+            const extensionWasExplicit = hasTrackingConfigValue(config, 'enabledExtensions');
+            const fileNamesWereExplicit = hasTrackingConfigValue(config, 'enabledFileNames');
+            const effectiveCurrentFileNames = fileNamesWereExplicit || !extensionWasExplicit ? currentFileNames : [];
+            const matchingFileNames = effectiveCurrentFileNames.filter(name => name.toLowerCase() === fileName.toLowerCase());
+            const toggleByFileName = status.matchedBy === 'fileName' || !status.extension;
+            const extensionIndex = status.extension
+                ? currentExtensions.findIndex(value => {
+                    const normalized = value.trim().toLowerCase();
+                    return (normalized.startsWith('.') ? normalized : `.${normalized}`) === status.extension;
+                })
+                : -1;
+            const target = getTrackingConfigTarget(config);
+
+            if (toggleByFileName) {
+                if (status.tracked && !status.extension && status.matchedBy === 'extension') {
+                    vscode.window.showWarningMessage(tr('Tracking for this file is enabled by an overlapping setting. Edit tracking settings to change it.'));
+                    await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.enabledExtensions'));
+                    return;
+                }
+                const isEnabledByName = matchingFileNames.length > 0;
+                if (isEnabledByName && status.tracked && extensionIndex !== -1) {
+                    vscode.window.showWarningMessage(tr('Tracking for this file is enabled by an overlapping setting. Edit tracking settings to change it.'));
+                    await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.enabledExtensions'));
+                    return;
+                }
+                const updatedNames = isEnabledByName
+                    ? effectiveCurrentFileNames.filter(name => name.toLowerCase() !== fileName.toLowerCase())
+                    : [...effectiveCurrentFileNames, fileName];
+                await config.update('enabledFileNames', updatedNames, target);
+                vscode.window.showInformationMessage(isEnabledByName
+                    ? tr('Undo Tree: disabled for {0}', fileName)
+                    : tr('Undo Tree: enabled for {0}', fileName));
             } else {
-                updated = current.filter((_, i) => i !== idx);
-                vscode.window.showInformationMessage(tr('Undo Tree: disabled for {0}', ext));
+                const updatedExtensions = extensionIndex === -1
+                    ? [...currentExtensions, status.extension]
+                    : currentExtensions.filter(value => {
+                        const normalized = value.trim().toLowerCase();
+                        return (normalized.startsWith('.') ? normalized : `.${normalized}`) !== status.extension;
+                    });
+                await config.update('enabledExtensions', updatedExtensions, target);
+                // Making the extension list explicit would otherwise suppress the
+                // built-in extensionless filename defaults for this workspace.
+                if (!extensionWasExplicit && !fileNamesWereExplicit) {
+                    await config.update('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES, target);
+                }
+                vscode.window.showInformationMessage(extensionIndex === -1
+                    ? tr('Undo Tree: enabled for {0}', status.extension)
+                    : tr('Undo Tree: disabled for {0}', status.extension));
             }
-            const inspected = config.inspect?.<string[]>('enabledExtensions');
-            const target = inspected?.workspaceFolderValue !== undefined
-                ? vscode.ConfigurationTarget.WorkspaceFolder
-                : inspected?.workspaceValue !== undefined
-                    ? vscode.ConfigurationTarget.Workspace
-                    : vscode.ConfigurationTarget.Global;
-            await config.update('enabledExtensions', updated, target);
             updateStatusBar(editor);
         }),
 
@@ -3751,6 +3873,10 @@ export async function activate(context: vscode.ExtensionContext) {
             const tree = manager.getTree(contextDocument.document.uri);
             const ext = path.extname(contextDocument.document.fileName) || '.txt';
             const diffKeyBase = getDiffKeyBase(contextDocument.document.uri);
+            const targetNode = tree.nodes.get(targetNodeId);
+            const targetLabel = targetNode
+                ? `${targetNode.note || targetNode.label} · ${new Date(targetNode.timestamp).toLocaleString()}`
+                : tr('Unknown history node');
 
             const targetContent = manager.reconstructContent(tree, targetNodeId);
             const currentContent = contextDocument.document.getText();
@@ -3762,7 +3888,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 'vscode.diff',
                 targetUri,
                 currentUri,
-                tr('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
+                tr('Undo Tree Diff: {0} | history {1} ↔ current file, including unsaved changes', path.basename(contextDocument.document.fileName), targetLabel),
                 {
                     preview: true,
                     preserveFocus: false,
@@ -3783,6 +3909,12 @@ export async function activate(context: vscode.ExtensionContext) {
             const tree = manager.getTree(contextDocument.document.uri);
             const ext = path.extname(contextDocument.document.fileName) || '.txt';
             const diffKeyBase = getDiffKeyBase(contextDocument.document.uri);
+            const describeNode = (nodeId: number) => {
+                const node = tree.nodes.get(nodeId);
+                return node
+                    ? `${node.note || node.label} · ${new Date(node.timestamp).toLocaleString()}`
+                    : tr('Unknown history node');
+            };
             const leftContent = manager.reconstructContent(tree, leftNodeId);
             const rightContent = manager.reconstructContent(tree, rightNodeId);
             const leftUri = contentProvider.prepare(leftContent, ext, `${diffKeyBase}-left`);
@@ -3792,7 +3924,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 'vscode.diff',
                 leftUri,
                 rightUri,
-                tr('Undo Tree Diff: {0}', path.basename(contextDocument.document.fileName)),
+                tr('Undo Tree Diff: {0} | {1} ↔ {2}', path.basename(contextDocument.document.fileName), describeNode(leftNodeId), describeNode(rightNodeId)),
                 {
                     preview: true,
                     preserveFocus: false,
@@ -3942,7 +4074,7 @@ export async function activate(context: vscode.ExtensionContext) {
             if (resetInProgress) {
                 return;
             }
-            for (const file of event.files) {
+            for (const file of expandFileRenames(event.files, getKnownHistoryUris())) {
                 pendingRenameOldUris.add(file.oldUri.toString());
                 manager?.debugLog?.(`[willRenameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()}`);
             }
@@ -4008,9 +4140,16 @@ export async function activate(context: vscode.ExtensionContext) {
                     documentLifecycleGenerations.get(doc.uri.toString()) === openGeneration
                 ) {
                     provider.rememberDocument(doc);
+                    const wasResident = treeManager.hasTree(doc.uri);
                     await ensureTreeLoaded(context, treeManager, doc);
                     if (openTaskEpoch !== documentTaskEpoch || manager !== treeManager) {
                         return;
+                    }
+                    if (wasResident && !treeManager.paused) {
+                        // A closed document may have changed on disk. Only a
+                        // genuine reopen reconciles a resident tree; changing
+                        // editor focus or saving must keep its delta buffer.
+                        treeManager.syncDocumentState(doc.uri, doc.getText());
                     }
                     await acquireMultiWindowLock(context, doc, outputChannel);
                     provider.captureWindowContext();
@@ -4053,6 +4192,7 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (
                 e.affectsConfiguration('undotree.enabledExtensions') ||
+                e.affectsConfiguration('undotree.enabledFileNames') ||
                 e.affectsConfiguration('undotree.excludePatterns') ||
                 e.affectsConfiguration('undotree.persistenceMode') ||
                 e.affectsConfiguration('undotree.warnOnMultiWindowConflict') ||
@@ -4121,8 +4261,9 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.workspace.onDidRenameFiles((event) => {
+            const files = expandFileRenames(event.files, getKnownHistoryUris());
             if (resetInProgress) {
-                for (const file of event.files) {
+                for (const file of files) {
                     pendingRenameOldUris.delete(file.oldUri.toString());
                 }
                 return;
@@ -4132,9 +4273,13 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             void (async () => {
                 manager?.debugLog?.(`[renameFiles] count=${event.files.length} activeBefore=${vscode.window.activeTextEditor?.document.uri.toString() ?? 'none'}`);
-                for (const file of event.files) {
-                    manager?.debugLog?.(`[renameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()} oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
+                // Move all resident descendants before the first await, so open
+                // events for the renamed documents see their existing history.
+                for (const file of files) {
                     manager?.renameTree(file.oldUri, file.newUri);
+                }
+                for (const file of files) {
+                    manager?.debugLog?.(`[renameFiles] old=${file.oldUri.toString()} new=${file.newUri.toString()} oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
                     persistedUris.delete(file.oldUri.toString());
                     if (await enqueuePersistOperation(() =>
                         withPersistStorageEpochLock(
@@ -4154,11 +4299,10 @@ export async function activate(context: vscode.ExtensionContext) {
                             knownPersistedDestructiveGenerations.set(file.newUri.toString(), knownDestructiveGeneration);
                         }
                     }
-                    pendingRenameOldUris.delete(file.oldUri.toString());
                     manager?.debugLog?.(`[renameFiles] afterRename oldHasTree=${manager?.hasTree(file.oldUri) === true} newHasTree=${manager?.hasTree(file.newUri) === true}`);
                 }
                 await new Promise((resolve) => setTimeout(resolve, 0));
-                for (const file of event.files) {
+                for (const file of files) {
                     const renamedDoc = vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === file.newUri.toString());
                     manager?.debugLog?.(`[renameFiles] postTick new=${file.newUri.toString()} docFound=${!!renamedDoc} activeAfterTick=${vscode.window.activeTextEditor?.document.uri.toString() ?? 'none'}`);
                     if (renamedDoc && isTracked(renamedDoc)) {
@@ -4172,7 +4316,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 manager?.debugLog?.(`[renameFiles] refresh activeFinal=${activeEditor?.document.uri.toString() ?? 'none'} activeHasTree=${activeEditor ? manager?.hasTree(activeEditor.document.uri) === true : false}`);
                 provider.refresh();
                 updateStatusBar(activeEditor);
-            })();
+            })().catch((error) => {
+                outputChannel.appendLine(`[renameFiles] history migration failed: ${String(error)}`);
+                void vscode.window.showWarningMessage(tr('Undo Tree: history migration failed. See Output for details.'));
+            }).finally(() => {
+                for (const file of files) {
+                    pendingRenameOldUris.delete(file.oldUri.toString());
+                }
+            });
         })
     );
 

@@ -41,7 +41,9 @@ describe('UndoTreeProvider diff mode', () => {
         expect(html).toContain("el.classList.toggle(");
         expect(html).toContain("'<span class=\"diff-target-badge\">' + escHtml(i18n.badgeDiff) + '</span>'");
         expect(html).toContain('Diff mode - select a node to compare');
-        expect(html).toContain('setFocused(nodeIds.indexOf(currentId));');
+        expect(html).toContain('setFocused(nodeIds.indexOf(focusId), restoreTreeFocus, true);');
+        expect(html).toContain('getNodeDisplayLabel(current.id)');
+        expect(html).toContain('diffBaseNodeId !== null && current && current.id !== diffBaseNodeId');
         expect(html).toContain("if (e.key === 'Escape' && mode === 'diff') {");
         expect(html).toContain("e.preventDefault(); send('toggleMode');");
         expect(html).toContain('Pair Diff');
@@ -57,7 +59,7 @@ describe('UndoTreeProvider diff mode', () => {
         expect(html).toContain('Compare with Current');
         expect(html).toContain('Set Pair Diff Base');
         expect(html).toContain("if (e.key === '?') {");
-        expect(html).toContain("} else if (e.key === 'Escape' && contextMenuNodeId !== null) {");
+        expect(html).toContain("if (e.key === 'Escape' && contextMenuNodeId !== null) {");
         expect(html).toContain("} else if (e.key === 'b') {");
         expect(html).toContain("} else if (e.key === 'c') {");
         expect(html).toContain('diff-base-badge');

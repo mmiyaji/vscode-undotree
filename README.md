@@ -4,6 +4,8 @@ Visualize save-based undo history as a tree in VS Code.
 
 [Japanese README](./README_ja.md)
 
+[Website and settings guide](https://undotree.ruhenheim.org/) · [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=mmiyaji.vscode-undotree)
+
 ## Overview
 
 Unlike standard linear undo/redo, **vscode-undotree** preserves branches. If you jump back to an older point and continue editing, the previous future remains available as another branch.
@@ -38,12 +40,12 @@ The extension records history on saves and periodic autosave checkpoints. It doe
 
 ## Installation
 
-This extension is distributed as a `.vsix` file via [GitHub Releases](https://github.com/mmiyaji/vscode-undotree/releases).
+Install **UndoTree History** by **mmiyaji** from [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=mmiyaji.vscode-undotree).
 
-1. Download the latest `.vsix` from [Releases](https://github.com/mmiyaji/vscode-undotree/releases).
-2. Open VS Code.
-3. Run `Extensions: Install from VSIX...` from the Command Palette.
-4. Select the downloaded file.
+1. Open the Marketplace listing and select **Install**.
+2. Open the extension in VS Code, confirm the publisher, and install it.
+
+Alternatively, search the Extensions view for `@id:mmiyaji.vscode-undotree`. For manual installation, download a `.vsix` from [GitHub Releases](https://github.com/mmiyaji/vscode-undotree/releases) and run `Extensions: Install from VSIX...`.
 
 ## Usage
 
@@ -58,7 +60,9 @@ This extension is distributed as a `.vsix` file via [GitHub Releases](https://gi
 | Compare between two nodes | Switch to **Diff**, choose **Pair Diff**, select a base node, then select another node |
 | Pause / Resume tracking | Click **Pause** / **Resume** |
 | Open actions menu | Click the gear button |
-| Toggle tracking for current extension | Click the status bar item |
+| Toggle tracking for the current file type or exact file name | Click the status bar item |
+| Find history by note or date / show only pinned nodes | Click **Search** and use the search field or pinned filter |
+| Reveal the current node and clear filters | Click **Current** |
 
 ### Panel layout
 
@@ -76,13 +80,13 @@ The status bar item shows tracking state for the current file:
 
 | Display | Meaning |
 |---------|---------|
-| `$(history) Undo Tree: ON` | Current extension is tracked |
-| `$(circle-slash) Undo Tree: OFF` | Current extension is not tracked |
+| `$(history) Undo Tree: ON` | Current file is tracked |
+| `$(circle-slash) Undo Tree: OFF` | Current file is not tracked |
 | `$(debug-pause) Undo Tree: PAUSED` | Tracking is paused globally |
 
 ### Keyboard shortcuts
 
-When the Undo Tree panel has focus:
+The shortcuts below apply when the history tree has focus. Text fields and buttons keep their normal keyboard behavior. `Tab` / `Shift+Tab` moves between controls.
 
 | Key | Action |
 |-----|--------|
@@ -90,15 +94,17 @@ When the Undo Tree panel has focus:
 | `Down` / `j` | Move focus down |
 | `Left` | Move focus to parent |
 | `Right` | Move focus to last child |
-| `Tab` / `Shift+Tab` | Move to next / previous sibling |
+| `Tab` / `Shift+Tab` | Move to next / previous control |
 | `Home` / `End` | Move to first / last node |
-| `Enter` / `Space` | Jump to focused node |
+| `Enter` / `Space` | Jump to focused node, or compare in Diff mode |
+| `u` / `r` | Undo / Redo |
 | `d` | Toggle Navigate / Diff mode |
 | `b` | Set the base node for Pair Diff |
 | `c` | Return to `vs Current` diff mode |
 | `p` | Toggle Pause / Resume |
 | `n` / `N` | Move to next / previous noted node |
 | `?` | Show the shortcut help overlay |
+| `Esc` | Close help or exit Diff mode |
 
 ### Context menu
 
@@ -129,6 +135,8 @@ The menu includes:
 ## Persistence
 
 Persisted history is stored in the extension storage directory, not in the workspace by default.
+
+The default `persistenceMode` is `manual`: history is recorded in memory, and you must use **Save Persisted State** to persist it. Set `undotree.persistenceMode` to `auto` to save history automatically after changes. The default 30-second `autosaveInterval` creates periodic history checkpoints; it does not enable VS Code's file Auto Save setting. Setting it to `0` disables periodic checkpoints, while ordinary file saves still record history.
 
 Saved data is split per tracked file:
 
@@ -232,17 +240,65 @@ Persistence is shared across VS Code windows because persisted history lives in 
 
 Open settings from the actions menu, or search for `@ext:mmiyaji.vscode-undotree` in VS Code settings.
 
+The defaults below describe this checkout's [configuration definitions](./package.json). Existing user, workspace, or workspace-folder settings may override them. For a short introduction and a workspace example, see the [settings guide](https://undotree.ruhenheim.org/#settings).
+
 ### General
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `undotree.enabledExtensions` | `[".txt", ".md"]` | File extensions to track |
-| `undotree.excludePatterns` | `[]` | Filename patterns to exclude |
+| `undotree.enabledExtensions` | Common code, web, configuration, and text extensions | Extensions to track; an explicit list replaces the defaults |
+| `undotree.enabledFileNames` | `Dockerfile`, `Makefile`, `README`, `.gitignore`, and common extensionless files | Exact file names to track, case-insensitively. If `enabledExtensions` has a custom value, these defaults are ignored; set this option explicitly to opt file names back in |
+| `undotree.excludePatterns` | Common generated, dependency, cache, lock, minified, and private-key paths/files | Exclusions always win. Slashless patterns match any basename as before. Path patterns match workspace-relative paths; `*` and `?` stay within one segment and `**` spans directories. Examples: `generated/**`, `**/cache/**`, `*.min.*` |
 | `undotree.persistenceMode` | `"manual"` | `manual` saves only when requested; `auto` saves automatically after history changes |
 | `undotree.autosaveInterval` | `30` | Autosave checkpoint interval in seconds (`0` disables it) |
 | `undotree.hardCompactAfterDays` | `0` | Age threshold for `Hard Compact`; `0` disables it |
 | `undotree.warnOnMultiWindowConflict` | `true` | Show warnings in `auto` mode when the same tracked file appears active in another VS Code window |
 | `undotree.language` | `"auto"` | Runtime sidebar language: `auto`, `en`, or `ja` |
+
+The default extension list covers common programming languages, web files, configuration formats, and text documents. Exact names such as `Dockerfile`, `Makefile`, `README`, and `.gitignore` are enabled too. If you set `enabledExtensions` yourself, that list replaces its defaults and the default exact-name list is suppressed; set `enabledFileNames` explicitly to enable chosen names alongside your extension list. An explicit empty `enabledExtensions` list therefore leaves tracking off unless you also configure file names.
+
+Default exclusions cover version-control metadata, dependency and generated directories, caches, minified files and source maps, common lockfiles, `.env` files, and private-key names/extensions. Exclusions always win. Slashless patterns such as `*.min.*` match a basename anywhere. Patterns with slashes match paths relative to each document's workspace folder: `generated/**` excludes only a top-level `generated` directory, while `**/cache/**` excludes `cache` directories at any depth. Backslashes in patterns are normalized to `/`. If a file is outside a workspace, path patterns are matched against its normalized absolute path. The three tracking settings support workspace-folder scope in multi-root workspaces.
+
+An explicit `excludePatterns` array also replaces its default list. Keep any default exclusions you still need when customizing it. Tracking applies to local `file:` documents; untitled buffers and other URI schemes are not tracked.
+
+<details>
+<summary>Full default tracking lists</summary>
+
+These are defaults, not an additional configuration example. Change only the settings you need.
+
+```json
+{
+  "undotree.enabledExtensions": [
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte", ".astro",
+    ".py", ".pyw", ".go", ".rs", ".java", ".c", ".h", ".cc", ".hh", ".cpp", ".hpp", ".cxx",
+    ".hxx", ".cs", ".rb", ".rake", ".php", ".swift", ".kt", ".kts", ".dart", ".lua", ".sh",
+    ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".r", ".jl", ".pl",
+    ".pm", ".scala", ".sc", ".clj", ".cljs", ".cljc", ".edn", ".ex", ".exs", ".erl", ".hrl",
+    ".fs", ".fsx", ".fsi", ".hs", ".sql", ".graphql", ".gql", ".proto", ".tf", ".tfvars",
+    ".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml", ".ini", ".cmake", ".html", ".htm",
+    ".css", ".scss", ".sass", ".less", ".xml", ".xsd", ".xsl", ".xaml", ".svg", ".txt", ".md",
+    ".mdx", ".rst", ".adoc", ".asciidoc", ".tex", ".org", ".properties", ".conf", ".config"
+  ],
+  "undotree.enabledFileNames": [
+    "Dockerfile", "Containerfile", "Makefile", "GNUmakefile", "justfile", "Taskfile", "README",
+    "LICENSE", "COPYING", "NOTICE", "AUTHORS", "CONTRIBUTING", "CHANGELOG", ".gitignore",
+    ".gitattributes", ".gitmodules", ".editorconfig", ".dockerignore", ".npmrc", ".nvmrc",
+    ".node-version", ".python-version", ".ruby-version", ".tool-versions", ".bashrc",
+    ".bash_profile", ".zshrc", ".profile", ".inputrc", ".npmignore"
+  ],
+  "undotree.excludePatterns": [
+    "**/.git/**", "**/.hg/**", "**/.svn/**", "**/node_modules/**", "**/bower_components/**",
+    "**/vendor/**", "**/dist/**", "**/build/**", "**/out/**", "**/target/**", "**/coverage/**",
+    "**/.next/**", "**/.nuxt/**", "**/.output/**", "**/.cache/**", "**/.turbo/**",
+    "**/.venv/**", "**/venv/**", "*.min.*", "*.map", "package-lock.json", "npm-shrinkwrap.json",
+    "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "Gemfile.lock", "composer.lock", "poetry.lock",
+    "Pipfile.lock", "uv.lock", "bun.lock", "bun.lockb", ".env", ".env.*", "*.pem", "*.key",
+    "*.p12", "*.pfx", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"
+  ]
+}
+```
+
+</details>
 
 ### Display
 

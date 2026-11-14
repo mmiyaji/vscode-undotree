@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.9
+
+### Improvements
+
+- Expanded tracking defaults to 96 common source, web, configuration, and document extensions, plus 30 exact extensionless and dotfile names. Custom extension lists remain authoritative, and filename tracking can be opted into separately.
+- Added 42 conservative default exclusions for dependency, generated, cache, lock, minified, source-map, environment, and private-key paths. Exclusion patterns now support workspace-relative paths with `*`, `?`, and `**`, including per-folder settings in multi-root workspaces.
+- Virtualized large history views and passed lightweight node metadata to the webview, with iterative tree traversal and improved history reconstruction and compaction for deep or large histories.
+- Bounded cold full-snapshot persistence work with asynchronous compression and loading, and strengthened integrity, concurrency, and recovery handling.
+- Improved sidebar search, pins, current-file controls, keyboard navigation, and diff-target labels. Added minimal editor updates and fixed pause, reopen, and rename interactions.
+
 ## 0.3.8
 
 ### Improvements

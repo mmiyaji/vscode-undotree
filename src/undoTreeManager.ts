@@ -2,7 +2,11 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import { deflateRaw, deflateRawSync, inflateRawSync, inflateRaw } from 'zlib';
+import { promisify } from 'util';
 import { isValidContentHash } from './contentHash';
+import { applyHistoryDiffs } from './applyHistoryDiffs';
+import { minimalTextEdit } from './minimalTextEdit';
 
 type Diff = {
     offset: number;
@@ -306,10 +310,14 @@ export type CompactApplyResult = {
 
 const DEFAULT_AUTOSAVE_INTERVAL_MS = 30_000;
 const FULL_STORAGE_THRESHOLD = 0.3;
+const inflateCheckpoint = promisify(inflateRaw);
+const deflateCheckpoint = promisify(deflateRaw);
+const MIN_COMPRESSED_SNAPSHOT_CHARS = 256 * 1024;
 
 export class UndoTreeManager implements vscode.Disposable {
     private trees = new Map<string, UndoTree>();
     private diffBuffer = new Map<string, Diff[][]>();
+    private forceFullSnapshotUris = new Set<string>();
     private dirtyTrees = new Set<string>();
     private mutationGenerations = new Map<string, number>();
     private pendingCheckpointGenerations = new Map<string, Map<string, number>>();
@@ -324,6 +332,10 @@ export class UndoTreeManager implements vscode.Disposable {
     private restoringByUri = new Map<string, Set<symbol>>();
     private lastMetadataRevision = 0;
     private contentCache = new Map<string, string>();
+    // Unpersisted cold snapshots keep a lossless backing copy outside the decoded LRU.
+    private compressedCheckpoints = new Map<string, Buffer>();
+    private checkpointCompressionQueue = new Map<UndoNode, { tree: UndoTree; uri: string; content: string; epoch: number }>();
+    private checkpointCompressionTask: Promise<void> | undefined;
     private contentCacheBytes = 0;
     private contentCacheMaxBytes = 20480 * 1024;
     private memoryCheckpointThresholdBytes = 32 * 1024;
@@ -354,6 +366,9 @@ export class UndoTreeManager implements vscode.Disposable {
         // Changes made while tracking is paused are deliberately ignored. Any
         // pre-pause diffs therefore no longer describe the document on resume.
         this.diffBuffer.clear();
+        for (const uri of this.trees.keys()) {
+            this.forceFullSnapshotUris.add(uri);
+        }
     }
 
     private unrefAutosaveTimer(): void {
@@ -397,6 +412,12 @@ export class UndoTreeManager implements vscode.Disposable {
             this.contentCache.set(contentHash, cached);
             return cached;
         }
+        const compressed = this.compressedCheckpoints.get(contentHash);
+        if (compressed) {
+            const content = inflateRawSync(compressed).toString('utf16le');
+            this.setCachedContent(contentHash, content);
+            return content;
+        }
         if (!this.contentResolver) {
             throw new Error(`Missing checkpoint content resolver for hash ${contentHash}`);
         }
@@ -416,7 +437,10 @@ export class UndoTreeManager implements vscode.Disposable {
         this.debugLog?.(`[checkpoint] cache MISS hash=${contentHash} cacheBytes=${Math.round(this.contentCacheBytes/1024)}KB maxBytes=${Math.round(this.contentCacheMaxBytes/1024)}KB`);
         this.onCheckpointLoadStart?.();
         let content: string;
-        if (this.asyncContentResolver) {
+        const compressed = this.compressedCheckpoints.get(contentHash);
+        if (compressed) {
+            content = (await inflateCheckpoint(compressed)).toString('utf16le');
+        } else if (this.asyncContentResolver) {
             content = await this.asyncContentResolver(contentHash);
         } else {
             if (!this.contentResolver) {
@@ -436,14 +460,15 @@ export class UndoTreeManager implements vscode.Disposable {
         while (id !== undefined) {
             if (visited.has(id)) { break; }
             visited.add(id);
-            path.unshift(id);
+            path.push(id);
             const node = tree.nodes.get(id);
             if (!node || node.storage.kind === 'full' || node.storage.kind === 'checkpoint') { break; }
             id = node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
         }
 
         let content = '';
-        for (const nodeId of path) {
+        const diffs: Diff[][] = [];
+        for (const nodeId of path.reverse()) {
             const node = tree.nodes.get(nodeId);
             if (!node) { break; }
             if (node.storage.kind === 'full') {
@@ -451,19 +476,20 @@ export class UndoTreeManager implements vscode.Disposable {
             } else if (node.storage.kind === 'checkpoint') {
                 content = await this.getOrLoadContentAsync(node.storage.contentHash);
             } else {
-                content = this.applyDiffs(content, node.storage.diffs);
+                for (const event of node.storage.diffs) { diffs.push(event); }
             }
         }
-        return content;
+        return this.applyDiffs(content, diffs);
     }
 
-    private setCachedContent(hash: string, content: string) {
+    private setCachedContent(hash: string, content: string, retainUnpersisted = false) {
         const existing = this.contentCache.get(hash);
         if (existing !== undefined) {
             this.contentCache.delete(hash);
             this.contentCacheBytes = Math.max(0, this.contentCacheBytes - Buffer.byteLength(existing, 'utf8'));
         }
         const bytes = Buffer.byteLength(content, 'utf8');
+        if (bytes > this.contentCacheMaxBytes && !retainUnpersisted) { return; }
         this.evictCache(bytes);
         this.contentCache.set(hash, content);
         this.contentCacheBytes += bytes;
@@ -473,10 +499,19 @@ export class UndoTreeManager implements vscode.Disposable {
         return this.getOrLoadContent(hash);
     }
 
+    async getCheckpointContentAsync(hash: string): Promise<string> {
+        const compressed = this.compressedCheckpoints.get(hash);
+        // Persistence reads many cold snapshots once; avoid filling the decoded
+        // navigation cache with each of them.
+        if (compressed) { return (await inflateCheckpoint(compressed)).toString('utf16le'); }
+        return this.getOrLoadContentAsync(hash);
+    }
+
     private evictCache(incoming: number) {
         const protectedHashes = this.getPendingCheckpointHashes();
         while (this.contentCacheBytes + incoming > this.contentCacheMaxBytes && this.contentCache.size > 0) {
-            const oldest = Array.from(this.contentCache.keys()).find((hash) => !protectedHashes.has(hash));
+            const oldest = Array.from(this.contentCache.keys()).find((hash) =>
+                !protectedHashes.has(hash) || this.compressedCheckpoints.has(hash));
             if (oldest === undefined) {
                 // Pending in-memory checkpoints are the sole copy of their
                 // content. Temporarily exceeding the cache cap is safer than
@@ -514,21 +549,54 @@ export class UndoTreeManager implements vscode.Disposable {
                 this.pendingCheckpointGenerations.delete(uri);
             }
         }
+        this.releasePersistedCompressedCheckpoints(persisted);
         this.evictCache(0);
     }
 
     markCheckpointPersistedForUri(uri: string, hashes: Iterable<string>): void {
+        const persisted = new Set(hashes);
         const pending = this.pendingCheckpointGenerations.get(uri);
         if (!pending) {
             return;
         }
-        for (const hash of hashes) {
+        for (const hash of persisted) {
             pending.delete(hash);
         }
         if (pending.size === 0) {
             this.pendingCheckpointGenerations.delete(uri);
         }
+        this.releasePersistedCompressedCheckpoints(persisted);
         this.evictCache(0);
+    }
+
+    private releasePersistedCompressedCheckpoints(hashes: Iterable<string>): void {
+        // Only an explicit persistence acknowledgement allows dropping backing
+        // bytes. Clearing a dirty flag alone does not prove that a blob exists.
+        if (!this.contentResolver) { return; }
+        const pending = this.getPendingCheckpointHashes();
+        for (const hash of hashes) {
+            if (!pending.has(hash)) { this.compressedCheckpoints.delete(hash); }
+        }
+    }
+
+    private pruneCompressedCheckpoints(): void {
+        for (const [node, job] of this.checkpointCompressionQueue) {
+            if (this.trees.get(job.uri) !== job.tree || job.tree.nodes.get(node.id) !== node) {
+                this.checkpointCompressionQueue.delete(node);
+            }
+        }
+        if (this.compressedCheckpoints.size === 0) { return; }
+        // An in-flight export may still refer to a removed node. Retain its
+        // backing until the corresponding pending generation is acknowledged.
+        const referenced = this.getPendingCheckpointHashes();
+        for (const tree of this.trees.values()) {
+            for (const node of tree.nodes.values()) {
+                if (node.storage.kind === 'checkpoint') { referenced.add(node.storage.contentHash); }
+            }
+        }
+        for (const hash of this.compressedCheckpoints.keys()) {
+            if (!referenced.has(hash)) { this.compressedCheckpoints.delete(hash); }
+        }
     }
 
     setAutosaveInterval(ms: number) {
@@ -617,6 +685,7 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private markTreeDirty(tree: UndoTree): number | undefined {
+        this.pruneCompressedCheckpoints();
         for (const [uri, residentTree] of this.trees) {
             if (residentTree === tree) {
                 return this.markDirtyKey(uri);
@@ -656,6 +725,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 this.pendingCheckpointGenerations.delete(uri);
             }
         }
+        this.pruneCompressedCheckpoints();
         this.evictCache(0);
         return true;
     }
@@ -683,8 +753,10 @@ export class UndoTreeManager implements vscode.Disposable {
 
     resetAll(): void {
         this.managerEpoch++;
+        this.checkpointCompressionQueue.clear();
         this.trees.clear();
         this.diffBuffer.clear();
+        this.forceFullSnapshotUris.clear();
         this.restoringByUri.clear();
         this.dirtyTrees.clear();
         this.mutationGenerations.clear();
@@ -692,6 +764,7 @@ export class UndoTreeManager implements vscode.Disposable {
         this.lastAccessAt.clear();
         this.jumpSuppressedHashes.clear();
         this.contentCache.clear();
+        this.compressedCheckpoints.clear();
         this.contentCacheBytes = 0;
         this.lastMetadataRevision = 0;
         this.nextId = 1;
@@ -702,8 +775,10 @@ export class UndoTreeManager implements vscode.Disposable {
         const key = uri.toString();
         this.trees.delete(key);
         this.diffBuffer.delete(key);
+        this.forceFullSnapshotUris.delete(key);
         this.dirtyTrees.delete(key);
         this.pendingCheckpointGenerations.delete(key);
+        this.pruneCompressedCheckpoints();
         this.lastAccessAt.delete(key);
         this.jumpSuppressedHashes.delete(key);
         this.evictCache(0);
@@ -727,6 +802,9 @@ export class UndoTreeManager implements vscode.Disposable {
         if (diffBuffer) {
             this.diffBuffer.set(newKey, diffBuffer);
             this.diffBuffer.delete(oldKey);
+        }
+        if (this.forceFullSnapshotUris.delete(oldKey)) {
+            this.forceFullSnapshotUris.add(newKey);
         }
 
         if (this.dirtyTrees.has(oldKey)) {
@@ -833,6 +911,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
         if (currentNode.hash === hash) {
             this.diffBuffer.delete(key);
+            this.forceFullSnapshotUris.delete(key);
             this.jumpSuppressedHashes.delete(key);
             return;
         }
@@ -842,6 +921,8 @@ export class UndoTreeManager implements vscode.Disposable {
         if (existingId !== undefined && tree.nodes.has(existingId)) {
             tree.currentId = existingId;
             this.diffBuffer.delete(key);
+            this.forceFullSnapshotUris.delete(key);
+            this.markDirtyKey(key);
             this.onRefresh?.();
             return;
         }
@@ -861,12 +942,13 @@ export class UndoTreeManager implements vscode.Disposable {
             tree.currentId = currentNode.id;
             this.diffBuffer.delete(key);
             this.jumpSuppressedHashes.delete(key);
+            this.forceFullSnapshotUris.delete(key);
             this.markDirtyKey(key);
             this.onRefresh?.();
             return;
         }
 
-        const storage: UndoNodeStorage = this.shouldStoreFull(diffs, content.length)
+        const storage: UndoNodeStorage = this.forceFullSnapshotUris.has(key) || this.shouldStoreFull(diffs, content.length)
             ? { kind: 'full', content }
             : { kind: 'delta', diffs };
 
@@ -891,9 +973,12 @@ export class UndoTreeManager implements vscode.Disposable {
         if (currentNode.children.length >= 2) {
             const currentContent = this.reconstructContent(tree, currentNode.id);
             this.upgradeStorage(tree, currentNode.id, currentContent, key, generation);
+        } else if (currentNode.storage.kind === 'full' && currentNode.storage.content.length >= MIN_COMPRESSED_SNAPSHOT_CHARS) {
+            this.upgradeStorage(tree, currentNode.id, currentNode.storage.content, key, generation);
         }
 
         this.diffBuffer.delete(key);
+        this.forceFullSnapshotUris.delete(key);
         this.onRefresh?.();
     }
 
@@ -954,7 +1039,23 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
         if (this.shouldUseCheckpointForMemory(content, nodeId, tree)) {
-            this.setCachedContent(node.hash, content);
+            if (content.length >= MIN_COMPRESSED_SNAPSHOT_CHARS) {
+                if (content.length > 1024 * 1024 && uri !== undefined) {
+                    // Large/incompressible snapshots must not block the extension
+                    // host while zlib works. Keep the full node until its backing
+                    // buffer is ready; one worker bounds temporary allocations.
+                    node.storage = { kind: 'full', content };
+                    this.checkpointCompressionQueue.set(node, { tree, uri, content, epoch: this.managerEpoch });
+                    this.checkpointCompressionTask ??= this.compressQueuedCheckpoints().finally(() => {
+                        this.checkpointCompressionTask = undefined;
+                    });
+                    return;
+                }
+                // UTF-16 preserves even unpaired surrogate code units exactly.
+                this.compressedCheckpoints.set(node.hash, deflateRawSync(Buffer.from(content, 'utf16le'), { level: 1 }));
+            } else {
+                this.setCachedContent(node.hash, content, true);
+            }
             node.storage = { kind: 'checkpoint', contentHash: node.hash };
             if (uri !== undefined && generation !== undefined) {
                 this.trackPendingCheckpoint(uri, node.hash, generation);
@@ -962,6 +1063,28 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
         node.storage = { kind: 'full', content };
+    }
+
+    private async compressQueuedCheckpoints(): Promise<void> {
+        while (this.checkpointCompressionQueue.size > 0) {
+            const [node, job] = this.checkpointCompressionQueue.entries().next().value!;
+            this.checkpointCompressionQueue.delete(node);
+            try {
+                const buffer = await deflateCheckpoint(Buffer.from(job.content, 'utf16le'), { level: 1 });
+                if (this.managerEpoch !== job.epoch || this.trees.get(job.uri) !== job.tree
+                    || job.tree.nodes.get(node.id) !== node || node.storage.kind !== 'full'
+                    || node.storage.content !== job.content || node.id === job.tree.currentId) { continue; }
+                this.compressedCheckpoints.set(node.hash, buffer);
+                node.storage = { kind: 'checkpoint', contentHash: node.hash };
+                // A persist may have completed while compression was running.
+                // Give the representation change its own dirty generation.
+                this.trackPendingCheckpoint(job.uri, node.hash, this.markDirtyKey(job.uri));
+                this.onRefresh?.();
+            } catch (error) {
+                // The original full snapshot is still authoritative on failure.
+                this.debugLog?.(`[checkpoint] background compression failed: ${String(error)}`);
+            }
+        }
     }
 
     reconstructContent(tree: UndoTree, targetId: number): string {
@@ -974,7 +1097,7 @@ export class UndoTreeManager implements vscode.Disposable {
                 break;
             }
             visited.add(id);
-            path.unshift(id);
+            path.push(id);
             const node = tree.nodes.get(id);
             if (!node || node.storage.kind === 'full' || node.storage.kind === 'checkpoint') {
                 break;
@@ -983,7 +1106,8 @@ export class UndoTreeManager implements vscode.Disposable {
         }
 
         let content = '';
-        for (const nodeId of path) {
+        const diffs: Diff[][] = [];
+        for (const nodeId of path.reverse()) {
             const node = tree.nodes.get(nodeId);
             if (!node) {
                 break;
@@ -993,24 +1117,14 @@ export class UndoTreeManager implements vscode.Disposable {
             } else if (node.storage.kind === 'checkpoint') {
                 content = this.getOrLoadContent(node.storage.contentHash);
             } else {
-                content = this.applyDiffs(content, node.storage.diffs);
+                for (const event of node.storage.diffs) { diffs.push(event); }
             }
         }
-        return content;
+        return this.applyDiffs(content, diffs);
     }
 
     private applyDiffs(content: string, diffs: Diff[][]): string {
-        let result = content;
-        for (const eventDiffs of diffs) {
-            const sorted = [...eventDiffs].sort((a, b) => b.offset - a.offset);
-            for (const diff of sorted) {
-                result =
-                    result.slice(0, diff.offset) +
-                    diff.inserted +
-                    result.slice(diff.offset + diff.removeLength);
-            }
-        }
-        return result;
+        return applyHistoryDiffs(content, diffs);
     }
 
     private hashContent(content: string): string {
@@ -1018,8 +1132,11 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     private computeSizeMetrics(content: string): { lineCount: number; byteCount: number } {
+        let lineCount = content === '' ? 0 : 1;
+        let offset = -1;
+        while ((offset = content.indexOf('\n', offset + 1)) !== -1) { lineCount++; }
         return {
-            lineCount: content === '' ? 0 : content.split('\n').length,
+            lineCount,
             byteCount: Buffer.byteLength(content, 'utf8'),
         };
     }
@@ -1122,13 +1239,17 @@ export class UndoTreeManager implements vscode.Disposable {
 
         const restoreToken = this.beginRestoring(uriStr);
         try {
-            const fullRange = new vscode.Range(
-                document.positionAt(0),
-                document.positionAt(document.getText().length)
+            const before = document.getText();
+            const replacement = Math.max(before.length, content.length) >= 256 * 1024
+                ? minimalTextEdit(before, content)
+                : { offset: 0, removeLength: before.length, inserted: content };
+            const range = new vscode.Range(
+                document.positionAt(replacement.offset),
+                document.positionAt(replacement.offset + replacement.removeLength)
             );
             const applied = this.isTextEditorTarget(target)
-                ? await target.edit((eb) => eb.replace(fullRange, content))
-                : await this.applyDocumentEdit(document, fullRange, content);
+                ? await target.edit((eb) => eb.replace(range, replacement.inserted))
+                : await this.applyDocumentEdit(document, range, replacement.inserted);
             if (!applied) {
                 if (this.jumpGenerations.get(t) === jumpGeneration && t.currentId === nodeId) {
                     t.currentId = previousCurrentId;
@@ -1704,8 +1825,10 @@ export class UndoTreeManager implements vscode.Disposable {
             throw new Error('Invalid serialized undo tree state');
         }
         this.managerEpoch++;
+        this.checkpointCompressionQueue.clear();
         this.trees.clear();
         this.diffBuffer.clear();
+        this.forceFullSnapshotUris.clear();
         this.restoringByUri.clear();
         this.dirtyTrees.clear();
         this.mutationGenerations.clear();
@@ -1720,6 +1843,7 @@ export class UndoTreeManager implements vscode.Disposable {
             this.observeMetadataRevisions(importedTree);
             this.lastAccessAt.set(key, Date.now());
         }
+        this.pruneCompressedCheckpoints();
 
         this.nextId = Math.max(
             state.nextId,
@@ -1732,6 +1856,7 @@ export class UndoTreeManager implements vscode.Disposable {
     importTree(uri: string, tree: SerializedUndoTree, nextId?: number) {
         const importedTree = this.deserializeTree(tree);
         this.trees.set(uri, importedTree);
+        this.pruneCompressedCheckpoints();
         this.observeMetadataRevisions(importedTree);
         this.lastAccessAt.set(uri, Date.now());
 
@@ -1865,6 +1990,8 @@ export class UndoTreeManager implements vscode.Disposable {
         const generation = this.markDirtyKey(key);
         if (currentNode.children.length >= 2) {
             this.upgradeStorage(tree, currentNode.id, currentContent, key, generation);
+        } else if (currentNode.storage.kind === 'full' && currentNode.storage.content.length >= MIN_COMPRESSED_SNAPSHOT_CHARS) {
+            this.upgradeStorage(tree, currentNode.id, currentNode.storage.content, key, generation);
         }
         this.diffBuffer.delete(key);
         this.onRefresh?.();
@@ -1989,7 +2116,8 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     previewHardCompactDetailed(tree: UndoTree, maxAgeDays: number): CompactPreviewResult {
-        const removableIds = this.collectHardCompactNodeIds(tree, maxAgeDays);
+        const context = this.getHardCompactContext(tree);
+        const removableIds = this.collectHardCompactNodeIds(tree, maxAgeDays, undefined, context);
         const removable: CompactPreviewItem[] = [];
         const protectedItems: CompactPreviewItem[] = [];
 
@@ -2001,7 +2129,7 @@ export class UndoTreeManager implements vscode.Disposable {
             if (removableIds.has(node.id)) {
                 removable.push(this.toCompactPreviewItem(tree, node, `older than ${maxAgeDays} day(s)`));
             } else {
-                protectedItems.push(this.toCompactPreviewItem(tree, node, this.getHardCompactProtectReason(tree, node, maxAgeDays)));
+                protectedItems.push(this.toCompactPreviewItem(tree, node, this.getHardCompactProtectReason(tree, node, maxAgeDays, context)));
             }
         }
 
@@ -2140,9 +2268,7 @@ export class UndoTreeManager implements vscode.Disposable {
         return undefined;
     }
 
-    private collectHardCompactNodeIds(tree: UndoTree, maxAgeDays: number, overrides?: Map<number, 'remove' | 'keep'>): Set<number> {
-        const thresholdMs = maxAgeDays * 86_400_000;
-        const now = Date.now();
+    private getHardCompactContext(tree: UndoTree) {
         const latestNodeId = this.getLatestNodeId(tree);
         const currentAncestors = this.collectCurrentAncestors(tree);
         const latestAncestors = new Set<number>();
@@ -2155,6 +2281,15 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         const hasNotedAncestor = this.collectNotedAncestors(tree);
         const hasPinnedAncestor = this.collectPinnedAncestors(tree);
+        return { now: Date.now(), latestNodeId, currentAncestors, latestAncestors, hasNotedAncestor, hasPinnedAncestor };
+    }
+
+    private collectHardCompactNodeIds(
+        tree: UndoTree, maxAgeDays: number, overrides?: Map<number, 'remove' | 'keep'>,
+        context = this.getHardCompactContext(tree)
+    ): Set<number> {
+        const thresholdMs = maxAgeDays * 86_400_000;
+        const { now, latestNodeId, currentAncestors, latestAncestors, hasNotedAncestor, hasPinnedAncestor } = context;
         const keptAncestors = new Set<number>();
         if (overrides) {
             for (const [nodeId, action] of overrides) {
@@ -2232,23 +2367,13 @@ export class UndoTreeManager implements vscode.Disposable {
         return toDelete;
     }
 
-    private getHardCompactProtectReason(tree: UndoTree, node: UndoNode, maxAgeDays: number): string {
+    private getHardCompactProtectReason(
+        tree: UndoTree, node: UndoNode, maxAgeDays: number,
+        context: ReturnType<UndoTreeManager['getHardCompactContext']>
+    ): string {
         const thresholdMs = maxAgeDays * 86_400_000;
-        const ageMs = Date.now() - node.timestamp;
-        const latestNodeId = this.getLatestNodeId(tree);
-        const currentAncestors = this.collectCurrentAncestors(tree);
-        const latestAncestors = new Set<number>();
-        let latestAncestorId: number | undefined = latestNodeId;
-        while (latestAncestorId !== undefined) {
-            if (latestAncestors.has(latestAncestorId)) { break; }
-            latestAncestors.add(latestAncestorId);
-            const latestAncestorNode = tree.nodes.get(latestAncestorId);
-            latestAncestorId = latestAncestorNode && latestAncestorNode.parents.length > 0
-                ? latestAncestorNode.parents[latestAncestorNode.parents.length - 1]
-                : undefined;
-        }
-        const hasNotedAncestor = this.collectNotedAncestors(tree);
-        const hasPinnedAncestor = this.collectPinnedAncestors(tree);
+        const { now, latestNodeId, currentAncestors, latestAncestors, hasNotedAncestor, hasPinnedAncestor } = context;
+        const ageMs = now - node.timestamp;
         if (node.id === tree.currentId) {
             return 'current node';
         }
@@ -2310,11 +2435,15 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     dispose() {
+        this.managerEpoch++;
+        this.checkpointCompressionQueue.clear();
+        this.compressedCheckpoints.clear();
         if (this.autosaveTimer) {
             clearInterval(this.autosaveTimer);
         }
         this.trees.clear();
         this.diffBuffer.clear();
+        this.forceFullSnapshotUris.clear();
         this.restoringByUri.clear();
         this.dirtyTrees.clear();
         this.mutationGenerations.clear();

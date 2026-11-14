@@ -4,6 +4,8 @@ VS Code 上で、保存を基準にした Undo 履歴をツリーとして可視
 
 [English README](./README.md)
 
+[紹介サイト・設定ガイド](https://undotree.ruhenheim.org/) · [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=mmiyaji.vscode-undotree)
+
 ## 概要
 
 通常の直線的な undo/redo とは異なり、**vscode-undotree** は分岐を保持します。過去の位置に戻って編集を続けても、それまでの未来は別の枝として残ります。
@@ -38,12 +40,12 @@ VS Code 上で、保存を基準にした Undo 履歴をツリーとして可視
 
 ## インストール
 
-この拡張は `.vsix` 形式で [GitHub Releases](https://github.com/mmiyaji/vscode-undotree/releases) から配布しています。
+発行元 **mmiyaji** の **UndoTree History** を [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=mmiyaji.vscode-undotree) からインストールできます。
 
-1. [Releases](https://github.com/mmiyaji/vscode-undotree/releases) から最新の `.vsix` をダウンロードします。
-2. VS Code を開きます。
-3. コマンドパレットから `Extensions: Install from VSIX...` を実行します。
-4. ダウンロードした `.vsix` を選択します。
+1. ストアのページで **Install** を選択します。
+2. VS Code で開き、発行元を確認してインストールします。
+
+VS Code の拡張機能ビューで `@id:mmiyaji.vscode-undotree` を検索しても見つかります。手動でインストールする場合は、[GitHub Releases](https://github.com/mmiyaji/vscode-undotree/releases) から `.vsix` を取得し、`Extensions: Install from VSIX...` を実行します。
 
 ## 使い方
 
@@ -58,7 +60,9 @@ VS Code 上で、保存を基準にした Undo 履歴をツリーとして可視
 | ノード間比較 | **Diff** -> **Pair Diff** -> 基準ノード選択 -> 比較先ノード選択 |
 | 一時停止 / 再開 | **Pause** / **Resume** |
 | アクションメニューを開く | ギアボタン |
-| 現在ファイル拡張子の追跡 ON/OFF | ステータスバー項目 |
+| 現在のファイル形式またはファイル名の追跡 ON/OFF | ステータスバー項目 |
+| メモ・日時で履歴を検索 / ピン留めだけ表示 | **Search** から検索欄・ピン留めフィルターを使う |
+| フィルターを解除して現在のノードを表示 | **Current** |
 
 ### パネル表示
 
@@ -76,13 +80,13 @@ VS Code 上で、保存を基準にした Undo 履歴をツリーとして可視
 
 | 表示 | 意味 |
 |------|------|
-| `$(history) Undo Tree: ON` | 現在の拡張子は追跡対象 |
-| `$(circle-slash) Undo Tree: OFF` | 現在の拡張子は追跡対象外 |
+| `$(history) Undo Tree: ON` | 現在のファイルは追跡対象 |
+| `$(circle-slash) Undo Tree: OFF` | 現在のファイルは追跡対象外 |
 | `$(debug-pause) Undo Tree: PAUSED` | 履歴記録をグローバルに一時停止中 |
 
 ### キーボード操作
 
-Undo Tree パネルにフォーカスがあるとき:
+以下のキーは履歴ツリーにフォーカスがあるときに使えます。入力欄やボタンでは通常のキー操作を維持します。`Tab` / `Shift+Tab` はコントロール間を移動します。
 
 | キー | 操作 |
 |------|------|
@@ -90,15 +94,17 @@ Undo Tree パネルにフォーカスがあるとき:
 | `Down` / `j` | 下へ移動 |
 | `Left` | 親へ移動 |
 | `Right` | 最後の子へ移動 |
-| `Tab` / `Shift+Tab` | 次 / 前の sibling へ移動 |
+| `Tab` / `Shift+Tab` | 次 / 前のコントロールへ移動 |
 | `Home` / `End` | 最初 / 最後のノードへ移動 |
-| `Enter` / `Space` | フォーカス中のノードへジャンプ |
+| `Enter` / `Space` | フォーカス中のノードへジャンプ。Diff モードでは差分を比較 |
+| `u` / `r` | Undo / Redo |
 | `d` | Navigate / Diff モード切替 |
 | `b` | Pair Diff の基準ノード設定 |
 | `c` | `vs Current` に戻る |
 | `p` | Pause / Resume |
 | `n` / `N` | 次 / 前のメモ付きノードへ移動 |
 | `?` | ショートカット一覧オーバーレイ表示 |
+| `Esc` | ヘルプを閉じる / Diff モードを終了 |
 
 ### 右クリックメニュー
 
@@ -129,6 +135,8 @@ Undo Tree パネルにフォーカスがあるとき:
 ## 永続化
 
 永続化された履歴はワークスペースではなく、拡張の storage ディレクトリへ保存されます。
+
+`persistenceMode` の既定値は `manual` です。履歴はメモリ上に記録され、永続化には **Save Persisted State** の実行が必要です。変更後に自動で保存するには、`undotree.persistenceMode` を `auto` にします。既定で30秒の `autosaveInterval` は履歴の定期チェックポイントを作る設定で、VS Code のファイルの自動保存とは別です。`0` にすると定期記録を無効にできますが、ファイル保存時の履歴記録は続きます。
 
 保存データは tracked file ごとに分かれます。
 
@@ -217,17 +225,65 @@ persisted history は同じ extension storage フォルダを使うため、VS C
 
 アクションメニューの `Open Settings` から開くか、VS Code 設定で `@ext:mmiyaji.vscode-undotree` を検索してください。
 
+以下は、このチェックアウトの [設定定義](./package.json) に基づく既定値です。既存のユーザー設定・ワークスペース設定・フォルダー設定がある場合は、そちらが優先されます。簡単な説明と設定例は [設定ガイド](https://undotree.ruhenheim.org/#settings) でも確認できます。
+
 ### General
 
 | 設定 | 既定値 | 説明 |
 |------|--------|------|
-| `undotree.enabledExtensions` | `[".txt", ".md"]` | 追跡対象の拡張子 |
-| `undotree.excludePatterns` | `[]` | 除外するファイル名パターン |
+| `undotree.enabledExtensions` | 一般的なコード、Web、設定、テキストの拡張子 | 追跡対象の拡張子。明示した配列で既定値を置き換えます |
+| `undotree.enabledFileNames` | `Dockerfile`、`Makefile`、`README`、`.gitignore` など | 大文字小文字を区別せず完全一致するファイル名を追跡します。`enabledExtensions` に独自の値を設定すると既定のファイル名は無効になります。明示的にこの設定を指定するとファイル名を追跡できます |
+| `undotree.excludePatterns` | 生成物、依存関係、キャッシュ、lock、minified、秘密鍵に関する一般的なパターン | 除外設定は常に優先されます。スラッシュなしは従来どおり任意のファイル名に一致します。パスパターンはワークスペース相対パスに一致し、`*` と `?` は1階層内、`**` は複数階層に一致します。例: `generated/**`、`**/cache/**`、`*.min.*` |
 | `undotree.persistenceMode` | `"manual"` | `manual` は明示保存のみ、`auto` は履歴更新後に自動保存 |
 | `undotree.autosaveInterval` | `30` | autosave チェックポイント間隔（秒）。`0` で無効 |
 | `undotree.hardCompactAfterDays` | `0` | `Hard Compact` の日数閾値。`0` で無効 |
 | `undotree.warnOnMultiWindowConflict` | `true` | `auto` モードで、同じ tracked file が別ウィンドウで active のとき警告 |
 | `undotree.language` | `"auto"` | 実行時 UI 言語。`auto` / `en` / `ja` |
+
+拡張子の既定値は、一般的なプログラミング言語、Web、設定、テキスト形式を対象にします。`Dockerfile`、`Makefile`、`README`、`.gitignore` などのファイル名も既定で追跡します。`enabledExtensions` を独自に設定すると配列全体が既定値を置き換え、既定のファイル名は無効になります。独自の拡張子配列と一緒にファイル名も追跡するには、`enabledFileNames` を明示してください。`enabledExtensions` を空配列にすると、ファイル名も明示しない限り追跡されません。
+
+既定の除外対象には、バージョン管理メタデータ、依存関係・生成物・キャッシュのディレクトリ、minified ファイルと source map、一般的な lock file、`.env` ファイル、秘密鍵の名前や拡張子が含まれます。除外設定が常に優先されます。`*.min.*` のようなスラッシュなしのパターンは、任意の場所にある同名ファイルに一致します。スラッシュを含むパターンは各ドキュメントのワークスペースフォルダーからの相対パスに一致します。`generated/**` は最上位の `generated` フォルダーを、`**/cache/**` は任意の階層の `cache` フォルダーを除外します。パターン内のバックスラッシュは `/` に正規化します。ワークスペース外のファイルでは、正規化した絶対パスを使います。3つの追跡設定は、マルチルートワークスペースでフォルダーごとに指定できます。
+
+`excludePatterns` も、独自の配列を指定すると既定のリストを置き換えます。引き続き除外したい既定のパターンも含めて指定してください。追跡対象はローカルの `file:` ドキュメントです。未保存の新規ファイルや、ほかの URI スキームは追跡しません。
+
+<details>
+<summary>追跡設定の既定リスト（全項目）</summary>
+
+以下は既定値の一覧です。追加設定の例ではありません。変更したい設定だけを指定してください。
+
+```json
+{
+  "undotree.enabledExtensions": [
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte", ".astro",
+    ".py", ".pyw", ".go", ".rs", ".java", ".c", ".h", ".cc", ".hh", ".cpp", ".hpp", ".cxx",
+    ".hxx", ".cs", ".rb", ".rake", ".php", ".swift", ".kt", ".kts", ".dart", ".lua", ".sh",
+    ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".r", ".jl", ".pl",
+    ".pm", ".scala", ".sc", ".clj", ".cljs", ".cljc", ".edn", ".ex", ".exs", ".erl", ".hrl",
+    ".fs", ".fsx", ".fsi", ".hs", ".sql", ".graphql", ".gql", ".proto", ".tf", ".tfvars",
+    ".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml", ".ini", ".cmake", ".html", ".htm",
+    ".css", ".scss", ".sass", ".less", ".xml", ".xsd", ".xsl", ".xaml", ".svg", ".txt", ".md",
+    ".mdx", ".rst", ".adoc", ".asciidoc", ".tex", ".org", ".properties", ".conf", ".config"
+  ],
+  "undotree.enabledFileNames": [
+    "Dockerfile", "Containerfile", "Makefile", "GNUmakefile", "justfile", "Taskfile", "README",
+    "LICENSE", "COPYING", "NOTICE", "AUTHORS", "CONTRIBUTING", "CHANGELOG", ".gitignore",
+    ".gitattributes", ".gitmodules", ".editorconfig", ".dockerignore", ".npmrc", ".nvmrc",
+    ".node-version", ".python-version", ".ruby-version", ".tool-versions", ".bashrc",
+    ".bash_profile", ".zshrc", ".profile", ".inputrc", ".npmignore"
+  ],
+  "undotree.excludePatterns": [
+    "**/.git/**", "**/.hg/**", "**/.svn/**", "**/node_modules/**", "**/bower_components/**",
+    "**/vendor/**", "**/dist/**", "**/build/**", "**/out/**", "**/target/**", "**/coverage/**",
+    "**/.next/**", "**/.nuxt/**", "**/.output/**", "**/.cache/**", "**/.turbo/**",
+    "**/.venv/**", "**/venv/**", "*.min.*", "*.map", "package-lock.json", "npm-shrinkwrap.json",
+    "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "Gemfile.lock", "composer.lock", "poetry.lock",
+    "Pipfile.lock", "uv.lock", "bun.lock", "bun.lockb", ".env", ".env.*", "*.pem", "*.key",
+    "*.p12", "*.pfx", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"
+  ]
+}
+```
+
+</details>
 
 ### Display
 

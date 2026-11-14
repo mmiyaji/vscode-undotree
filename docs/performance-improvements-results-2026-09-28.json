@@ -1,0 +1,439 @@
+{
+  "measuredAt": "2026-09-28",
+  "baseline": "f6966c7 + functional fixes",
+  "implementation": "working-tree performance improvements",
+  "unit": {
+    "node": "v22.22.0",
+    "platform": "win32",
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13400F",
+    "results": [
+      {
+        "name": "1MiB-1000-deltas",
+        "bytes": 1048576,
+        "count": 1000,
+        "uri": "file:///C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo/1MiB-1000-deltas/file.md",
+        "nodeCount": 1001,
+        "initialMs": 2.0687000000000353,
+        "saveP50Ms": 1.3134000000000015,
+        "saveP95Ms": 2.2835999999999785,
+        "saveMaxMs": 6.518499999999904,
+        "residentHeapMiB": -4.041046142578125,
+        "reconstructMs": 10.301800000000185,
+        "reconstructAsyncMs": 1.8414999999999964,
+        "retainedFullTextMiB": 1,
+        "compressedCheckpointMiB": 0,
+        "decodedCacheMiB": 0,
+        "displayStateMs": 5.5330000000003565,
+        "payloadMiB": 0.18430519104003906,
+        "payloadStringifyMs": 0.8916999999996733,
+        "htmlMs": 1.8998000000001412,
+        "exportMs": 1.1938999999997577,
+        "persistMs": 49.89649999999983,
+        "repersistMs": 38.42290000000003,
+        "hardCompactPreviewMs": 3.6890000000003056
+      },
+      {
+        "name": "10MiB-500-deltas",
+        "bytes": 10485760,
+        "count": 500,
+        "uri": "file:///C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo/10MiB-500-deltas/file.md",
+        "nodeCount": 501,
+        "initialMs": 11.35859999999991,
+        "saveP50Ms": 12.17619999999988,
+        "saveP95Ms": 14.726200000000063,
+        "saveMaxMs": 27.385500000000093,
+        "residentHeapMiB": 17.86779022216797,
+        "reconstructMs": 6.993099999999686,
+        "reconstructAsyncMs": 2.878899999999703,
+        "retainedFullTextMiB": 10,
+        "compressedCheckpointMiB": 0,
+        "decodedCacheMiB": 0,
+        "displayStateMs": 3.63799999999992,
+        "payloadMiB": 0.09322834014892578,
+        "payloadStringifyMs": 0.4309000000002925,
+        "htmlMs": 1.3832000000002154,
+        "exportMs": 0.8515999999999622,
+        "persistMs": 71.82390000000032,
+        "repersistMs": 30.088600000000042,
+        "hardCompactPreviewMs": 2.3443999999999505
+      },
+      {
+        "name": "20MiB-100-deltas",
+        "bytes": 20971520,
+        "count": 100,
+        "uri": "file:///C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo/20MiB-100-deltas/file.md",
+        "nodeCount": 101,
+        "initialMs": 22.8909000000001,
+        "saveP50Ms": 25.809699999999907,
+        "saveP95Ms": 30.64779999999996,
+        "saveMaxMs": 52.6259,
+        "residentHeapMiB": 25.831375122070312,
+        "reconstructMs": 4.311900000000151,
+        "reconstructAsyncMs": 4.097900000000209,
+        "retainedFullTextMiB": 20,
+        "compressedCheckpointMiB": 0,
+        "decodedCacheMiB": 0,
+        "displayStateMs": 2.3233000000000175,
+        "payloadMiB": 0.01884174346923828,
+        "payloadStringifyMs": 0.09900000000016007,
+        "htmlMs": 1.0066999999999098,
+        "exportMs": 0.43000000000029104,
+        "persistMs": 92.43910000000005,
+        "repersistMs": 24.16300000000001,
+        "hardCompactPreviewMs": 1.22629999999981
+      },
+      {
+        "name": "50MiB-100-deltas",
+        "bytes": 52428800,
+        "count": 100,
+        "uri": "file:///C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo/50MiB-100-deltas/file.md",
+        "nodeCount": 101,
+        "initialMs": 51.51049999999998,
+        "saveP50Ms": 60.02300000000014,
+        "saveP95Ms": 87.39510000000064,
+        "saveMaxMs": 92.4988000000003,
+        "residentHeapMiB": 90.61370849609375,
+        "reconstructMs": 9.21939999999995,
+        "reconstructAsyncMs": 9.384999999999309,
+        "retainedFullTextMiB": 50,
+        "compressedCheckpointMiB": 0,
+        "decodedCacheMiB": 0,
+        "displayStateMs": 2.249599999999191,
+        "payloadMiB": 0.01884174346923828,
+        "payloadStringifyMs": 0.10750000000007276,
+        "htmlMs": 1.134900000000016,
+        "exportMs": 0.4522999999999229,
+        "persistMs": 173.1956,
+        "repersistMs": 23.11160000000018,
+        "hardCompactPreviewMs": 1.1945999999998094
+      },
+      {
+        "name": "1KiB-10000-deltas",
+        "bytes": 1024,
+        "count": 10000,
+        "uri": "file:///C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo/1KiB-10000-deltas/file.md",
+        "nodeCount": 10001,
+        "initialMs": 0.6544999999999845,
+        "saveP50Ms": 0.02030000000002019,
+        "saveP95Ms": 0.03269999999997708,
+        "saveMaxMs": 1.3876999999999953,
+        "residentHeapMiB": 8.75982666015625,
+        "reconstructMs": 22.02120000000002,
+        "reconstructAsyncMs": 20.9448000000001,
+        "retainedFullTextMiB": 0.0009765625,
+        "compressedCheckpointMiB": 0,
+        "decodedCacheMiB": 0,
+        "displayStateMs": 27.095100000000002,
+        "payloadMiB": 1.8164443969726562,
+        "payloadStringifyMs": 7.064399999999978,
+        "htmlMs": 7.732899999999972,
+        "exportMs": 7.392899999999827,
+        "persistMs": 78.38079999999991,
+        "repersistMs": 126.25450000000001,
+        "hardCompactPreviewMs": 23.411499999999933
+      },
+      {
+        "name": "1MiB-100-full",
+        "bytes": 1048576,
+        "count": 100,
+        "full": true,
+        "uri": "file:///C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo/1MiB-100-full/file.md",
+        "nodeCount": 101,
+        "initialMs": 2.2118999999999005,
+        "saveP50Ms": 3.131599999999935,
+        "saveP95Ms": 4.384900000000016,
+        "saveMaxMs": 4.9015000000000555,
+        "residentHeapMiB": -9.491470336914062,
+        "reconstructMs": 0.2785999999998694,
+        "reconstructAsyncMs": 0.07490000000007058,
+        "retainedFullTextMiB": 2,
+        "compressedCheckpointMiB": 1.2591705322265625,
+        "decodedCacheMiB": 0,
+        "displayStateMs": 2.371599999999944,
+        "payloadMiB": 0.019117355346679688,
+        "payloadStringifyMs": 0.11140000000000327,
+        "htmlMs": 1.019900000000007,
+        "exportMs": 0.3712000000000444,
+        "persistMs": 552.5367999999999,
+        "repersistMs": 27.793300000000045,
+        "hardCompactPreviewMs": 1.2648000000001502
+      }
+    ]
+  },
+  "renderer": [
+    {
+      "name": "1MiB-1000-deltas",
+      "browser": "154.0.4258.37",
+      "expectedNodes": 1001,
+      "renderedNodes": 81,
+      "loadMs": 83.63380000000006,
+      "refreshMs": [
+        13,
+        10.100000023841858,
+        12.800000011920929
+      ],
+      "errors": []
+    },
+    {
+      "name": "10MiB-500-deltas",
+      "browser": "154.0.4258.37",
+      "expectedNodes": 501,
+      "renderedNodes": 81,
+      "loadMs": 119.53580000000011,
+      "refreshMs": [
+        9,
+        12,
+        10.399999976158142
+      ],
+      "errors": []
+    },
+    {
+      "name": "20MiB-100-deltas",
+      "browser": "154.0.4258.37",
+      "expectedNodes": 101,
+      "renderedNodes": 101,
+      "loadMs": 122.2509,
+      "refreshMs": [
+        10.399999976158142,
+        9.199999988079071,
+        9.199999988079071
+      ],
+      "errors": []
+    },
+    {
+      "name": "50MiB-100-deltas",
+      "browser": "154.0.4258.37",
+      "expectedNodes": 101,
+      "renderedNodes": 101,
+      "loadMs": 68.25680000000011,
+      "refreshMs": [
+        13.899999976158142,
+        14.5,
+        11.899999976158142
+      ],
+      "errors": []
+    },
+    {
+      "name": "1KiB-10000-deltas",
+      "browser": "154.0.4258.37",
+      "expectedNodes": 10001,
+      "renderedNodes": 81,
+      "loadMs": 137.20049999999992,
+      "refreshMs": [
+        12,
+        12.699999988079071,
+        10.5
+      ],
+      "errors": []
+    },
+    {
+      "name": "1MiB-100-full",
+      "browser": "154.0.4258.37",
+      "expectedNodes": 101,
+      "renderedNodes": 101,
+      "loadMs": 98.79430000000048,
+      "refreshMs": [
+        12.199999988079071,
+        14.099999964237213,
+        12.899999976158142
+      ],
+      "errors": []
+    }
+  ],
+  "native": [
+    {
+      "name": "1MiB-1000-deltas",
+      "vscode": "1.136.0",
+      "openMs": 265.0869,
+      "openingMaxLagMs": 206.06320000000005,
+      "undoMs": 20.112100000000282,
+      "undoMaxLagMs": 6.012399999999616,
+      "redoMs": 8.171299999999974,
+      "redoMaxLagMs": 6.929699999999684,
+      "persistMs": 46.074899999999616,
+      "persistMaxLagMs": 6.516399999999521,
+      "extensionHostHeapMiB": 98.27326583862305
+    },
+    {
+      "name": "10MiB-500-deltas",
+      "vscode": "1.136.0",
+      "openMs": 795.8562000000002,
+      "openingMaxLagMs": 444.8782000000001,
+      "undoMs": 27.119800000000396,
+      "undoMaxLagMs": 8.980199999999968,
+      "redoMs": 13.810699999999997,
+      "redoMaxLagMs": 5.5538999999989755,
+      "persistMs": 56.95809999999983,
+      "persistMaxLagMs": 11.738600000000588,
+      "extensionHostHeapMiB": 450.17060470581055
+    },
+    {
+      "name": "20MiB-100-deltas",
+      "vscode": "1.136.0",
+      "openMs": 676.6401999999998,
+      "openingMaxLagMs": 786.8163000000004,
+      "undoMs": 37.397500000000946,
+      "undoMaxLagMs": 16.57340000000113,
+      "redoMs": 16.38500000000022,
+      "redoMaxLagMs": 11.402099999999336,
+      "persistMs": 58.56890000000021,
+      "persistMaxLagMs": 9.66530000000057,
+      "extensionHostHeapMiB": 723.6059150695801
+    },
+    {
+      "name": "50MiB-100-deltas",
+      "vscode": "1.136.0",
+      "error": "CodeExpectedError: cannot open file:///c%3A/Users/mail/AppData/Local/Temp/undotree-performance-ZvOb7T/50MiB-100-deltas/file.md. Detail: Files above 50MB cannot be synchronized with extensions."
+    },
+    {
+      "name": "1KiB-10000-deltas",
+      "vscode": "1.136.0",
+      "openMs": 181.23140000000058,
+      "openingMaxLagMs": 122.71329999999944,
+      "undoMs": 59.5617000000002,
+      "undoMaxLagMs": 27.741299999999683,
+      "redoMs": 48.683499999999185,
+      "redoMaxLagMs": 20.792699999999968,
+      "persistMs": 103.60549999999967,
+      "persistMaxLagMs": 24.775799999999435,
+      "extensionHostHeapMiB": 678.4646873474121
+    },
+    {
+      "name": "1MiB-100-full",
+      "vscode": "1.136.0",
+      "openMs": 123.71379999999772,
+      "openingMaxLagMs": 61.77219999999943,
+      "undoMs": 15.531800000000658,
+      "undoMaxLagMs": 9.723000000001775,
+      "redoMs": 3.9798999999984517,
+      "redoMaxLagMs": 5.688099999999395,
+      "persistMs": 127.03859999999986,
+      "persistMaxLagMs": 30.256199999999808,
+      "extensionHostHeapMiB": 697.9548225402832
+    }
+  ],
+  "artifactDirectories": {
+    "unit": "C:/Users/mail/AppData/Local/Temp/undotree-performance-N3WIuo",
+    "native": "C:/Users/mail/AppData/Local/Temp/undotree-native-perf-x5bGCy",
+    "nativeHistory": "C:/Users/mail/AppData/Local/Temp/undotree-history-MgHzLN",
+    "nativeLegacyFixtures": "C:/Users/mail/AppData/Local/Temp/undotree-native-perf-XqA6K4"
+  },
+  "nativeHistory": [
+    {
+      "name": "ordinary saves retain delta nodes",
+      "passed": true
+    },
+    {
+      "name": "compact removes linear delta nodes and preserves restored content",
+      "passed": true
+    },
+    {
+      "name": "saving and switching editors while paused does not record history",
+      "passed": true
+    },
+    {
+      "name": "resume followed by autosave restores all edits",
+      "passed": true
+    },
+    {
+      "name": "folder rename preserves open and closed descendant histories",
+      "passed": true
+    },
+    {
+      "name": "external changes to a closed file remain restorable after saving",
+      "passed": true
+    },
+    {
+      "name": "large full snapshots survive cache eviction, persistence, and navigation",
+      "passed": true
+    },
+    {
+      "name": "saved histories and renamed descendants survive a VS Code restart",
+      "passed": true
+    },
+    {
+      "name": "compressed full history restores earlier contents after restart",
+      "passed": true
+    }
+  ],
+  "validation": {
+    "unitTests": 228,
+    "performanceTests": 36,
+    "rendererScenarios": 6,
+    "nativeHistoryTests": 9,
+    "typescript": "passed",
+    "productionBuild": "passed"
+  },
+  "nativeLegacyFixtures": [
+    {
+      "name": "1MiB-1000-deltas",
+      "vscode": "1.136.0",
+      "openMs": 273.22569999999996,
+      "openingMaxLagMs": 217.40969999999993,
+      "undoMs": 17.90059999999994,
+      "undoMaxLagMs": 5.779500000000553,
+      "redoMs": 7.660200000000259,
+      "redoMaxLagMs": 7.773400000000038,
+      "persistMs": 45.30040000000008,
+      "persistMaxLagMs": 7.225699999999961,
+      "extensionHostHeapMiB": 98.33408737182617
+    },
+    {
+      "name": "10MiB-500-deltas",
+      "vscode": "1.136.0",
+      "openMs": 806.5686999999998,
+      "openingMaxLagMs": 463.65870000000086,
+      "undoMs": 28.929000000000087,
+      "undoMaxLagMs": 9.09480000000076,
+      "redoMs": 19.76299999999901,
+      "redoMaxLagMs": 8.82549999999901,
+      "persistMs": 57.86120000000119,
+      "persistMaxLagMs": 11.752000000000407,
+      "extensionHostHeapMiB": 450.16788482666016
+    },
+    {
+      "name": "50MiB-100-deltas",
+      "vscode": "1.136.0",
+      "error": "CodeExpectedError: cannot open file:///c%3A/Users/mail/AppData/Local/Temp/undotree-performance-Ek55oh/50MiB-100-deltas/file.md. Detail: Files above 50MB cannot be synchronized with extensions."
+    },
+    {
+      "name": "1KiB-10000-deltas",
+      "vscode": "1.136.0",
+      "openMs": 191.37099999999919,
+      "openingMaxLagMs": 139.98210000000108,
+      "undoMs": 61.5559000000012,
+      "undoMaxLagMs": 27.59439999999995,
+      "redoMs": 51.55210000000079,
+      "redoMaxLagMs": 23.91450000000077,
+      "persistMs": 122.03639999999905,
+      "persistMaxLagMs": 36.26349999999911,
+      "extensionHostHeapMiB": 208.97496795654297
+    },
+    {
+      "name": "1MiB-100-full",
+      "vscode": "1.136.0",
+      "openMs": 140.14499999999862,
+      "openingMaxLagMs": 73.45589999999902,
+      "undoMs": 9.783699999999953,
+      "undoMaxLagMs": 9.716099999999642,
+      "redoMs": 3.259700000000521,
+      "redoMaxLagMs": 6.820099999999002,
+      "persistMs": 116.5023000000001,
+      "persistMaxLagMs": 23.22949999999946,
+      "extensionHostHeapMiB": 246.74265670776367
+    },
+    {
+      "name": "20MiB-100-deltas",
+      "vscode": "1.136.0",
+      "openMs": 348.3572000000004,
+      "openingMaxLagMs": 777.3498999999993,
+      "undoMs": 35.547999999998865,
+      "undoMaxLagMs": 14.839900000002672,
+      "redoMs": 19.476800000000367,
+      "redoMaxLagMs": 12.443699999999808,
+      "persistMs": 204.2645999999986,
+      "persistMaxLagMs": 41.70209999999861,
+      "extensionHostHeapMiB": 220.90489959716797
+    }
+  ]
+}

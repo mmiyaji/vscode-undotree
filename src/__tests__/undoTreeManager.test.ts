@@ -1137,7 +1137,7 @@ describe('dirtyTrees', () => {
         expect(manager.getDirtyUris().size).toBe(0);
     });
 
-    it('DAG収束（新ノード作成なし）ではdirtyにならない', () => {
+    it('既存ノードへの収束で変更したcurrentIdを永続化対象にする', () => {
         const manager = new UndoTreeManager();
         const doc1 = makeDocument('A');
         const doc2 = makeDocument('B');
@@ -1146,12 +1146,8 @@ describe('dirtyTrees', () => {
         manager.clearDirty(manager.getDirtyUris());
 
         // Aに収束（新ノード作成なし・currentId変更のみ）
-        // addNodeが呼ばれないのでdirtyはmarkされない
-        // ただし実装上 addNode の早期returnは dirtyをmarkしないので
-        // この挙動をテストで明確化する
         manager.onDidSaveTextDocument(doc1);
-        // 収束時はdirtyにならないこと（実装の現状を記録）
-        expect(manager.getDirtyUris().has(doc1.uri.toString())).toBe(false);
+        expect(manager.getDirtyUris().has(doc1.uri.toString())).toBe(true);
     });
 
     it('syncDocumentStateでノードが追加されるとdirtyになる', () => {

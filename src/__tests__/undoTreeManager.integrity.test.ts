@@ -41,6 +41,129 @@ afterEach(() => {
 });
 
 describe('history integrity regressions', () => {
+    it('replaces only the changed span when navigating a large document', async () => {
+        const manager = createManager();
+        const prefix = 'あ😀\r\n'.repeat(40_000);
+        const suffix = 'end\r\n'.repeat(40_000);
+        const before = prefix + 'old' + suffix;
+        let content = prefix + 'new' + suffix;
+        manager.onDidSaveTextDocument(makeDocument(before));
+        manager.onDidSaveTextDocument(makeDocument(content));
+        const replace = jest.fn((range: { start: number; end: number }, text: string) => {
+            content = content.slice(0, range.start) + text + content.slice(range.end);
+        });
+        const editor = {
+            document: { ...makeDocument(content), getText: () => content },
+            edit: async (callback: (builder: any) => void) => { callback({ replace }); return true; },
+        } as any;
+        await manager.undo(editor);
+        expect(content).toBe(before);
+        expect(replace).toHaveBeenLastCalledWith(expect.objectContaining({ start: prefix.length, end: prefix.length + 3 }), 'old');
+        await manager.redo(editor);
+        expect(content).toBe(prefix + 'new' + suffix);
+        expect(replace).toHaveBeenLastCalledWith(expect.objectContaining({ start: prefix.length, end: prefix.length + 3 }), 'new');
+    });
+
+    it('compresses large snapshots asynchronously without clearing a newer dirty generation', async () => {
+        const manager = createManager();
+        manager.setContentCacheMax(0);
+        const uri = makeUri('file:///background.md');
+        const content = 'あ😀\n'.repeat(300_000);
+        manager.onDidSaveTextDocument(makeDocument('root', uri.toString()));
+        manager.onDidSaveTextDocument(makeDocument(content, uri.toString()));
+        const tree = manager.getTree(uri);
+        const coldId = tree.currentId;
+        manager.onDidSaveTextDocument(makeDocument(content + 'end', uri.toString()));
+        const generation = manager.getDirtyGenerations().get(uri.toString())!;
+        expect(tree.nodes.get(coldId)!.storage.kind).toBe('full');
+        await (manager as any).checkpointCompressionTask;
+        expect(tree.nodes.get(coldId)!.storage.kind).toBe('checkpoint');
+        expect(manager.clearDirtyIfGeneration(uri.toString(), generation)).toBe(false);
+        expect(await manager.reconstructContentAsync(tree, coldId)).toBe(content);
+        expect(await manager.getCheckpointContentAsync(tree.nodes.get(coldId)!.hash)).toBe(content);
+        expect((manager as any).contentCacheBytes).toBe(0);
+    });
+
+    it('does not resurrect compressed contents after resetting during background work', async () => {
+        const manager = createManager();
+        const uri = makeUri();
+        manager.onDidSaveTextDocument(makeDocument('root'));
+        manager.onDidSaveTextDocument(makeDocument('x'.repeat(1_100_000)));
+        manager.onDidSaveTextDocument(makeDocument('y'.repeat(1_100_000)));
+        const task = (manager as any).checkpointCompressionTask;
+        expect(task).toBeDefined();
+        manager.resetAll();
+        await task;
+        expect(manager.hasTree(uri)).toBe(false);
+        expect((manager as any).compressedCheckpoints.size).toBe(0);
+        expect(manager.getDirtyUris().size).toBe(0);
+    });
+
+    it('keeps cold full snapshots recoverable with a zero decoded cache, including UTF-16 code units', async () => {
+        const manager = createManager();
+        manager.setContentCacheMax(0);
+        const uri = makeUri('file:///compressed.md');
+        const contents = ['root', 'one', 'two', 'three'].map(prefix => prefix + 'あ😀\n'.repeat(70_000) + '\ud800');
+        for (const content of contents) { manager.onDidSaveTextDocument(makeDocument(content, uri.toString())); }
+        const tree = manager.getTree(uri);
+        const ids = [...tree.nodes.keys()];
+        expect([...tree.nodes.values()].map(node => node.storage.kind)).toEqual(['full', 'checkpoint', 'checkpoint', 'full']);
+        for (let i = 0; i < ids.length; i++) {
+            expect(manager.reconstructContent(tree, ids[i])).toBe(contents[i]);
+            expect(await manager.reconstructContentAsync(tree, ids[i])).toBe(contents[i]);
+        }
+        expect((manager as any).contentCacheBytes).toBe(0);
+        const exported = manager.exportState();
+        const restored = createManager();
+        restored.contentResolver = hash => manager.getCheckpointContent(hash);
+        restored.importState(exported);
+        for (let i = 0; i < ids.length; i++) {
+            expect(restored.reconstructContent(restored.getTree(uri), ids[i])).toBe(contents[i]);
+        }
+        // A dirty flag is not proof of a durable blob: clearing it must not lose bytes.
+        manager.clearDirty([uri.toString()]);
+        expect(manager.reconstructContent(tree, ids[1])).toBe(contents[1]);
+        manager.unloadTree(uri);
+        expect((manager as any).compressedCheckpoints.size).toBe(0);
+    });
+
+    it('releases compressed backing only after all referencing pending trees are persisted', () => {
+        const manager = createManager();
+        manager.setContentCacheMax(0);
+        const content = 'shared'.repeat(50_000);
+        const uris = ['file:///compressed-a.md', 'file:///compressed-b.md'];
+        for (const uri of uris) {
+            manager.onDidSaveTextDocument(makeDocument('root', uri));
+            manager.onDidSaveTextDocument(makeDocument(content, uri));
+            manager.onDidSaveTextDocument(makeDocument(content + 'end', uri));
+        }
+        const hash = [...(manager as any).compressedCheckpoints.keys()][0] as string;
+        const blobs = new Map([[hash, manager.getCheckpointContent(hash)]]);
+        manager.contentResolver = value => {
+            const result = blobs.get(value);
+            if (result === undefined) { throw new Error('missing blob'); }
+            return result;
+        };
+        manager.markCheckpointPersistedForUri(uris[0], [hash]);
+        expect((manager as any).compressedCheckpoints.has(hash)).toBe(true);
+        manager.markCheckpointPersistedForUri(uris[1], [hash]);
+        expect((manager as any).compressedCheckpoints.has(hash)).toBe(false);
+        expect(manager.getCheckpointContent(hash)).toBe(content);
+    });
+
+    it('computes hard compact ancestry once for a detailed preview', () => {
+        const manager = createManager();
+        const uri = makeUri();
+        for (let i = 0; i < 100; i++) { manager.onDidSaveTextDocument(makeDocument(String(i))); }
+        const latest = jest.spyOn(manager as any, 'getLatestNodeId');
+        const noted = jest.spyOn(manager as any, 'collectNotedAncestors');
+        const preview = manager.previewHardCompactDetailed(manager.getTree(uri), 30);
+        expect(preview.all).toHaveLength(100);
+        expect(preview.removable).toHaveLength(0);
+        expect(latest).toHaveBeenCalledTimes(1);
+        expect(noted).toHaveBeenCalledTimes(1);
+    });
+
     it('remaps every incoming relationship before merging colliding ids', () => {
         const base = serializedTree([
             { id: 0, parents: [], children: [1], timestamp: 1, label: 'root', hash: 'root', storage: { kind: 'full', content: '' } },
@@ -651,6 +774,41 @@ describe('history integrity regressions', () => {
         const tree = manager.getTree(makeUri(uri));
         expect(manager.reconstructContent(tree, tree.currentId)).toBe('basexy');
         expect(tree.nodes.get(tree.currentId)?.storage.kind).toBe('full');
+    });
+
+    it('uses a full snapshot for the first checkpoint after editing while paused', () => {
+        const manager = createManager();
+        const uri = 'file:///pause-resume-edits.md';
+        const base = 'abcdefghij';
+        manager.getTree(makeUri(uri), base);
+        manager.paused = true;
+        manager.onDidChangeTextDocument(makeChangeEvent(`X${base}`, uri, 0, 'X'));
+        manager.paused = false;
+        manager.onDidChangeTextDocument(makeChangeEvent(`X${base}Y`, uri, 11, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(`X${base}Y`, uri));
+
+        const tree = manager.getTree(makeUri(uri));
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(`X${base}Y`);
+        expect(tree.nodes.get(tree.currentId)?.storage.kind).toBe('full');
+
+        manager.onDidChangeTextDocument(makeChangeEvent(`X${base}YZ`, uri, 12, 'Z'));
+        manager.onDidSaveTextDocument(makeDocument(`X${base}YZ`, uri));
+        expect(tree.nodes.get(tree.currentId)?.storage.kind).toBe('delta');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(`X${base}YZ`);
+    });
+
+    it('preserves the full-snapshot requirement across a rename while paused', () => {
+        const manager = createManager();
+        const oldUri = makeUri('file:///before.md');
+        const newUri = makeUri('file:///after.md');
+        manager.getTree(oldUri, 'abcdefghij');
+        manager.paused = true;
+        manager.paused = false;
+        manager.renameTree(oldUri, newUri);
+        manager.onDidChangeTextDocument(makeChangeEvent('XabcdefghijY', newUri.toString(), 11, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument('XabcdefghijY', newUri.toString()));
+        const tree = manager.getTree(newUri);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe('XabcdefghijY');
     });
 
     it('keeps generated checkpoints non-evictable until their dirty generation is persisted', () => {

@@ -101,11 +101,11 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain("case 'pipe':");
         expect(html).toContain("case 'tee':");
         expect(html).toContain("case 'elbow':");
-        expect(html).toContain("const graphHtml = prefixParts.map(renderSegment).join('') +");
+        expect(html).toContain("const graphHtml = filterActive ? '' : prefixParts.map(renderSegment).join('') +");
         expect(html).toContain("isDirectBranchChild ? (isLast ? 'elbow' : 'tee')");
         expect(html).toContain("const childPrefix = (isDirectBranchChild || isBranchParent)");
         expect(html).toContain("[...prefixParts, isLast ? 'blank' : 'pipe']");
-        expect(html).toContain('renderNode(cid, childPrefix, i === node.children.length - 1, node.children.length);');
+        expect(html).toContain('traversal.push({ id: node.children[i], prefixParts: childPrefix,');
     });
 
     it('does not build a synthetic main path', () => {
@@ -124,7 +124,7 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
-        expect(html).toContain('node.children.forEach((cid, i) => {');
+        expect(html).toContain('for (let i = node.children.length - 1; i >= 0; i--)');
         expect(html).not.toContain('mainChild');
         expect(html).not.toContain('branchChildren');
     });
@@ -136,7 +136,25 @@ describe('UndoTreeProvider initialization', () => {
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
         expect(html).not.toContain('const isLinear');
-        expect(html).toContain('renderNode(rootId, [], false, 0);');
+        expect(html).toContain('const traversal = [{ id: rootId, prefixParts: [], isLast: false, parentChildCount: 0, level: 1 }];');
+    });
+
+    it('keeps standard keyboard traversal and exposes compact metadata filters and current navigation', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
+
+        expect(html).toContain('id="history-search"');
+        expect(html).toContain('id="pinned-only"');
+        expect(html).toContain('id="show-current"');
+        expect(html).toContain('role="tree" tabindex="-1"');
+        expect(html).toContain("div.setAttribute('aria-current', isCurrent ? 'location' : 'false')");
+        expect(html).toContain("if (!tree || !tree.contains(e.target)");
+        expect(html).toContain('if (e.ctrlKey || e.metaKey || e.altKey) { return; }');
+        expect(html).not.toContain("e.key === 'Tab'");
+        expect(html).toContain("setFocused(index, true, true)");
+        expect(html).toContain("cached.text.includes(query)");
+        expect(html).not.toContain('reconstructContent(');
     });
 
     it('passes a non-zero rootId into the webview render state', () => {
@@ -146,7 +164,26 @@ describe('UndoTreeProvider initialization', () => {
         const html = (provider as any).buildHtml([], 42, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false, 'blue', 'tree', '', '', '', 41);
 
         expect(html).toContain('let rootId = 41;');
-        expect(html).toContain('renderNode(rootId, [], false, 0);');
+        expect(html).toContain('const isRoot = id === rootId;');
+    });
+
+    it('sends only presentation metadata to the webview for full and delta nodes', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const document = makeDocument('sensitive text '.repeat(100));
+        const tree = manager.getTree(document.uri, document.getText());
+        const changed = makeDocument(document.getText() + 'SECRET_INSERT');
+        manager.onDidChangeTextDocument({ document: changed, contentChanges: [
+            { rangeOffset: document.getText().length, rangeLength: 0, text: 'SECRET_INSERT' },
+        ] } as any);
+        manager.onDidSaveTextDocument(changed);
+        const state = (provider as any).getRenderState(changed, false, 'time', '', 'lines', 'parent', false, 'blue');
+        expect(state.nodes.map((node: any) => node.storage)).toEqual([{ kind: 'full' }, { kind: 'delta' }]);
+        expect(JSON.stringify(state)).not.toContain('sensitive text');
+        expect(JSON.stringify(state)).not.toContain('SECRET_INSERT');
+        expect(state.nodes[1].parents).toEqual([tree.rootId]);
+        expect(state.nodes[1].byteCount).toBe(Buffer.byteLength(changed.getText()));
+        manager.dispose();
     });
 
     it('renders the settings gear as a menu trigger', () => {

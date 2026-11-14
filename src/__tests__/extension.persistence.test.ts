@@ -47,6 +47,48 @@ describe('persisted storage integration', () => {
         await fs.rm(tempDir, { recursive: true, force: true });
     });
 
+    it('bounds cold checkpoint decoding while persisting and reloads every snapshot', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const manager = new UndoTreeManager();
+        manager.setContentCacheMax(0);
+        const uri = { toString: () => 'file:///large-full.md' } as any;
+        const contents = ['root', ...Array.from({ length: 11 }, (_, index) => `${index}:` + 'あ😀\n'.repeat(70_000))];
+        for (const content of contents) {
+            manager.onDidSaveTextDocument({ uri, getText: () => content, isUntitled: false } as any);
+        }
+        const resolve = manager.getCheckpointContentAsync.bind(manager);
+        let active = 0;
+        let peak = 0;
+        jest.spyOn(manager, 'getCheckpointContentAsync').mockImplementation(async hash => {
+            peak = Math.max(peak, ++active);
+            try { return await resolve(hash); } finally { active--; }
+        });
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        extension.__test__.setManagerForTest(manager);
+        const restored = new UndoTreeManager();
+        try {
+            await extension.__test__.persistStateToDisk(context, manager.exportState(), false);
+            expect(peak).toBeGreaterThan(1);
+            expect(peak).toBeLessThanOrEqual(4);
+            const loaded = await extension.__test__.loadPersistedTreeFromDisk(context, uri);
+            // Existing checkpoints must not turn smaller inline full nodes into
+            // references to content blobs that were never written.
+            expect(loaded!.tree.nodes[0].storage.kind).toBe('full');
+            expect(loaded!.tree.nodes.at(-1)!.storage.kind).toBe('full');
+            restored.importTree(uri.toString(), loaded!.tree);
+            restored.asyncContentResolver = async hash => gunzipSync(await fs.readFile(path.join(tempDir, 'undo-trees', 'content', hash))).toString('utf8');
+            const tree = restored.getTree(uri);
+            let index = 0;
+            for (const id of tree.nodes.keys()) {
+                expect(await restored.reconstructContentAsync(tree, id)).toBe(contents[index++]);
+            }
+        } finally {
+            extension.__test__.setManagerForTest(undefined);
+            restored.dispose();
+            manager.dispose();
+        }
+    });
+
     it('merges persisted and in-memory trees when they share the same root (manual -> auto/save path)', async () => {
         const extension = require('../extension') as typeof import('../extension');
         const context = { globalStorageUri: { fsPath: tempDir } } as any;

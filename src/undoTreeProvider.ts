@@ -3,15 +3,19 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { format as formatDate } from 'date-fns';
-import { UndoTreeManager } from './undoTreeManager';
+import { UndoNode, UndoTreeManager } from './undoTreeManager';
 import { t as tr } from './runtimeL10n';
-import { matchesGlob } from './glob';
+import { DEFAULT_ENABLED_EXTENSIONS, DEFAULT_ENABLED_FILE_NAMES, DEFAULT_EXCLUDE_PATTERNS, getTrackingStatus as evaluateTrackingStatus, TrackingStatus } from './tracking';
 
-type DisplayNode = ReturnType<UndoTreeManager['getTree']>['nodes'] extends Map<number, infer T>
-    ? T & { formattedTime: string; isEmpty: boolean }
-    : never;
+// The webview only needs presentation metadata, never document contents or diffs.
+type DisplayNode = Pick<UndoNode, 'id' | 'parents' | 'children' | 'timestamp' | 'label'
+    | 'note' | 'pinned' | 'lineCount' | 'byteCount'> & {
+    storage: { kind: UndoNode['storage']['kind'] };
+    formattedTime: string;
+    isEmpty: boolean;
+};
 
-type NotTrackedReason = '' | 'extension' | 'excludePattern';
+type NotTrackedReason = '' | 'extension' | 'excludePattern' | 'scheme';
 
 function getNonce(): string {
     return randomBytes(16).toString('hex');
@@ -363,7 +367,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         const trackingStatus = this.getTrackingStatus(document);
         if (!trackingStatus.tracked) {
             const fileName = document.isUntitled ? '' : document.fileName.replace(/.*[\\/]/, '');
-            const ext = fileName.match(/\.[^.]+$/)?.[0] ?? '';
+            const ext = trackingStatus.extension || fileName;
             return {
                 view: 'notTracked' as const,
                 nodes: null,
@@ -384,7 +388,16 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         }
         const tree = this.manager.getTree(document.uri, document.getText());
         const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
-            ...node,
+            id: node.id,
+            parents: node.parents,
+            children: node.children,
+            timestamp: node.timestamp,
+            label: node.label,
+            note: node.note,
+            pinned: node.pinned,
+            lineCount: node.lineCount,
+            byteCount: node.byteCount,
+            storage: { kind: node.storage.kind },
             formattedTime: this.formatTimestamp(node.timestamp, timeFormat, timeFormatCustom),
             isEmpty: this.manager.isNodeEmpty(tree, node.id),
         }));
@@ -590,28 +603,34 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return 'blue';
     }
 
-    private getEnabledExtensions(): string[] {
-        const value = vscode.workspace.getConfiguration('undotree').get<string[]>('enabledExtensions');
-        return Array.isArray(value) ? value : ['.txt', '.md'];
-    }
-
-    private getExcludePatterns(): string[] {
-        const value = vscode.workspace.getConfiguration('undotree').get<string[]>('excludePatterns');
-        return Array.isArray(value) ? value : [];
-    }
-
     private isTrackedDocument(document: vscode.TextDocument): boolean {
         return this.getTrackingStatus(document).tracked;
     }
 
-    private getTrackingStatus(document: vscode.TextDocument): { tracked: boolean; reason: NotTrackedReason } {
-        const fileName = document.fileName.replace(/.*[\\/]/, '');
-        if (this.getExcludePatterns().some((pattern) => matchesGlob(fileName, pattern))) {
-            return { tracked: false, reason: 'excludePattern' };
-        }
-        const ext = fileName.match(/\.[^.]+$/)?.[0]?.toLowerCase() ?? '';
-        const tracked = this.getEnabledExtensions().map((value) => value.toLowerCase()).includes(ext);
-        return { tracked, reason: tracked ? '' : 'extension' };
+    private getTrackingStatus(document: vscode.TextDocument): TrackingStatus {
+        const config = vscode.workspace.getConfiguration('undotree', document.uri);
+        const hasConfiguredValue = (key: string): boolean => {
+            const inspected = config.inspect?.<unknown>(key);
+            return !!inspected && (inspected.globalValue !== undefined || inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined);
+        };
+        const folder = vscode.workspace.getWorkspaceFolder?.(document.uri);
+        const documentPath = document.uri.fsPath || document.fileName || document.uri.toString();
+        const relativePath = folder ? require('path').relative(folder.uri.fsPath, documentPath) : documentPath;
+        const extensionSetting = config.get<string[]>('enabledExtensions', DEFAULT_ENABLED_EXTENSIONS);
+        const fileNameSetting = config.get<string[]>('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES);
+        const excludeSetting = config.get<string[]>('excludePatterns', DEFAULT_EXCLUDE_PATTERNS);
+        const status = evaluateTrackingStatus({
+            scheme: document.uri.scheme,
+            fileName: document.uri.scheme === 'file' ? documentPath : document.fileName || documentPath,
+            relativePath,
+        }, {
+            enabledExtensions: Array.isArray(extensionSetting) ? extensionSetting : DEFAULT_ENABLED_EXTENSIONS,
+            enabledFileNames: Array.isArray(fileNameSetting) ? fileNameSetting : DEFAULT_ENABLED_FILE_NAMES,
+            excludePatterns: Array.isArray(excludeSetting) ? excludeSetting : DEFAULT_EXCLUDE_PATTERNS,
+            extensionsExplicit: hasConfiguredValue('enabledExtensions'),
+            fileNamesExplicit: hasConfiguredValue('enabledFileNames'),
+        });
+        return status;
     }
 
     private formatTimestamp(
@@ -815,6 +834,8 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   #tree { min-width: max-content; }
   #tree.plain-view { min-width: 0; }
   .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
+  #tree.virtual-tree .node { height: 22px; box-sizing: border-box; }
+  .node { scroll-margin-top: 42px; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
   .node.current { background: var(--undotree-current); color: var(--vscode-list-activeSelectionForeground); }
   .node:hover:not(.current) { background: var(--undotree-hover); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--undotree-accent) 30%, transparent); }
@@ -826,6 +847,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .diff-target-badge { font-size: 9px; color: var(--undotree-accent-strong); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .diff-base { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--undotree-accent-strong) 70%, transparent); }
   .diff-base-badge { font-size: 9px; color: var(--undotree-accent-strong); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
+  .current-badge { font-size: 9px; color: var(--vscode-list-activeSelectionForeground); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
   .graph svg.graph-segment { width: 12px; height: 14px; display: block; overflow: visible; }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
@@ -836,7 +858,8 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .time { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
   .time.latest { opacity: 0.9; color: var(--undotree-latest); }
   .empty { opacity: 0.5; padding: 8px; }
-  .actions { display: flex; gap: 4px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 1; padding: 8px 0 4px; }
+  .actions { display: flex; flex-wrap: nowrap; gap: 3px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 2; padding: 8px 0 4px; }
+  .actions button { padding-left: 4px; padding-right: 4px; flex: 0 0 auto; }
   button { background: var(--undotree-accent); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
   button:hover { background: var(--undotree-accent-strong); }
   button:disabled { opacity: 0.4; cursor: default; }
@@ -851,12 +874,25 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .btn-settings:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
   .paused-badge { font-size: 10px; opacity: 0.6; margin-left: 2px; }
   .diff-badge { font-size: 10px; color: var(--undotree-accent-strong); margin-left: 2px; }
-  .diff-tools { display: none; align-items: center; gap: 4px; margin: 0 0 8px; position: sticky; top: 37px; z-index: 1; background: var(--vscode-sideBar-background); padding: 0 0 6px; }
+  .diff-tools { display: none; align-items: center; gap: 4px; margin: 0 0 8px; position: sticky; top: 42px; z-index: 1; background: var(--vscode-sideBar-background); padding: 0 0 6px; }
   .diff-tools.visible { display: flex; flex-wrap: wrap; }
   .btn-compare { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .btn-compare:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .btn-compare.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .diff-base-label { font-size: 10px; opacity: 0.7; margin-left: 4px; }
+  .diff-base-label { font-size: 10px; opacity: 0.7; margin-left: 4px; flex: 1 1 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-tools { display: none; gap: 4px; align-items: center; margin: 0 0 6px; position: sticky; top: 42px; z-index: 1; background: var(--vscode-sideBar-background); padding: 2px 0 4px; }
+  .history-tools.visible { display: flex; flex-wrap: wrap; }
+  body[data-mode="diff"] .history-tools { top: 80px; }
+  .history-search { min-width: 70px; width: 100%; box-sizing: border-box; flex: 1 1 120px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; padding: 3px 4px; font: inherit; }
+  .history-search::placeholder { color: var(--vscode-input-placeholderForeground); }
+  .history-search:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .pinned-only-label { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; font-size: 10px; }
+  .filter-status { flex: 1 1 100%; font-size: 10px; opacity: 0.75; }
+  .current-indicator { font-size: 10px; color: var(--undotree-accent-strong); }
+  .show-current { margin-left: auto; padding: 2px 5px; }
+  .btn-search { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); min-width: 24px; padding: 2px 5px; }
+  .mode-name { font-size: 10px; white-space: nowrap; }
+  .node[role="treeitem"] { cursor: pointer; }
   .empty-badge { font-size: 9px; opacity: 0.45; font-style: italic; flex-shrink: 0; }
   .meta-col { text-align: right; font-size: 9px; opacity: 0.7; white-space: nowrap; justify-self: end; }
   .size-diff { flex-shrink: 0; }
@@ -912,8 +948,10 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 <div class="actions">
   <button id="btn-undo">${tr('Undo')}</button>
   <button id="btn-redo">${tr('Redo')}</button>
+  <button id="btn-search" class="btn-search" title="${tr('Search notes or dates')}" aria-label="${tr('Search notes or dates')}" aria-expanded="false">${tr('Search')}</button>
+  <button id="show-current" class="show-current" title="${tr('Show current')}" aria-label="${tr('Show current')}">${tr('Current')}</button>
   <button class="btn-pause icon-button" id="btn-pause" title="${paused ? tr('Resume tracking') : tr('Pause tracking')}" aria-label="${paused ? tr('Resume tracking') : tr('Pause tracking')}">${paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>'}</button>
-  <button class="btn-mode icon-button${mode === 'diff' ? ' active' : ''}" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}" aria-label="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${mode === 'navigate' ? '<span class="icon-glyph">&#8644;</span>' : '<span class="icon-glyph">&#9776;</span>'}</button>
+  <button class="btn-mode" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}" aria-label="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${mode === 'navigate' ? tr('Navigate') : tr('Diff')}</button>
   <button class="btn-settings icon-button" id="btn-settings" title="${tr('Open Undo Tree menu')}" aria-label="${tr('Open Undo Tree menu')}">&#9881;</button>
 </div>
 ${paused ? `<div class="paused-badge">${tr('Tracking paused - history is frozen')}</div>` : ''}
@@ -923,8 +961,14 @@ ${paused ? `<div class="paused-badge">${tr('Tracking paused - history is frozen'
   <span class="diff-base-label" id="diff-base-label"></span>
 </div>
 ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
+<div id="history-tools" class="history-tools" hidden>
+  <input id="history-search" class="history-search" type="search" placeholder="${tr('Search notes or dates')}" aria-label="${tr('Search notes or dates')}" />
+  <label class="pinned-only-label"><input id="pinned-only" type="checkbox" />${tr('Pinned only')}</label>
+  <span id="filter-status" class="filter-status" aria-live="polite"></span>
+  <span id="current-indicator" class="current-indicator"></span>
+</div>
 <div id="pinned"></div>
-<div id="tree"></div>
+<div id="tree" role="tree" tabindex="-1" aria-label="${tr('Undo history')}"></div>
 <div id="help-overlay" class="help-overlay" aria-hidden="true">
   <div class="help-backdrop" id="help-backdrop"></div>
   <div class="help-card" role="dialog" aria-modal="true" aria-label="${tr('Undo Tree shortcuts')}">
@@ -935,7 +979,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       <div class="shortcut-row"><span class="shortcut-key">↑ / ↓, j / k</span><span class="shortcut-desc">${tr('Move focus')}</span></div>
       <div class="shortcut-row"><span class="shortcut-key">Enter / Space</span><span class="shortcut-desc">${tr('Jump or preview diff')}</span></div>
       <div class="shortcut-row"><span class="shortcut-key">← / →</span><span class="shortcut-desc">${tr('Move to parent or child')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">Tab / Shift+Tab</span><span class="shortcut-desc">${tr('Move across siblings')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">Tab / Shift+Tab</span><span class="shortcut-desc">${tr('Move to the next or previous control')}</span></div>
       <div class="shortcut-row"><span class="shortcut-key">n / N</span><span class="shortcut-desc">${tr('Jump to next or previous noted node')}</span></div>
     </div>
     <div class="help-section">
@@ -966,6 +1010,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   let rootId = ${serializeForInlineScript(initialRootId)};
   let diffCompareMode = 'current';
   let diffBaseNodeId = null;
+  let searchExpanded = false;
+  const searchMetadataCache = new Map();
   const i18n = {
     noteDoubleClickToEdit: ${serializeForInlineScript(tr(' (double-click to edit)'))},
     noteAdd: ${serializeForInlineScript(tr('Add note'))},
@@ -1003,6 +1049,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     headerLines: ${serializeForInlineScript(tr('Lines'))},
     headerSize: ${serializeForInlineScript(tr('Size'))},
     headerTime: ${serializeForInlineScript(tr('Time'))},
+    current: ${serializeForInlineScript(tr('Current'))},
+    currentHidden: ${serializeForInlineScript(tr('Current node is hidden by filters'))},
+    noMatches: ${serializeForInlineScript(tr('No matching history nodes'))},
+    matchingCount: ${serializeForInlineScript(tr('{0} matching nodes / {1} total'))},
+    navigateMode: ${serializeForInlineScript(tr('History navigation mode'))},
+    diffMode: ${serializeForInlineScript(tr('Diff comparison mode'))},
+    leftCurrentComparison: ${serializeForInlineScript(tr('Left: {0} ↔ Right: current file, including unsaved changes'))},
+    leftPairComparison: ${serializeForInlineScript(tr('Compare {0} ↔ {1}'))},
   };
 
   function replaceExt(template, ext) {
@@ -1033,6 +1087,40 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   if (helpBackdrop) { helpBackdrop.addEventListener('click', () => setHelpVisible(false)); }
   const helpClose = document.getElementById('help-close');
   if (helpClose) { helpClose.addEventListener('click', () => setHelpVisible(false)); }
+  const historySearch = document.getElementById('history-search');
+  const pinnedOnly = document.getElementById('pinned-only');
+  if (historySearch) { historySearch.addEventListener('input', () => buildTree(nodes, currentId, rootId)); }
+  if (pinnedOnly) { pinnedOnly.addEventListener('change', () => buildTree(nodes, currentId, rootId)); }
+  const showCurrentButton = document.getElementById('show-current');
+  if (showCurrentButton) {
+    showCurrentButton.addEventListener('click', () => {
+      if (historySearch) { historySearch.value = ''; }
+      if (pinnedOnly) { pinnedOnly.checked = false; }
+      searchExpanded = false;
+      const panel = document.getElementById('history-tools');
+      if (panel) {
+        panel.hidden = true;
+        panel.classList.remove('visible');
+      }
+      searchToggle?.setAttribute('aria-expanded', 'false');
+      syncStickyOffsets();
+      buildTree(nodes, currentId, rootId, currentId);
+      const index = nodeIds.indexOf(currentId);
+      if (index >= 0) { setFocused(index, true, true); }
+    });
+  }
+  const searchToggle = document.getElementById('btn-search');
+  if (searchToggle) {
+    searchToggle.addEventListener('click', () => {
+      searchExpanded = !searchExpanded;
+      const panel = document.getElementById('history-tools');
+      panel.hidden = !searchExpanded;
+      panel.classList.toggle('visible', searchExpanded);
+      searchToggle.setAttribute('aria-expanded', searchExpanded ? 'true' : 'false');
+      syncStickyOffsets();
+      if (searchExpanded) { historySearch?.focus(); }
+    });
+  }
 
   window.addEventListener('message', (event) => {
     if (event.data?.command === 'showJumpLoading') {
@@ -1096,6 +1184,18 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   let focusedIndex = -1;
   let nodeEls = [];
   let nodeIds = [];
+  let ensureNodeRendered = null;
+  let updateVirtualRows = null;
+  let scrollFrame = 0;
+  function scheduleVirtualRows() {
+    if (scrollFrame) { return; }
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      if (updateVirtualRows) { updateVirtualRows(); }
+    });
+  }
+  window.addEventListener('scroll', scheduleVirtualRows, { passive: true });
+  window.addEventListener('resize', scheduleVirtualRows);
   let treeMap = {};
   let contextMenuNodeId = null;
 
@@ -1180,21 +1280,49 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const baseLabel = document.getElementById('diff-base-label');
     if (!tools || !currentButton || !pairButton || !baseLabel) { return; }
     tools.classList.toggle('visible', mode === 'diff');
+    baseLabel.setAttribute('aria-live', 'polite');
     currentButton.classList.toggle('active', diffCompareMode === 'current');
     pairButton.classList.toggle('active', diffCompareMode === 'pair');
     if (mode !== 'diff') {
       baseLabel.textContent = '';
+      baseLabel.title = '';
+      syncStickyOffsets();
       return;
     }
     if (diffCompareMode === 'pair') {
       if (diffBaseNodeId !== null && treeMap[diffBaseNodeId]) {
-        baseLabel.textContent = i18n.basePrefix + getNodeDisplayLabel(diffBaseNodeId);
+        baseLabel.textContent = i18n.basePrefix + getNodeDisplayLabel(diffBaseNodeId) + ' · ' + formatNodeDate(treeMap[diffBaseNodeId]);
       } else {
         baseLabel.textContent = i18n.pairDiffNeedsBase;
       }
+      const current = focusedIndex >= 0 ? treeMap[nodeIds[focusedIndex]] : undefined;
+      baseLabel.textContent = diffBaseNodeId !== null && current && current.id !== diffBaseNodeId
+        ? i18n.leftPairComparison.replace('{0}', getNodeDisplayLabel(diffBaseNodeId) + ' · ' + formatNodeDate(treeMap[diffBaseNodeId])).replace('{1}', getNodeDisplayLabel(current.id) + ' · ' + formatNodeDate(current))
+        : baseLabel.textContent;
+      baseLabel.title = baseLabel.textContent;
+      syncStickyOffsets();
       return;
     }
-    baseLabel.textContent = '';
+    const current = focusedIndex >= 0 ? treeMap[nodeIds[focusedIndex]] : undefined;
+    baseLabel.textContent = current && current.id !== currentId
+      ? i18n.leftCurrentComparison.replace('{0}', getNodeDisplayLabel(current.id) + ' · ' + formatNodeDate(current))
+      : i18n.leftCurrentComparison.replace('{0}', i18n.current + ' · ' + (treeMap[currentId] ? formatNodeDate(treeMap[currentId]) : ''));
+    baseLabel.title = baseLabel.textContent;
+    syncStickyOffsets();
+  }
+
+  function formatNodeDate(node) {
+    return node ? new Date(node.timestamp).toLocaleString() : '';
+  }
+
+  function syncStickyOffsets() {
+    const actions = document.querySelector('.actions');
+    const diffTools = document.getElementById('diff-tools');
+    const historyTools = document.getElementById('history-tools');
+    const actionsHeight = actions?.offsetHeight ?? 42;
+    const diffHeight = diffTools?.classList.contains('visible') ? diffTools.offsetHeight + 6 : 0;
+    if (diffTools) { diffTools.style.top = actionsHeight + 'px'; }
+    if (historyTools) { historyTools.style.top = (actionsHeight + diffHeight) + 'px'; }
   }
 
   function setDiffCompareMode(nextMode) {
@@ -1231,10 +1359,12 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     send('diffWithNode', { nodeId, sourceUri });
   }
 
-  function setFocused(idx) {
+  function applyFocusStyles() {
     nodeEls.forEach((el, i) => {
-      const isFocused = i === idx;
+      const isFocused = i === focusedIndex;
       const nodeId = nodeIds[i];
+      el.tabIndex = isFocused ? 0 : -1;
+      el.setAttribute('aria-selected', isFocused ? 'true' : 'false');
       el.classList.toggle('focused', isFocused);
       el.classList.toggle('diff-base', mode === 'diff' && diffCompareMode === 'pair' && nodeId === diffBaseNodeId);
       el.classList.toggle(
@@ -1247,9 +1377,24 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
           )
       );
     });
+  }
+
+  function setFocused(idx, focusNode = false, suppressPreview = false) {
     focusedIndex = idx;
-    if (idx >= 0 && nodeEls[idx]) { nodeEls[idx].scrollIntoView({ block: 'nearest' }); }
-    previewDiffForFocused();
+    if (idx >= 0 && ensureNodeRendered) { ensureNodeRendered(idx); }
+    applyFocusStyles();
+    if (idx >= 0 && nodeEls[idx]) {
+      const tools = document.getElementById('diff-tools');
+      const actions = document.querySelector('.actions');
+      const historyTools = document.getElementById('history-tools');
+      const margin = (actions?.offsetHeight ?? 42) + (tools?.classList.contains('visible') ? tools.offsetHeight + 8 : 0) +
+        (historyTools?.classList.contains('visible') ? historyTools.offsetHeight + 8 : 8);
+      nodeEls[idx].style.scrollMarginTop = margin + 'px';
+      nodeEls[idx].scrollIntoView({ block: 'nearest' });
+      if (focusNode) { nodeEls[idx].focus(); }
+    }
+    renderDiffTools();
+    if (!suppressPreview) { previewDiffForFocused(); }
   }
 
   function jumpFocused() {
@@ -1269,50 +1414,44 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     else { send('jumpToNode', { nodeId, sourceUri, focusEditor: true }); }
   }
 
-  function moveSibling(dir) {
-    if (focusedIndex < 0) { return; }
-    const node = treeMap[nodeIds[focusedIndex]];
-    if (!node || node.parents.length === 0) { return; }
-    const siblings = treeMap[node.parents[node.parents.length - 1]]?.children ?? [];
-    if (siblings.length <= 1) { return; }
-    const sibIdx = siblings.indexOf(node.id);
-    const nextId = siblings[(sibIdx + dir + siblings.length) % siblings.length];
-    const next = nodeIds.indexOf(nextId);
-    if (next >= 0) { setFocused(next); }
-  }
-
   function moveToNoted(dir) {
     if (nodeIds.length === 0) { return; }
     const start = focusedIndex < 0 ? 0 : focusedIndex;
     for (let i = 1; i <= nodeIds.length; i++) {
       const idx = (start + i * dir + nodeIds.length * 10) % nodeIds.length;
-      if (treeMap[nodeIds[idx]]?.note) { setFocused(idx); return; }
+      if (treeMap[nodeIds[idx]]?.note) { setFocused(idx, true); return; }
     }
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') { return; }
-    if (e.key === '?') {
-      e.preventDefault();
-      setHelpVisible(!isHelpVisible());
-    } else if (e.key === 'Escape' && contextMenuNodeId !== null) {
+    if (e.key === 'Escape' && contextMenuNodeId !== null) {
       e.preventDefault();
       hideContextMenu();
+      return;
     } else if (e.key === 'Escape' && isHelpVisible()) {
       e.preventDefault();
       setHelpVisible(false);
-    } else if (e.key === 'Escape' && mode === 'diff') {
+      return;
+    }
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') { return; }
+    const tree = document.getElementById('tree');
+    if (!tree || !tree.contains(e.target) || e.target.closest('button, input, textarea, select')) { return; }
+    if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+    if (e.key === 'Escape' && mode === 'diff') {
       e.preventDefault(); send('toggleMode');
+    } else if (e.key === '?') {
+      e.preventDefault();
+      setHelpVisible(!isHelpVisible());
     } else if (e.key === 'ArrowDown' || e.key === 'j') {
       e.preventDefault();
-      setFocused(Math.min(focusedIndex < 0 ? 0 : focusedIndex + 1, nodeEls.length - 1));
+      setFocused(Math.min(focusedIndex < 0 ? 0 : focusedIndex + 1, nodeIds.length - 1), true);
     } else if (e.key === 'ArrowUp' || e.key === 'k') {
       e.preventDefault();
-      setFocused(Math.max(focusedIndex < 0 ? nodeEls.length - 1 : focusedIndex - 1, 0));
+      setFocused(Math.max(focusedIndex < 0 ? nodeIds.length - 1 : focusedIndex - 1, 0), true);
     } else if (e.key === 'Home') {
-      e.preventDefault(); setFocused(0);
+      e.preventDefault(); setFocused(0, true);
     } else if (e.key === 'End') {
-      e.preventDefault(); setFocused(nodeEls.length - 1);
+      e.preventDefault(); setFocused(nodeIds.length - 1, true);
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault(); jumpFocused();
     } else if (e.key === 'ArrowLeft') {
@@ -1321,7 +1460,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         const node = treeMap[nodeIds[focusedIndex]];
         const parentId = node?.parents?.[node.parents.length - 1];
         const idx = parentId !== undefined ? nodeIds.indexOf(parentId) : -1;
-        if (idx >= 0) { setFocused(idx); }
+        if (idx >= 0) { setFocused(idx, true); }
       }
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
@@ -1329,10 +1468,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         const node = treeMap[nodeIds[focusedIndex]];
         const childId = node?.children?.[node.children.length - 1];
         const idx = childId !== undefined ? nodeIds.indexOf(childId) : -1;
-        if (idx >= 0) { setFocused(idx); }
+        if (idx >= 0) { setFocused(idx, true); }
       }
-    } else if (e.key === 'Tab') {
-      e.preventDefault(); moveSibling(e.shiftKey ? -1 : 1);
     } else if (e.key === 'u') {
       e.preventDefault(); send('undo', { sourceUri });
     } else if (e.key === 'r') {
@@ -1385,8 +1522,16 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     });
   }
 
-  function buildTree(nodes, currentId, nextRootId) {
-    if (!nodes) {
+  function buildTree(nodes, currentId, nextRootId, preferredFocusId) {
+    const treeContainer = document.getElementById('tree');
+    const restoreTreeFocus = !!treeContainer && (treeContainer === document.activeElement || treeContainer.contains(document.activeElement));
+    const focusedBeforeBuild = focusedIndex >= 0 ? nodeIds[focusedIndex] : undefined;
+    ensureNodeRendered = null;
+    updateVirtualRows = null;
+    if (!nodes || nodes.length === 0) {
+      nodeEls = [];
+      nodeIds = [];
+      treeMap = {};
       document.getElementById('tree').innerHTML = '<div class="empty">' + i18n.textEditorsOnly + '</div>';
       return;
     }
@@ -1395,9 +1540,52 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const map = {};
     nodes.forEach((node) => { map[node.id] = node; });
     treeMap = map;
+    if (searchMetadataCache.size > nodes.length) {
+      for (const cachedId of searchMetadataCache.keys()) {
+        if (!map[cachedId]) { searchMetadataCache.delete(cachedId); }
+      }
+    }
     const latestId = nodes.reduce((best, n) => n.timestamp > map[best].timestamp ? n.id : best, nodes[0].id);
     const pinnedContainer = document.getElementById('pinned');
     const container = document.getElementById('tree');
+    const virtual = nodes.length > 500;
+    const query = (document.getElementById('history-search')?.value ?? '').trim().toLocaleLowerCase();
+    const onlyPinned = !!document.getElementById('pinned-only')?.checked;
+    const filterActive = query.length > 0 || onlyPinned;
+    const isMatch = (node) => {
+      if (!query) { return !onlyPinned || !!node.pinned; }
+      const signature = JSON.stringify([node.timestamp, node.note ?? '', node.formattedTime ?? '']);
+      let cached = searchMetadataCache.get(node.id);
+      if (!cached || cached.signature !== signature) {
+        const date = new Date(node.timestamp);
+        const localDate = String(date.getFullYear()).padStart(4, '0') + '-' +
+          String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
+        const localTime = String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
+        cached = {
+          signature,
+          text: [node.note ?? '', node.formattedTime ?? '', localDate, localDate + ' ' + localTime, date.toISOString()]
+            .join(' ').toLocaleLowerCase(),
+        };
+        searchMetadataCache.set(node.id, cached);
+      }
+      return cached.text.includes(query) && (!onlyPinned || !!node.pinned);
+    };
+    const matchedCount = filterActive ? nodes.reduce((count, node) => count + (isMatch(node) ? 1 : 0), 0) : nodes.length;
+    const filterStatus = document.getElementById('filter-status');
+    if (filterStatus) {
+      filterStatus.textContent = filterActive
+        ? (matchedCount ? i18n.matchingCount.replace('{0}', String(matchedCount)).replace('{1}', String(nodes.length)) : i18n.noMatches)
+        : '';
+    }
+    const currentIndicator = document.getElementById('current-indicator');
+    if (currentIndicator) {
+      const currentVisible = !filterActive || (map[currentId] && isMatch(map[currentId]));
+      currentIndicator.textContent = currentVisible
+        ? (mode === 'diff' ? i18n.diffMode : i18n.navigateMode) + ' · ' + i18n.current
+        : i18n.currentHidden;
+      currentIndicator.setAttribute('aria-live', 'polite');
+    }
+    container.classList.toggle('virtual-tree', virtual);
     container.classList.remove('plain-view');
     pinnedContainer.innerHTML = '';
     container.innerHTML = '';
@@ -1423,7 +1611,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
 
     const visitedNodes = new Set();
 
-    const pinnedNodes = nodes.filter((node) => node.id !== 0 && node.pinned);
+    const pinnedNodes = filterActive ? [] : nodes.filter((node) => node.id !== rootId && node.pinned);
     if (pinnedNodes.length > 0) {
       const wrap = document.createElement('div');
       wrap.className = 'pinned-wrap';
@@ -1475,29 +1663,29 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       }
     }
 
-    function renderNode(id, prefixParts, isLast, parentChildCount) {
-      if (visitedNodes.has(id)) {
-        return;
-      }
-      visitedNodes.add(id);
-
+    const traversal = [{ id: rootId, prefixParts: [], isLast: false, parentChildCount: 0, level: 1 }];
+    function renderNode(id, prefixParts, isLast, parentChildCount, index) {
       const node = map[id];
       if (!node) {
         return;
       }
 
       const isCurrent = node.id === currentId;
-      const isRoot = id === 0;
+      const isRoot = id === rootId;
       const storageKind =
         node.storage?.kind === 'full' ? 'F' :
         node.storage?.kind === 'delta' ? 'D' :
         '';
       const isDirectBranchChild = !isRoot && parentChildCount > 1;
-      const graphHtml = prefixParts.map(renderSegment).join('') +
+      const graphHtml = filterActive ? '' : prefixParts.map(renderSegment).join('') +
         (!isRoot ? renderSegment(isDirectBranchChild ? (isLast ? 'elbow' : 'tee') : (node.children.length === 1 ? 'tee' : 'elbow')) : '');
 
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
+      div.setAttribute('role', 'treeitem');
+      div.setAttribute('aria-level', String(entries[index].level));
+      div.setAttribute('aria-current', isCurrent ? 'location' : 'false');
+      div.setAttribute('aria-label', [node.note || node.label, node.formattedTime, isCurrent ? i18n.current : ''].filter(Boolean).join(', '));
       div.title = mode === 'diff' ? i18n.titleClickDiff : i18n.titleClickJump;
       const noteHtml = node.note
         ? '<span class="note note-text" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteDoubleClickToEdit + '">' + escHtml(node.note) + '</span>' +
@@ -1518,6 +1706,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       const labelHtml = node.note ? '' : '<span class="label">' + escHtml(node.label) + '</span>';
       div.innerHTML =
         graphWrapHtml +
+        (isCurrent ? '<span class="current-badge">' + escHtml(i18n.current) + '</span>' : '') +
         labelHtml +
         (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">' + escHtml(i18n.badgeBase) + '</span>' : '') +
         (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">' + escHtml(i18n.badgeDiff) + '</span>' : '') +
@@ -1542,7 +1731,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       div.addEventListener('click', () => {
         hideContextMenu();
         const idx = nodeIds.indexOf(node.id);
-        if (idx >= 0) { setFocused(idx); }
+        if (idx >= 0) { setFocused(idx, true); }
         if (!isCurrent) {
           if (mode === 'diff') {
             if (diffCompareMode === 'pair' && diffBaseNodeId === null) {
@@ -1563,26 +1752,95 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         if (idx >= 0) { setFocused(idx); }
         showContextMenu(node.id, event.clientX, event.clientY);
       });
-      nodeEls.push(div);
-      nodeIds.push(node.id);
-      container.appendChild(div);
-
-      const isBranchParent = !isRoot && node.children.length > 1;
-      const childPrefix = (isDirectBranchChild || isBranchParent)
-        ? [...prefixParts, isLast ? 'blank' : 'pipe']
-        : prefixParts;
-
-      node.children.forEach((cid, i) => {
-        renderNode(cid, childPrefix, i === node.children.length - 1, node.children.length);
-      });
+      nodeEls[index] = div;
+      return div;
     }
 
-        renderNode(rootId, [], false, 0);
+        const entries = [];
+        while (traversal.length > 0) {
+          const entry = traversal.pop();
+          if (visitedNodes.has(entry.id) || !map[entry.id]) { continue; }
+          visitedNodes.add(entry.id);
+          if (!filterActive || isMatch(map[entry.id])) {
+            entries.push(filterActive ? { ...entry, prefixParts: [], level: 1 } : entry);
+            nodeIds.push(entry.id);
+          }
+          const node = map[entry.id];
+          const isRoot = entry.id === rootId;
+          const isDirectBranchChild = !isRoot && entry.parentChildCount > 1;
+          const isBranchParent = !isRoot && node.children.length > 1;
+          const prefixParts = entry.prefixParts;
+          const isLast = entry.isLast;
+          const childPrefix = (isDirectBranchChild || isBranchParent)
+            ? [...prefixParts, isLast ? 'blank' : 'pipe'] : prefixParts;
+          for (let i = node.children.length - 1; i >= 0; i--) {
+            traversal.push({ id: node.children[i], prefixParts: childPrefix,
+              isLast: i === node.children.length - 1, parentChildCount: node.children.length, level: entry.level + 1 });
+          }
+        }
+        if (entries.length === 0) {
+          container.innerHTML = filterActive ? '<div class="empty">' + escHtml(i18n.noMatches) + '</div>' : '';
+          nodeEls = [];
+          nodeIds = [];
+          setFocused(-1, false, true);
+          return;
+        }
+        nodeEls = new Array(entries.length);
+        const rows = document.createElement('div');
+        container.appendChild(rows);
+        let renderedStart = -1;
+        let renderedEnd = -1;
+        function renderRows(start, end) {
+          if (start === renderedStart && end === renderedEnd) { return; }
+          renderedStart = start;
+          renderedEnd = end;
+          nodeEls = new Array(entries.length);
+          const fragment = document.createDocumentFragment();
+          function spacer(height) {
+            const div = document.createElement('div');
+            div.style.height = height + 'px';
+            div.setAttribute('aria-hidden', 'true');
+            fragment.appendChild(div);
+          }
+          if (virtual) { spacer(start * 22); }
+          for (let index = start; index < end; index++) {
+            const entry = entries[index];
+            fragment.appendChild(renderNode(entry.id, entry.prefixParts, entry.isLast, entry.parentChildCount, index));
+          }
+          if (virtual) { spacer((entries.length - end) * 22); }
+          const focusedNodeWasActive = rows.contains(document.activeElement);
+          rows.replaceChildren(fragment);
+          applyFocusStyles();
+          syncMetricColumnWidths();
+          if (focusedNodeWasActive) {
+            const focusedElement = nodeEls[focusedIndex];
+            if (focusedElement) { focusedElement.focus(); }
+            else { container.focus(); }
+          }
+        }
+        if (virtual) {
+          const count = () => Math.ceil(window.innerHeight / 22) + 40;
+          ensureNodeRendered = (index) => {
+            if (index >= renderedStart && index < renderedEnd) { return; }
+            const start = Math.max(0, Math.min(index - 20, entries.length - count()));
+            renderRows(start, Math.min(entries.length, start + count()));
+          };
+          updateVirtualRows = () => {
+            const first = Math.floor(-rows.getBoundingClientRect().top / 22);
+            const start = Math.max(0, Math.min(first - 20, entries.length - count()));
+            renderRows(start, Math.min(entries.length, start + count()));
+          };
+          ensureNodeRendered(Math.max(0, nodeIds.indexOf(currentId)));
+        } else {
+          renderRows(0, entries.length);
+        }
 
         const currentEl = container.querySelector('.node.current');
         if (currentEl) { currentEl.scrollIntoView({ block: 'nearest' }); }
-        syncMetricColumnWidths();
-        setFocused(nodeIds.indexOf(currentId));
+      const focusId = preferredFocusId !== undefined && nodeIds.includes(preferredFocusId) ? preferredFocusId :
+        preferredFocusId === undefined && focusedBeforeBuild !== undefined && nodeIds.includes(focusedBeforeBuild) ? focusedBeforeBuild :
+        nodeIds.includes(currentId) ? currentId : nodeIds[0];
+      setFocused(nodeIds.indexOf(focusId), restoreTreeFocus, true);
         renderDiffTools();
       }
 
@@ -1621,6 +1879,15 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   }
 
   function renderState(state) {
+    ensureNodeRendered = null;
+    updateVirtualRows = null;
+    const previousSourceUri = sourceUri;
+    const previousMode = mode;
+    const previousCurrentId = currentId;
+    const previousFocusedId = focusedIndex >= 0 ? nodeIds[focusedIndex] : undefined;
+    const nextSourceUri = state.sourceUri || '';
+    const keepFocusedNode = previousSourceUri === nextSourceUri && previousMode === state.mode &&
+      previousCurrentId === state.currentId && previousFocusedId !== undefined;
     nodes = state.nodes;
     currentId = state.currentId;
     mode = state.mode;
@@ -1630,7 +1897,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     nodeSizeMetricBase = state.nodeSizeMetricBase;
     showStorageKind = state.showStorageKind;
     colorTheme = state.colorTheme || 'blue';
-    sourceUri = state.sourceUri || '';
+    if (sourceUri !== nextSourceUri) { searchMetadataCache.clear(); }
+    sourceUri = nextSourceUri;
     rootId = typeof state.rootId === 'number' ? state.rootId : 0;
     document.body.setAttribute('data-color-theme', colorTheme);
 
@@ -1649,10 +1917,12 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
 
     const modeButton = document.querySelector('.btn-mode');
     const modeTitle = mode === 'navigate' ? ${serializeForInlineScript(tr('Switch to Diff mode'))} : ${serializeForInlineScript(tr('Switch to Navigate mode'))};
-    modeButton.innerHTML = mode === 'navigate' ? '<span class="icon-glyph">&#8644;</span>' : '<span class="icon-glyph">&#9776;</span>';
+    modeButton.textContent = mode === 'navigate' ? ${serializeForInlineScript(tr('Navigate'))} : ${serializeForInlineScript(tr('Diff'))};
     modeButton.title = modeTitle;
     modeButton.setAttribute('aria-label', modeTitle);
+    modeButton.setAttribute('aria-pressed', mode === 'diff' ? 'true' : 'false');
     modeButton.classList.toggle('active', mode === 'diff');
+    document.body.setAttribute('data-mode', mode);
 
     let pausedBadge = document.querySelector('.paused-badge');
     if (state.paused) {
@@ -1688,6 +1958,13 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     if (overlay) { overlay.remove(); }
     const treeEl = document.getElementById('tree');
     if (treeEl) { treeEl.style.opacity = '1'; treeEl.style.pointerEvents = ''; }
+    const historyTools = document.getElementById('history-tools');
+    if (historyTools) {
+      const visible = state.view === 'tree' && searchExpanded;
+      historyTools.hidden = !visible;
+      historyTools.classList.toggle('visible', visible);
+    }
+    syncStickyOffsets();
 
     if (state.view === 'loading') {
       document.getElementById('pinned').innerHTML = '';
@@ -1701,7 +1978,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       renderNotTracked(state.notTrackedExt || '', state.notTrackedReason || 'extension');
       return;
     }
-    buildTree(state.nodes, state.currentId, rootId);
+    buildTree(state.nodes, state.currentId, rootId, keepFocusedNode ? previousFocusedId : state.currentId);
   }
 
   renderState({
