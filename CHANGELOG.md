@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.11
+
+### Fixes
+
+- Keep sidebar rendering read-only so refreshing an unloaded document cannot replace its persisted history with a new tree.
+- Reuse previously merged branches when concurrent windows assign conflicting node IDs, preserving delta ancestry and note/pin updates without duplicating nodes on each save.
+- Preserve the live document's history cursor when queued saves overlap navigation, including lazy loading and pending editor edits.
+
 ## 0.3.10
 
 ### Defaults and settings

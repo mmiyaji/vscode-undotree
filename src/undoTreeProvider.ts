@@ -333,7 +333,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         showStorageKind: boolean,
         colorTheme: 'auto' | 'blue' | 'neutral' | 'green' | 'amber' | 'teal' | 'violet' | 'rose' | 'red'
     ) {
-        if (isLoadingCurrentEditor) {
+        const residentTree = document ? this.manager.peekTree(document.uri) : undefined;
+        if (isLoadingCurrentEditor || (document && !residentTree && this.getTrackingStatus(document).tracked)) {
             return {
                 view: 'loading' as const,
                 nodes: null,
@@ -393,7 +394,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                 rootId: 0,
             };
         }
-        const tree = this.manager.getTree(document.uri, document.getText());
+        const tree = residentTree!;
         const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
             id: node.id,
             parents: node.parents,

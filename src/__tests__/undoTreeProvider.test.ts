@@ -66,7 +66,7 @@ describe('UndoTreeProvider initialization', () => {
         } as any;
     }
 
-    it('seeds the root node with the active editor content during render', () => {
+    it('waits for history loading without creating a tree during render', () => {
         const vscode = require('vscode');
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
@@ -82,13 +82,46 @@ describe('UndoTreeProvider initialization', () => {
                 options: {},
                 html: '',
                 onDidReceiveMessage: jest.fn(),
+                postMessage: jest.fn(),
             },
         } as any;
 
         provider.resolveWebviewView(view);
 
+        expect(manager.hasTree(document.uri)).toBe(false);
+        manager.syncDocumentState(document.uri, document.getText());
+        provider.refresh();
         const tree = manager.getTree(document.uri);
         expect(manager.reconstructContent(tree, tree.rootId)).toBe('existing file content');
+        manager.dispose();
+    });
+
+    it('does not recreate an unloaded context tree when the active editor is a preview', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const document = makeDocument('latest');
+        vscode.window.activeTextEditor = { document };
+        vscode.workspace.textDocuments = [document];
+        manager.onDidSaveTextDocument(makeDocument('original'));
+        manager.onDidSaveTextDocument(document);
+        const state = manager.exportState();
+        provider.resolveWebviewView(makeView());
+        provider.rememberDocument(document);
+        vscode.window.activeTextEditor = undefined;
+        manager.onRefresh = () => provider.refresh();
+
+        manager.unloadTree(document.uri);
+        expect(manager.hasTree(document.uri)).toBe(false);
+        provider.refresh();
+        expect(manager.hasTree(document.uri)).toBe(false);
+
+        manager.importTree(document.uri.toString(), state.trees[document.uri.toString()]);
+        const restored = manager.getTree(document.uri);
+        expect(restored.nodes.size).toBe(2);
+        expect(manager.reconstructContent(restored, restored.rootId)).toBe('original');
+        expect(manager.reconstructContent(restored, restored.currentId)).toBe('latest');
+        manager.dispose();
     });
 
     it('marks only direct branch children with a connector', () => {
@@ -468,6 +501,7 @@ describe('UndoTreeProvider initialization', () => {
         provider.setActiveEditor(trackedEditor);
         vscode.window.activeTextEditor = outputEditor;
         vscode.workspace.textDocuments = [trackedEditor.document];
+        manager.syncDocumentState(trackedEditor.document.uri, trackedEditor.document.getText());
 
         provider.resolveWebviewView(view);
 
@@ -490,6 +524,7 @@ describe('UndoTreeProvider initialization', () => {
         provider.setActiveEditor(trackedEditor);
         vscode.window.activeTextEditor = undefined;
         vscode.workspace.textDocuments = [trackedEditor.document];
+        manager.syncDocumentState(trackedEditor.document.uri, trackedEditor.document.getText());
 
         provider.resolveWebviewView(view);
 
@@ -519,6 +554,7 @@ describe('UndoTreeProvider initialization', () => {
         vscode.window.activeTextEditor = undefined;
         vscode.window.visibleTextEditors = [visibleEditor];
         vscode.workspace.textDocuments = [staleEditor.document, visibleEditor.document];
+        manager.syncDocumentState(visibleEditor.document.uri, visibleEditor.document.getText());
         provider.captureWindowContext();
 
         provider.resolveWebviewView(view);
@@ -551,6 +587,7 @@ describe('UndoTreeProvider initialization', () => {
         };
         vscode.workspace.textDocuments = [document];
 
+        manager.syncDocumentState(document.uri, document.getText());
         provider.resolveWebviewView(view);
 
         expect(view.webview.html).toContain('let sourceUri = "file:///from-tab.md";');
@@ -585,6 +622,7 @@ describe('UndoTreeProvider initialization', () => {
             },
         };
         vscode.workspace.textDocuments = [staleDocument, freshDocument];
+        manager.syncDocumentState(freshDocument.uri, freshDocument.getText());
 
         provider.captureWindowContext();
 
@@ -616,6 +654,7 @@ describe('UndoTreeProvider initialization', () => {
         vscode.window.tabGroups = { activeTabGroup: { activeTab: undefined } };
         vscode.workspace.textDocuments = [firstDocument, secondDocument];
 
+        manager.syncDocumentState(secondDocument.uri, secondDocument.getText());
         provider.resolveWebviewView(view);
 
         expect(view.webview.html).toContain('let sourceUri = "file:///second.md";');
@@ -722,6 +761,7 @@ describe('UndoTreeProvider initialization', () => {
         const loadingDocument = makeDocument('loading file', 'file:///loading.md');
         const otherDocument = makeDocument('other file', 'file:///other.md');
         const view = makeView();
+        manager.syncDocumentState(otherDocument.uri, otherDocument.getText());
 
         provider.resolveWebviewView(view);
         provider.beginLoading(loadingDocument.uri);

@@ -191,6 +191,43 @@ export function mergeSerializedTrees(
         }
     } while (splitDetected);
 
+    // A previous writer may already have installed a colliding branch under
+    // different IDs. Resolve parents first, then reuse the matching base path;
+    // matching hashes alone would corrupt deltas on different parent paths.
+    const pathKey = (hash: string, parents: number[]) => JSON.stringify([hash, uniqueIds(parents)]);
+    const basePaths = new Map<string, number>();
+    for (const node of mergedNodes.values()) {
+        const key = pathKey(node.hash, node.parents);
+        if (!basePaths.has(key)) { basePaths.set(key, node.id); }
+    }
+    const incomingById = new Map(incoming.nodes.map(node => [node.id, node]));
+    const remainingParents = new Map<number, number>();
+    const dependents = new Map<number, number[]>();
+    const ordered: SerializedUndoNode[] = [];
+    for (const node of incoming.nodes) {
+        const parents = uniqueIds(node.parents).filter(id => incomingById.has(id));
+        remainingParents.set(node.id, parents.length);
+        if (parents.length === 0) { ordered.push(node); }
+        for (const parent of parents) {
+            const children = dependents.get(parent) ?? [];
+            children.push(node.id);
+            dependents.set(parent, children);
+        }
+    }
+    for (let index = 0; index < ordered.length; index++) {
+        const node = ordered[index];
+        if (idRemap.get(node.id) !== node.id || !mergedNodes.has(node.id)) {
+            const parents = node.parents.map(id => idRemap.get(id) ?? id);
+            const installedId = basePaths.get(pathKey(node.hash, parents));
+            if (installedId !== undefined) { idRemap.set(node.id, installedId); }
+        }
+        for (const child of dependents.get(node.id) ?? []) {
+            const count = remainingParents.get(child)! - 1;
+            remainingParents.set(child, count);
+            if (count === 0) { ordered.push(incomingById.get(child)!); }
+        }
+    }
+
     const preserveExistingParentIds = new Set<number>();
     for (const node of sameHashCollisions) {
         if (idRemap.get(node.id) !== node.id) { continue; }
@@ -214,7 +251,7 @@ export function mergeSerializedTrees(
     // storage representation that belongs to its remapped parent.
     for (const node of incoming.nodes) {
         const mergedId = idRemap.get(node.id)!;
-        const existing = mergedId === node.id ? mergedNodes.get(node.id) : undefined;
+        const existing = mergedNodes.get(mergedId);
         if (existing && existing.hash === node.hash) {
             existing.timestamp = Math.max(existing.timestamp, node.timestamp);
             existing.label = node.label;
@@ -277,7 +314,8 @@ export function mergeSerializedTrees(
     };
     mergedTree.hashMap = rebuildSerializedHashMap(mergedTree);
 
-    return { tree: mergedTree, nextId };
+    // IDs tentatively allocated above may have been reused instead.
+    return { tree: mergedTree, nextId: Math.max(nextIdHint, ...Array.from(mergedNodes.keys(), id => id + 1), 1) };
 }
 
 export type CompactPreviewItem = {
@@ -658,6 +696,10 @@ export class UndoTreeManager implements vscode.Disposable {
         return this.trees.has(uri.toString());
     }
 
+    peekTree(uri: vscode.Uri): UndoTree | undefined {
+        return this.trees.get(uri.toString());
+    }
+
     markDirty(uri: vscode.Uri): void {
         this.markDirtyKey(uri.toString());
     }
@@ -890,6 +932,9 @@ export class UndoTreeManager implements vscode.Disposable {
         const forceFull = this.forceFullSnapshotUris.delete(key) || this.pendingSaves.has(key);
         const resident = this.trees.get(key);
         const baselineHash = resident?.nodes.get(resident.currentId)?.hash;
+        const baselineId = resident?.currentId;
+        const jumpGeneration = resident ? this.jumpGenerations.get(resident) ?? 0 : 0;
+        const capturedDuringRestore = (this.restoringByUri.get(key)?.size ?? 0) > 0;
         const timestamp = Date.now();
         this.diffBuffer.delete(key);
         const epoch = this.managerEpoch;
@@ -914,7 +959,18 @@ export class UndoTreeManager implements vscode.Disposable {
                     if (epoch === this.managerEpoch) {
                         const tree = this.trees.get(key);
                         const baselineChanged = tree?.nodes.get(tree.currentId)?.hash !== baselineHash;
-                        this.addNode(frozenDocument, 'save', { diffs, forceFull: forceFull || baselineChanged, timestamp });
+                        // Retain the save as history without moving the live
+                        // cursor or consuming edits based on a later jump.
+                        const preserveCurrent = !!tree && (
+                            (this.jumpGenerations.get(tree) ?? 0) !== jumpGeneration
+                            || (capturedDuringRestore && document.getText() !== content)
+                        );
+                        this.addNode(frozenDocument, 'save', {
+                            diffs, forceFull: forceFull || baselineChanged || preserveCurrent, timestamp,
+                            preserveCurrent,
+                            parentId: preserveCurrent && tree === resident && baselineId !== undefined && tree?.nodes.has(baselineId)
+                                ? baselineId : undefined,
+                        });
                         recorded = true;
                     }
                 } finally { dispose(); }
@@ -950,7 +1006,7 @@ export class UndoTreeManager implements vscode.Disposable {
         this.addNode(editor.document, 'auto');
     }
 
-    private addNode(document: vscode.TextDocument, label: string, captured?: { diffs: Diff[][]; forceFull: boolean; timestamp: number }) {
+    private addNode(document: vscode.TextDocument, label: string, captured?: { diffs: Diff[][]; forceFull: boolean; timestamp: number; preserveCurrent?: boolean; parentId?: number }) {
         const content = document.getText();
         const hash = this.hashContent(content);
         const tree = this.getTree(document.uri);
@@ -961,8 +1017,8 @@ export class UndoTreeManager implements vscode.Disposable {
             this.diffBuffer.delete(key);
             this.forceFullSnapshotUris.delete(key);
         }
-        const currentNode = tree.nodes.get(tree.currentId)!;
-        const suppressedHash = this.jumpSuppressedHashes.get(key);
+        const currentNode = tree.nodes.get(captured?.parentId ?? tree.currentId)!;
+        const suppressedHash = captured?.preserveCurrent ? undefined : this.jumpSuppressedHashes.get(key);
 
         if (suppressedHash === hash && diffs.length === 0) {
             return;
@@ -972,14 +1028,14 @@ export class UndoTreeManager implements vscode.Disposable {
         }
 
         if (currentNode.hash === hash) {
-            this.jumpSuppressedHashes.delete(key);
+            if (!captured?.preserveCurrent) { this.jumpSuppressedHashes.delete(key); }
             return;
         }
 
         // DAG convergence: reuse an existing node with identical content.
         const existingId = tree.hashMap.get(hash);
         if (existingId !== undefined && tree.nodes.has(existingId)) {
-            tree.currentId = existingId;
+            if (!captured?.preserveCurrent) { tree.currentId = existingId; }
             this.markDirtyKey(key);
             this.onRefresh?.();
             return;
@@ -990,7 +1046,7 @@ export class UndoTreeManager implements vscode.Disposable {
             currentNode.storage.kind === 'full' &&
             currentNode.storage.content === '';
 
-        if (isCurrentEmptyRoot) {
+        if (isCurrentEmptyRoot && !captured?.preserveCurrent) {
             tree.hashMap.delete(currentNode.hash);
             currentNode.storage = { kind: 'full', content };
             currentNode.hash = hash;
@@ -1010,7 +1066,7 @@ export class UndoTreeManager implements vscode.Disposable {
         const newId = this.nextId++;
         const node: UndoNode = {
             id: newId,
-            parents: [tree.currentId],
+            parents: [currentNode.id],
             children: [],
             timestamp: captured?.timestamp ?? Date.now(),
             label,
@@ -1021,7 +1077,7 @@ export class UndoTreeManager implements vscode.Disposable {
         currentNode.children.push(newId);
         tree.nodes.set(newId, node);
         tree.hashMap.set(hash, newId);
-        tree.currentId = newId;
+        if (!captured?.preserveCurrent) { tree.currentId = newId; }
 
         const generation = this.markDirtyKey(key);
 
@@ -1343,8 +1399,19 @@ export class UndoTreeManager implements vscode.Disposable {
             return;
         }
 
+        // A save may have been recorded while the editor edit was awaiting
+        // completion. Finalize the cursor against the contents that actually
+        // won, without discarding the saved checkpoint or a real user branch.
+        if (t.currentId !== nodeId) {
+            const actualContent = document.getText();
+            if (actualContent === content) {
+                t.currentId = nodeId;
+            } else {
+                this.syncDocumentState(document.uri, actualContent, 'jump');
+            }
+        }
         this.diffBuffer.delete(uriStr);
-        this.jumpSuppressedHashes.set(uriStr, node.hash);
+        this.jumpSuppressedHashes.set(uriStr, t.nodes.get(t.currentId)!.hash);
         this.markDirtyKey(uriStr);
         this.onRefresh?.();
     }

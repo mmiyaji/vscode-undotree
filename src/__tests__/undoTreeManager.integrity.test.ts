@@ -41,6 +41,149 @@ afterEach(() => {
 });
 
 describe('history integrity regressions', () => {
+    it.each(['completed', 'editing'] as const)('keeps the live cursor when a captured save records after a %s jump', async (phase) => {
+        const manager = createManager();
+        const initial = 'a'.repeat(100);
+        let content = initial;
+        const document = { ...makeDocument(content), getText: () => content };
+        manager.onDidSaveTextDocument(document);
+        content += 'B';
+        manager.onDidSaveTextDocument(document);
+        const tree = manager.getTree(document.uri);
+        const savedParent = tree.currentId;
+        content += 'C';
+        manager.onDidChangeTextDocument(makeChangeEvent(content, 'file:///integrity.md', 101, 'C'));
+        const save = manager.captureSave(document)!;
+        let releaseEdit!: () => void;
+        let editStarted!: () => void;
+        const started = new Promise<void>(resolve => { editStarted = resolve; });
+        const editGate = new Promise<void>(resolve => { releaseEdit = resolve; });
+        const editor = {
+            document,
+            edit: async (callback: (builder: any) => void) => {
+                callback({ replace: (_range: unknown, text: string) => { content = text; } });
+                editStarted();
+                if (phase === 'editing') { await editGate; }
+                return true;
+            },
+        } as any;
+        const jump = manager.jumpToNode(tree.rootId, editor);
+        await started;
+        if (phase === 'completed') { await jump; }
+        save.record();
+        expect(tree.currentId).toBe(tree.rootId);
+        const savedNode = [...tree.nodes.values()].find(node => manager.reconstructContent(tree, node.id) === initial + 'BC');
+        expect(savedNode?.parents).toEqual([savedParent]);
+        releaseEdit();
+        await jump;
+
+        // A save caused by the restore itself must not move back to the captured save.
+        manager.onDidSaveTextDocument(document);
+        expect(tree.currentId).toBe(tree.rootId);
+        content += 'D';
+        manager.onDidChangeTextDocument(makeChangeEvent(content, 'file:///integrity.md', 100, 'D'));
+        manager.onDidSaveTextDocument(document);
+        expect(tree.nodes.get(tree.currentId)?.storage.kind).toBe('delta');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(content);
+        const restored = createManager();
+        restored.importState(manager.exportState());
+        expect(restored.reconstructContent(restored.getTree(document.uri), tree.currentId)).toBe(initial + 'D');
+    });
+
+    it('reuses remapped branches on repeated merges, including out-of-order delta descendants and metadata', () => {
+        const root = { id: 0, parents: [], children: [1], timestamp: 1, label: 'root', hash: 'root', storage: { kind: 'full' as const, content: '' } };
+        const base = serializedTree([root,
+            { id: 1, parents: [0], children: [], timestamp: 2, label: 'A', hash: 'A', storage: { kind: 'full', content: 'A' } },
+        ], 1);
+        const incoming = serializedTree([
+            { id: 2, parents: [1], children: [], timestamp: 4, label: 'B!', hash: 'B!', storage: { kind: 'delta', diffs: [[{ offset: 1, removeLength: 0, inserted: '!' }]] }, note: 'reviewed', noteUpdatedAt: 4, pinned: true, pinnedUpdatedAt: 4 },
+            { id: 1, parents: [0], children: [2], timestamp: 3, label: 'B', hash: 'B', storage: { kind: 'full', content: 'B' } },
+            root,
+        ], 2);
+        let merged = mergeSerializedTrees(base, incoming);
+        const size = merged.tree.nodes.length;
+        const currentId = merged.tree.currentId;
+        const nextId = merged.nextId;
+        incoming.nodes[0] = { ...incoming.nodes[0], note: undefined, noteUpdatedAt: 5, pinned: false, pinnedUpdatedAt: 5 };
+        for (let iteration = 0; iteration < 5; iteration++) {
+            merged = mergeSerializedTrees(merged.tree, incoming, merged.nextId);
+            expect(merged.tree.nodes).toHaveLength(size);
+            expect(merged.tree.currentId).toBe(currentId);
+            expect(merged.nextId).toBe(nextId);
+        }
+        expect(merged.tree.nodes.find(node => node.id === currentId)).toMatchObject({ noteUpdatedAt: 5, pinned: false, pinnedUpdatedAt: 5 });
+        expect(merged.tree.nodes.find(node => node.id === currentId)?.note).toBeUndefined();
+        const restored = createManager();
+        restored.importTree('file:///merged.md', merged.tree, merged.nextId);
+        const tree = restored.getTree(makeUri('file:///merged.md'));
+        expect(restored.reconstructContent(tree, tree.currentId)).toBe('B!');
+        expect([...tree.nodes.values()].filter(node => node.hash === 'B')).toHaveLength(1);
+    });
+
+    it('keeps a loaded jump target when a save was captured before its tree was loaded', async () => {
+        const manager = createManager();
+        const initial = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(initial));
+        manager.onDidSaveTextDocument(makeDocument(initial + 'B'));
+        const state = manager.exportState();
+        manager.unloadTree(makeUri());
+        let content = initial + 'BC';
+        const document = { ...makeDocument(content), getText: () => content };
+        const pending = manager.captureSave(document)!;
+        manager.importTree(document.uri.toString(), state.trees[document.uri.toString()]);
+        const tree = manager.getTree(document.uri);
+        await manager.jumpToNode(tree.rootId, {
+            document,
+            edit: async (callback: (builder: any) => void) => {
+                callback({ replace: (_range: unknown, text: string) => { content = text; } });
+                return true;
+            },
+        } as any);
+        pending.record();
+        expect(tree.currentId).toBe(tree.rootId);
+        content += 'D';
+        manager.onDidChangeTextDocument(makeChangeEvent(content, 'file:///integrity.md', 100, 'D'));
+        manager.onDidSaveTextDocument(document);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(content);
+    });
+
+    it.each(['before', 'after'])('handles a save captured during a jump and recorded %s the editor applies it', async (timing) => {
+        const manager = createManager();
+        const initial = 'a'.repeat(100);
+        let content = initial;
+        const document = { ...makeDocument(content), getText: () => content };
+        manager.onDidSaveTextDocument(document);
+        content += 'B';
+        manager.onDidSaveTextDocument(document);
+        const tree = manager.getTree(document.uri);
+        let start!: () => void;
+        let finish!: () => void;
+        const started = new Promise<void>(resolve => { start = resolve; });
+        const finished = new Promise<void>(resolve => { finish = resolve; });
+        const jump = manager.jumpToNode(tree.rootId, {
+            document,
+            edit: async (callback: (builder: any) => void) => {
+                let replacement = '';
+                callback({ replace: (_range: unknown, text: string) => { replacement = text; } });
+                start();
+                await finished;
+                content = replacement;
+                return true;
+            },
+        } as any);
+        await started;
+        const save = manager.captureSave(document)!;
+        if (timing === 'before') { save.record(); }
+        finish();
+        await jump;
+        if (timing === 'after') { save.record(); }
+        expect(tree.currentId).toBe(tree.rootId);
+        content += 'D';
+        manager.onDidChangeTextDocument(makeChangeEvent(content, 'file:///integrity.md', 100, 'D'));
+        manager.onDidSaveTextDocument(document);
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(content);
+    });
+
     it('resynchronizes a file that crossed the size limit and later became small enough again', () => {
         const manager = createManager();
         const before = 'a'.repeat(100);
@@ -323,6 +466,12 @@ describe('history integrity regressions', () => {
         });
         expect(duplicateLeaves.find((node) => node.id !== 2)?.pinned).toBeUndefined();
         expect(merged.tree.currentId).not.toBe(2);
+        let repeated = merged;
+        for (let iteration = 0; iteration < 3; iteration++) {
+            repeated = mergeSerializedTrees(repeated.tree, incoming, repeated.nextId);
+            expect(repeated.tree).toEqual(merged.tree);
+            expect(repeated.nextId).toBe(merged.nextId);
+        }
 
         const manager = createManager();
         manager.importTree('file:///same-hash-parent-collision.md', merged.tree, merged.nextId);
