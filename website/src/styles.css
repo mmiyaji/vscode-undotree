@@ -113,6 +113,7 @@ h2 {
   border-bottom: 1px solid var(--line);
 }
 .sidebar-brand img {
+  align-self: center;
   border-radius: 12px;
 }
 .sidebar nav {

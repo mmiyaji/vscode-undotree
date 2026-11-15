@@ -20,6 +20,12 @@ const copy = {
     ],
     coexist:
       "VS Code標準のUndo / Redoと共存します。日常の取り消し・やり直しは、そのまま利用できます。",
+    storageTitle: "履歴データの保存方法と復元のしくみ",
+    storageDetails: [
+      "履歴の各状態を毎回ファイル全体として保持するのではなく、小さな編集は直前の状態に対する差分として記録します。変更が大きい場合や差分を安全に使えない場合は、全内容を記録します。",
+      "分岐点などには全内容を保持し、そこから各枝の差分をたどって目的の状態を復元します。差分の連鎖を分岐点で区切ることで、履歴全体を毎回最初から再生する負担を抑える設計です。",
+      "大きな全内容は設定に応じて圧縮や別ファイルへの保存を行い、必要になったときに読み込みます。差分と全量の使い分けにより、履歴の保存量と過去の状態を取り出す処理のバランスを取ります。履歴が増えるほど保存容量や処理時間は増えるため、必要に応じて履歴を整理できます。",
+    ],
     diff: "差分を比較する",
     diffText:
       "任意の保存状態と現在の内容を、VS Codeの差分エディターで比較できます。",
@@ -60,6 +66,12 @@ const copy = {
     ],
     coexist:
       "Works alongside native VS Code Undo / Redo. Your everyday undo and redo commands remain available.",
+    storageTitle: "How history is stored and reconstructed",
+    storageDetails: [
+      "Instead of retaining the entire file for every state, small edits are recorded as changes from the preceding state. Large changes or cases where changes cannot safely be used are stored as full content.",
+      "Full content is retained at points such as forks, and each branch's changes are applied from there to reconstruct a requested state. These checkpoints limit how far reconstruction must go back through the change chain.",
+      "Depending on settings, large full snapshots can be compressed or stored separately and loaded when needed. Combining changes and full snapshots balances storage use with the work needed to retrieve earlier states. History size and processing time can still grow; history can be compacted when needed.",
+    ],
     diff: "Compare changes",
     diffText:
       "Compare a saved state with your current content in the VS Code diff editor.",
@@ -95,7 +107,7 @@ export function App() {
     localStorage.getItem("undotree-site-language") === "en" ? "en" : "ja",
   );
   const [theme, setTheme] = useState(
-    () => localStorage.getItem("undotree-site-theme") || "dark",
+    () => (localStorage.getItem("undotree-site-theme-explicit") === "1" && localStorage.getItem("undotree-site-theme")) || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
   );
   const [active, setActive] = useState("overview");
   const t = copy[lang];
@@ -123,8 +135,15 @@ export function App() {
   }, [legalPage, ja]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("undotree-site-theme", theme);
   }, [theme]);
+  useEffect(() => {
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = (event) => {
+      if (localStorage.getItem("undotree-site-theme-explicit") !== "1") setTheme(event.matches ? "dark" : "light");
+    };
+    preference.addEventListener("change", update);
+    return () => preference.removeEventListener("change", update);
+  }, []);
   useEffect(() => {
     const initialSection = window.location.hash.slice(1);
     if (initialSection && !legalPage) {
@@ -222,7 +241,12 @@ export function App() {
                     ? "ダークモード"
                     : "Dark mode"
               }
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              onClick={() => {
+                const next = theme === "dark" ? "light" : "dark";
+                localStorage.setItem("undotree-site-theme", next);
+                localStorage.setItem("undotree-site-theme-explicit", "1");
+                setTheme(next);
+              }}
             >
               <i className="codicon codicon-color-mode" aria-hidden="true" />
             </button>
@@ -280,6 +304,10 @@ export function App() {
               ))}
             </div>
             <p className="note">{t.coexist}</p>
+            <details className="settings-example history-storage">
+              <summary>{t.storageTitle}</summary>
+              {t.storageDetails.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+            </details>
           </section>
           <section
             className="section"
