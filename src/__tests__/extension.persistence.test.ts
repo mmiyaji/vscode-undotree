@@ -61,6 +61,87 @@ describe('persisted storage integration', () => {
         await expect(fs.access(path.join(dir, 'recent.json'))).resolves.toBeUndefined();
     });
 
+    it('does not overwrite a recovered backup or delete newer trees across repeated saves', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, 'manifest.json'), '{');
+        await fs.writeFile(path.join(dir, 'manifest.json.bak'), JSON.stringify({ trees: [{ uri: 'file:///old', file: 'old.json' }] }));
+        await fs.writeFile(path.join(dir, 'old.json'), '{}');
+        await fs.writeFile(path.join(dir, 'recent.json'), '{}');
+        for (let i = 0; i < 2; i++) {
+            const result = await extension.__test__.persistStateToDisk(context, { nextId: 1, trees: {} }, false);
+            expect('manifestInvalid' in result && result.manifestInvalid).toBe(true);
+        }
+        expect(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8')).toBe('{');
+        await expect(fs.access(path.join(dir, 'recent.json'))).resolves.toBeUndefined();
+    });
+
+    it('does not migrate a tree or rewrite a backup manifest during rename recovery', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, 'manifest.json'), '{');
+        const backup = JSON.stringify({ trees: [{ uri: 'file:///old', file: 'old.json' }] });
+        await fs.writeFile(path.join(dir, 'manifest.json.bak'), backup);
+        await fs.writeFile(path.join(dir, 'old.json'), JSON.stringify({ uri: 'file:///old', tree: { nodes: [] } }));
+        await fs.writeFile(path.join(dir, 'recent.json'), '{}');
+        const uri = (value: string) => ({ toString: () => value }) as any;
+        expect(await extension.__test__.migratePersistedTreeForRename(context, uri('file:///old'), uri('file:///new'))).toBe(false);
+        expect(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8')).toBe('{');
+        expect(await fs.readFile(path.join(dir, 'manifest.json.bak'), 'utf8')).toBe(backup);
+        await expect(fs.access(path.join(dir, 'recent.json'))).resolves.toBeUndefined();
+    });
+
+    it('retains interrupted write backups when saving another tree', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        await fs.mkdir(dir, { recursive: true });
+        const backup = path.join(dir, 'history.json.bak-write');
+        await fs.writeFile(backup, 'recoverable');
+        await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ trees: [{ uri: 'file:///history', file: 'history.json' }] }));
+        await extension.__test__.persistStateToDisk(context, { nextId: 1, trees: {} }, false);
+        expect(await fs.readFile(backup, 'utf8')).toBe('recoverable');
+    });
+
+    it('rebuilds each tree once and recovers an interrupted write backup', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        await fs.mkdir(dir, { recursive: true });
+        const saved = (uri: string) => JSON.stringify({ uri, tree: { nodes: [{ id: 1 }] } });
+        await fs.writeFile(path.join(dir, 'one.json'), saved('file:///one'));
+        await fs.writeFile(path.join(dir, 'one.json.bak-write'), saved('file:///one'));
+        await fs.writeFile(path.join(dir, 'two.json.bak-write'), saved('file:///two'));
+        await fs.writeFile(path.join(dir, 'ignored.json.tmp-123'), saved('file:///ignored'));
+        expect((await extension.__test__.rebuildPersistedManifestFromTreeFiles(context, false)).rebuilt).toBe(2);
+        const manifest = await extension.__test__.readPersistedManifest(context);
+        expect(manifest.manifest!.trees).toEqual([
+            { uri: 'file:///one', file: 'one.json' },
+            { uri: 'file:///two', file: 'two.json' },
+        ]);
+    });
+
+    it.each(['manual', 'warnings-disabled', 'auto'])('retains orphan content across window configurations: %s', async mode => {
+        const vscode = require('vscode');
+        vscode.workspace.getConfiguration.mockImplementation(() => ({ get: (key: string, fallback: unknown) =>
+            key === 'persistenceMode' ? (mode === 'manual' ? 'manual' : 'auto') :
+                key === 'warnOnMultiWindowConflict' ? mode === 'auto' : fallback }));
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        await fs.mkdir(path.join(dir, 'content'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ trees: [] }));
+        const blob = path.join(dir, 'content', 'orphan');
+        await fs.writeFile(blob, 'retained');
+        const result = await extension.__test__.pruneOrphanPersistedFiles(context);
+        expect(result.contentSkippedForLiveWindow).toBe(true);
+        expect(await fs.readFile(blob, 'utf8')).toBe('retained');
+    });
+
     it('defaults to automatic persistence while respecting an explicit manual setting', async () => {
         const extension = require('../extension') as typeof import('../extension');
         const vscode = require('vscode');

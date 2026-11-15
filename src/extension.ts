@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 import * as vscode from 'vscode';
 import { promises as fs } from 'fs';
@@ -213,9 +213,9 @@ async function notifyManifestReadStatus(
     const openOutputLabel = tr('Open Output');
 
     if (status === 'backup') {
-        outputChannel.appendLine('[manifest] primary manifest.json could not be used; fell back to manifest.json.bak. Pruning is disabled for this save cycle to protect persisted history.');
+        outputChannel.appendLine('[manifest] primary manifest.json could not be used; fell back to manifest.json.bak. Saving and pruning are blocked until the history index is repaired.');
         const picked = await vscode.window.showWarningMessage(
-            tr('Undo Tree recovered persisted history from manifest.json.bak. Automatic pruning is temporarily disabled to protect existing data.'),
+            tr('Undo Tree loaded backup history metadata. Saving and cleanup are paused to protect history until the index is repaired in Diagnostics.'),
             openStorageLabel,
             openOutputLabel
         );
@@ -343,7 +343,7 @@ async function collectDiagnosticsSnapshot(context: vscode.ExtensionContext): Pro
     const lockEntries = await fs.readdir(locksDir, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[]);
 
     const treeFiles = treeEntries
-        .filter((entry) => entry.isFile() && entry.name !== 'manifest.json' && entry.name !== 'manifest.json.bak')
+        .filter((entry) => entry.isFile() && entry.name !== 'manifest.json' && entry.name !== 'manifest.json.bak' && !entry.name.endsWith('.bak-write') && !entry.name.includes('.tmp-'))
         .map((entry) => entry.name)
         .sort();
     const contentFiles = contentEntries
@@ -1231,7 +1231,7 @@ async function persistStateToDiskUnderLock(
     const existingManifest = existingManifestResult.manifest;
     const hasUnmanifestedTreeFiles = existingManifestResult.status === 'missing' &&
         await hasUnmanifestedPersistedTreeFiles(context);
-    if (existingManifestResult.status === 'invalid' || hasUnmanifestedTreeFiles) {
+    if (existingManifestResult.status === 'invalid' || existingManifestResult.status === 'backup' || hasUnmanifestedTreeFiles) {
         return {
             rootDir,
             treesDir,
@@ -1453,7 +1453,6 @@ async function persistStateToDiskUnderLock(
         ],
     };
 
-    const canPruneTreeFiles = existingManifestResult.status !== 'backup';
     // Content cleanup is an explicit diagnostics operation. Do not decode every
     // unloaded history on the save path just to collect unused blob references.
 
@@ -1529,14 +1528,14 @@ async function persistStateToDiskUnderLock(
     await writeFileSafely(path.join(treesDir, 'manifest.json.bak'), manifestJson, 'utf8');
 
     // マニフェストにないツリーファイルのみ削除（保存済みツリーは保持）
-    if (canPruneTreeFiles) {
+    {
         const expectedFiles = new Set(manifest.trees.map((entry) => entry.file));
         expectedFiles.add('manifest.json');
         expectedFiles.add('manifest.json.bak');
         expectedFiles.add('content'); // サブディレクトリは除外しない
         const existingFiles = await fs.readdir(treesDir, { withFileTypes: true });
         await Promise.all(existingFiles
-            .filter((entry) => entry.isFile() && !expectedFiles.has(entry.name))
+            .filter((entry) => entry.isFile() && !expectedFiles.has(entry.name) && !entry.name.endsWith('.bak-write') && !entry.name.includes('.tmp-'))
             .map((entry) => fs.unlink(path.join(treesDir, entry.name))));
     }
 
@@ -2036,6 +2035,9 @@ async function migratePersistedTreeForRename(
     }
 
     const manifestResult = await readPersistedManifest(context);
+    if (manifestResult.status !== 'ok') {
+        return false;
+    }
     const manifest = manifestResult.manifest;
     if (!manifest) {
         return false;
@@ -2307,21 +2309,14 @@ async function pruneOrphanPersistedFiles(context: vscode.ExtensionContext): Prom
         throw new Error('Cannot prune orphan files while the history index or references are unavailable.');
     }
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
-    const contentDir = path.join(treesDir, 'content');
-
-    // The lock file is URI-scoped (not session-scoped), so a heartbeat from this
-    // window can overwrite another live owner's record. Treat any live lock,
-    // including an apparently owned one, as a reason to leave content blobs.
-    const hasLiveWindow = snapshot.locks.items.some((item) => item.isLive);
+    // Other windows can disable conflict warnings and leave no lock. Until all
+    // sessions can be detected reliably, content blobs must remain recoverable.
     await Promise.all(snapshot.orphanTreeFiles.map((fileName) => fs.unlink(path.join(treesDir, fileName)).catch(() => {})));
-    if (!hasLiveWindow) {
-        await Promise.all(snapshot.orphanContentFiles.map((fileName) => fs.unlink(path.join(contentDir, fileName)).catch(() => {})));
-    }
 
     return {
         treeFiles: snapshot.orphanTreeFiles.length,
-        contentFiles: hasLiveWindow ? 0 : snapshot.orphanContentFiles.length,
-        contentSkippedForLiveWindow: hasLiveWindow,
+        contentFiles: 0,
+        contentSkippedForLiveWindow: snapshot.orphanContentFiles.length > 0,
     };
 }
 
@@ -2332,10 +2327,10 @@ async function rebuildPersistedManifestFromTreeFiles(
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     await fs.mkdir(treesDir, { recursive: true });
     const entries = await fs.readdir(treesDir, { withFileTypes: true }).catch(() => [] as import('fs').Dirent[]);
-    const treeFiles = entries
-        .filter((entry) => entry.isFile() && entry.name !== 'manifest.json' && entry.name !== 'manifest.json.bak')
-        .map((entry) => entry.name)
-        .sort();
+    const treeFiles = [...new Set(entries
+        .filter((entry) => entry.isFile() && !entry.name.includes('.tmp-'))
+        .map((entry) => entry.name.endsWith('.json.bak-write') ? entry.name.slice(0, -'.bak-write'.length) : entry.name)
+        .filter((name) => name.endsWith('.json') && name !== 'manifest.json'))].sort();
 
     const trees: PersistedManifest['trees'] = [];
     let nextId = 1;
@@ -3222,7 +3217,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             );
                             if (result.contentSkippedForLiveWindow) {
                                 vscode.window.showWarningMessage(
-                                    tr('Undo Tree: orphan content blobs were not pruned because another window is actively using persisted history.')
+                                    tr('Undo Tree: orphan content was retained because other windows may still need it.')
                                 );
                             }
                             break;
@@ -4233,6 +4228,8 @@ export async function deactivate() {
 }
 
 export const __test__ = {
+    migratePersistedTreeForRename,
+    rebuildPersistedManifestFromTreeFiles,
     pruneOrphanPersistedFiles,
     confirmHistoryReset,
     buildDiagnosticsHtml,

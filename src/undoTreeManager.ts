@@ -961,6 +961,10 @@ export class UndoTreeManager implements vscode.Disposable {
             this.markDirtyKey(key);
             this.onRefresh?.();
         } catch (error) {
+            // A pending save may fail before the normal invalidation below.
+            // Cancel in-flight jumps and prevent later captured saves from
+            // moving the live cursor back to a pre-Undo state.
+            this.jumpGenerations.set(tree, (this.jumpGenerations.get(tree) ?? 0) + 1);
             // The buffered edits no longer describe the document after this
             // Undo/Redo. Never use them as the basis of a later delta.
             this.diffBuffer.delete(key);

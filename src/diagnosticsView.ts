@@ -12,7 +12,7 @@ export function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
     const foreignLive = snapshot.locks.items.filter(item => item.isLive && !item.isOwned).length;
     const orphanCount = (snapshot.orphanTreeFileCount ?? 0) + (snapshot.orphanContentFileCount ?? 0);
     const severity = snapshot.validation.status === 'error' || (indexProblem && snapshot.manifestStatus !== 'backup')
-        ? 'error' : indexProblem || snapshot.validation.status !== 'ok' || foreignLive > 0 || orphanCount > 0 ? 'warning' : 'ok';
+        ? 'error' : indexProblem || snapshot.validation.status !== 'ok' || foreignLive > 0 || (snapshot.orphanTreeFileCount ?? 0) > 0 ? 'warning' : 'ok';
     const headline = empty ? 'No saved history yet' : severity === 'error' ? 'Persisted history needs attention'
         : severity === 'warning' ? 'Review storage warnings' : 'Persisted history is healthy';
     const statusLabel = snapshot.manifestStatus === 'ok' ? 'Healthy' : snapshot.manifestStatus === 'backup' ? 'Using backup'
@@ -25,7 +25,7 @@ export function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
             ? `<p class="hint">${text('Unavailable until the history index and references can be read.')}</p>`
             : items.length ? `<ul class="file-list">${items.slice(0, 50).map(item => `<li><code>${escape(item)}</code></li>`).join('')}</ul>${items.length > 50 ? `<p class="hint">${escape(t('{0} more...', items.length - 50))}</p>` : ''}`
                 : `<p class="hint">${text(emptyLabel)}</p>`}</details>`;
-    const canPrune = snapshot.manifestStatus === 'ok' && snapshot.validation.status !== 'error' && orphanCount > 0;
+    const canPrune = snapshot.manifestStatus === 'ok' && snapshot.validation.status !== 'error' && (snapshot.orphanTreeFileCount ?? 0) > 0;
     const lockRows = snapshot.locks.items.slice(0, 50).map(item => `<tr>
         <td><code>${escape(item.uri)}</code><span class="hint block">${escape(item.workspace || '-')}</span></td>
         <td>${text(item.isOwned ? 'This window' : 'Other window')}<span class="hint block">${escape(item.sessionId)}</span></td>
@@ -118,7 +118,7 @@ export function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
     </section>
     <section id="storage" aria-labelledby="storage-title"><div class="section-heading"><h2 id="storage-title">${text('Storage')}</h2>${action('openStorage', 'Open Folder')}</div>
       <dl>${row('Storage folder', `<code>${escape(snapshot.storageDir)}</code>`)}${row('manifest.json', snapshot.manifestExists ? `<code>${escape(snapshot.manifestPath)}</code>` : text('missing'))}${row('manifest.json.bak', snapshot.backupExists ? `<code>${escape(snapshot.backupManifestPath)}</code>` : text('missing'))}${row('Orphan tree files', count(snapshot.orphanTreeFileCount))}${row('Orphan content files', count(snapshot.orphanContentFileCount))}</dl>
-      <div class="action-row">${action('pruneOrphans', 'Prune Orphan Files', false, !canPrune)}<p class="hint">${text(!canPrune && indexProblem ? 'Repair the history index before cleaning up orphan files.' : !canPrune && snapshot.validation.status === 'error' ? 'Resolve unreadable or missing history before cleaning up.' : orphanCount === 0 ? 'No known orphan files need cleanup.' : 'Referenced history is retained. Content cleanup is skipped while live locks exist.')}</p></div>
+      <div class="action-row">${action('pruneOrphans', 'Prune Orphan Files', false, !canPrune)}<p class="hint">${text(!canPrune && indexProblem ? 'Repair the history index before cleaning up orphan files.' : !canPrune && snapshot.validation.status === 'error' ? 'Resolve unreadable or missing history before cleaning up.' : orphanCount === 0 ? 'No known orphan files need cleanup.' : 'Unreferenced tree files can be removed. Content files are retained because other windows may still need them.')}</p></div>
       ${files('orphan-trees', 'Orphan Tree Files', snapshot.orphanTreeFiles, 'No orphan tree files detected.', snapshot.orphanTreeFileCount === null)}
       ${files('orphan-content', 'Orphan Content Files', snapshot.orphanContentFiles, 'No orphan content files detected.', snapshot.orphanContentFileCount === null)}
     </section>

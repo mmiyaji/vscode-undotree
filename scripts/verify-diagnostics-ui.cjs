@@ -59,6 +59,10 @@ async function main() {
         const errors = [];
         page.on('pageerror', error => errors.push(String(error)));
         await page.addInitScript(() => {
+            if (sessionStorage.getItem('resetNext')) {
+                sessionStorage.removeItem('state');
+                sessionStorage.removeItem('resetNext');
+            }
             window.messages = [];
             window.acquireVsCodeApi = () => ({ postMessage: m => window.messages.push(m), getState: () => JSON.parse(sessionStorage.getItem('state') || '{}'), setState: s => sessionStorage.setItem('state', JSON.stringify(s)) });
         });
@@ -69,6 +73,7 @@ async function main() {
                 await page.evaluate(() => {
                     if (typeof frame !== 'undefined' && frame) { cancelAnimationFrame(frame); }
                     sessionStorage.clear();
+                    sessionStorage.setItem('resetNext', '1');
                 });
             }
             await page.goto(pathToFileURL(path.join(root, name + '.html')).toString());
@@ -155,8 +160,10 @@ async function main() {
             assert.ok((await page.locator('.health').innerText()).includes('No saved history yet'));
             assert.equal(await page.locator('.health.error').count(), 0);
         });
-        await check('known orphans can be cleaned up from storage, with lock-aware explanation', async () => {
-            await render('cleanup', { ...healthy, orphanContentFileCount: 1, orphanContentFiles: ['orphan-content-hash'] });
+        await check('only orphan trees can be cleaned while content is retained', async () => {
+            await render('content-only', { ...healthy, orphanContentFileCount: 1, orphanContentFiles: ['orphan-content-hash'] });
+            assert.equal(await page.locator('[data-command="pruneOrphans"]').isDisabled(), true);
+            await render('cleanup', { ...healthy, orphanTreeFileCount: 1, orphanTreeFiles: ['orphan.json'], orphanContentFileCount: 1, orphanContentFiles: ['orphan-content-hash'] });
             await page.locator('[data-command="pruneOrphans"]').click();
             assert.deepEqual(await page.evaluate(() => window.messages), [{ command: 'pruneOrphans' }]);
             await complete('');

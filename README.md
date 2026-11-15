@@ -167,7 +167,7 @@ Behavior:
 - Opening a tracked file reloads its saved tree on demand
 - If the file content matches an existing history node, that node becomes current and its other branches are retained; otherwise a new `restore` node is appended
 - Root-only untouched trees are not persisted until history actually grows
-- `manifest.json.bak` is used as a fallback if the main manifest cannot be read
+- `manifest.json.bak` is used as a fallback if the main manifest cannot be read. Saving and cleanup pause until the index is repaired with Diagnostics.
 - Persisted files are written through temporary files first to avoid leaving zero-byte history files behind on interrupted writes
 - Broken persisted tree topology is repaired on load when possible so content can be recovered without dropping the entire history
 
@@ -177,7 +177,7 @@ Routine scheduled cleanup is not required for normal use. Saves update changed t
 
 Use **Compact History** to simplify a long history. To discard older eligible history, set `hardCompactAfterDays` and review **Hard Compact Preview** before running the command. These commands reorganize or remove history nodes; they do not guarantee all old checkpoint blobs are deleted immediately.
 
-Checkpoint content blobs are retained during saves because another window can still need them. If disk usage becomes significant, inspect Diagnostics and use **Prune Orphan Files** to remove unreferenced files. The cleanup verifies references and skips content deletion while a live history lock exists. Close other windows using this history and allow their locks to expire before retrying. Referenced history is retained. Diagnostics and cleanup perform a full storage scan, so run them when needed rather than on every save.
+Checkpoint content blobs are retained during saves because another window can still need them. Diagnostics lists unreferenced files; use **Prune Orphan Files** to remove unreferenced tree files. Cleanup removes unreferenced tree files; content files are retained because other windows may still need them. Referenced history is retained. Diagnostics and cleanup perform a full storage scan, so run them when needed rather than on every save.
 
 ## Compaction
 
@@ -224,7 +224,7 @@ The preview panel shows:
 
 Undo Tree includes a diagnostics panel for persisted storage maintenance. It is intended for development mode or when `undotree.enableDiagnostics` is enabled.
 
-The panel starts with a health summary, then groups operations beside their results: validation and index repair under **Integrity**, folder access and orphan cleanup under **Storage**, and conflict details under **Multi-window Locks**. Unknown orphan counts are shown as unknown rather than an empty result. Cleanup is unavailable when the index cannot be trusted or no known orphan files need removal; the storage operations still verify current references and locks when executed.
+The panel starts with a health summary, then groups operations beside their results: validation and index repair under **Integrity**, folder access and orphan cleanup under **Storage**, and conflict details under **Multi-window Locks**. Unknown orphan counts are shown as unknown rather than an empty result. Cleanup is unavailable when the index cannot be trusted or no known orphan files need removal; the storage operations still verify current references when executed.
 
 Failure simulations and history reset live under collapsed **Advanced** sections. Simulations require confirmation because they modify the saved manifest. Actions prevent repeated execution while running, and refreshes preserve expanded details and scroll position. Opening Output or the storage folder does not trigger another full storage scan.
 

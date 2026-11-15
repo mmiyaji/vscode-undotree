@@ -29,6 +29,29 @@ describe('native Undo/Redo with save checkpoints', () => {
     });
     afterEach(() => manager.dispose());
 
+    it('cancels an in-flight jump when a pending save fails during native undo', async () => {
+        manager.resetAll();
+        const base = 'a'.repeat(1000);
+        const tree = manager.getTree(uri, base);
+        change(base, base + 'Z');
+        manager.onDidSaveTextDocument(doc(base + 'Z'));
+        const saved = tree.currentId;
+        change(base + 'Z', base, vscode.TextDocumentChangeReason.Undo);
+        const root = tree.nodes.get(tree.rootId)!;
+        root.storage = { kind: 'checkpoint', contentHash: root.hash };
+        manager.contentResolver = () => { throw new Error('missing checkpoint'); };
+        change(base, base + 'X');
+        manager.captureSave(doc(base + 'X'));
+        let resolveContent!: (value: string) => void;
+        jest.spyOn(manager, 'reconstructContentAsync').mockImplementation(() => new Promise(resolve => { resolveContent = resolve; }));
+        const editor = { document: doc(base), edit: jest.fn() } as unknown as vscode.TextEditor;
+        const jump = (manager as any).performJumpToNode(saved, editor, tree);
+        change(base + 'X', base, vscode.TextDocumentChangeReason.Undo);
+        resolveContent(base + 'Z');
+        await jump;
+        expect(editor.edit).not.toHaveBeenCalled();
+    });
+
     it('discards stale edits after a checkpoint read failure before saving', () => {
         manager.resetAll();
         const base = 'a'.repeat(1000);
