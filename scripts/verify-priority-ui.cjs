@@ -67,6 +67,7 @@ async function main() {
         await check('10,001 histories retain bounded DOM rendering', async () => {
             assert.equal(await page.evaluate(() => nodeIds.length), 10001);
             assert.ok(await page.locator('.node').count() < 150);
+            assert.equal(await page.locator('.graph').first().evaluate(el => el.getBoundingClientRect().width), 14, 'a linear history does not reserve unused branch lanes');
         });
         await check('Tab leaves a toolbar button and Enter invokes that button', async () => {
             await page.locator('#btn-undo').focus();
@@ -328,7 +329,7 @@ async function main() {
                 graphWidth: row.querySelector('.graph').getBoundingClientRect().width,
                 labelX: row.querySelector('.node-label').getBoundingClientRect().left,
             })));
-            assert.ok(geometry.every(row => row.graphWidth === 42));
+            assert.ok(geometry.every(row => row.graphWidth === 24));
             assert.ok(geometry.every(row => Math.abs(row.labelX - geometry[0].labelX) < 0.1));
             const badgeGap = await page.locator('.node.current').evaluate(row =>
                 row.querySelector('.current-badge').getBoundingClientRect().left - row.querySelector('.node-label').getBoundingClientRect().right);
@@ -379,6 +380,50 @@ async function main() {
             assert.equal(await page.locator('.branch-toggle').count(), 2);
             assert.equal(await page.locator('.node.current .node-label').innerText(), 'auto');
             await page.screenshot({ path: path.join(root, 'fixed-graph-dark.png'), fullPage: true });
+        });
+        await check('narrow toolbar covers scrolled headers and blocks clicks through its background', async () => {
+            for (const width of [220, 280, 340]) {
+                await page.setViewportSize({ width, height: 180 });
+                await page.evaluate(() => { syncStickyOffsets(); window.scrollTo(10000, 45); });
+                const leaked = await page.evaluate(() => {
+                    const height = document.querySelector('.actions').offsetHeight;
+                    const leaks = [];
+                    for (let x = 2; x < innerWidth - 16; x += 4) {
+                        for (let y = 2; y < height; y += 4) {
+                            const element = document.elementFromPoint(x, y);
+                            if (element?.closest('.tree-header, .node')) { leaks.push({ x, y }); }
+                        }
+                    }
+                    return leaks;
+                });
+                assert.deepEqual(leaked, [], `no history content should show through the toolbar at ${width}px`);
+            }
+            await page.setViewportSize({ width: 220, height: 180 });
+            await page.evaluate(() => window.scrollTo(10000, 45));
+            const before = await page.evaluate(() => window.messages.length);
+            await page.locator('#btn-settings').click();
+            assert.equal(await page.evaluate(() => window.messages.length), before + 1);
+            assert.equal(await page.evaluate(() => window.messages.at(-1).command), 'showMenu');
+            await page.screenshot({ path: path.join(root, 'narrow-toolbar-fixed.png') });
+        });
+        await check('deep forks cap their width and keep labels aligned when collapsed', async () => {
+            const deep = Array.from({ length: 601 }, (_, id) => ({
+                id, parents: id ? [id % 2 ? id - 1 : id - 2] : [],
+                children: id % 2 === 0 && id < 600 ? [id + 1, id + 2] : [],
+                timestamp: id, label: 'save', lineCount: id, storage: { kind: 'full' },
+            }));
+            await page.evaluate(deep => renderState({ view: 'tree', nodes: deep, currentId: 600,
+                sourceUri: 'file:///deep.md', rootId: 0, mode: 'navigate', nodeSizeMetric: 'lines', colorTheme: 'blue', paused: false }), deep);
+            const before = await page.locator('.node-label').first().evaluate(el => el.getBoundingClientRect().left);
+            assert.equal(await page.locator('.graph').first().evaluate(el => el.getBoundingClientRect().width), 44);
+            assert.ok(await page.locator('.node').count() < 150);
+            await page.evaluate(() => toggleBranch(2));
+            assert.deepEqual(await page.evaluate(() => nodeIds), [0, 1, 2]);
+            assert.ok(await page.locator('.node-label').evaluateAll((els, x) => els.every(el => el.getBoundingClientRect().left === x), before));
+            assert.equal(await page.locator('.graph').first().evaluate(el => el.getBoundingClientRect().width), 44, 'folding does not shrink the lane column');
+            await page.locator('#show-current').click();
+            assert.equal(await page.evaluate(() => nodeIds.length), 601);
+            assert.equal(await page.locator('.node.current .node-label').evaluate(el => el.getBoundingClientRect().left), before);
         });
         assert.deepEqual(errors, [], 'renderer has no uncaught exceptions');
         console.log(`UI regression artifacts: ${root}`);

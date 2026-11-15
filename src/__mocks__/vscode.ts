@@ -1,5 +1,6 @@
 const vscode = {
     TextDocumentChangeReason: { Undo: 1, Redo: 2 },
+    ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     commands: {
         executeCommand: jest.fn(),
     },
@@ -46,6 +47,7 @@ const vscode = {
         showWarningMessage: jest.fn(),
         showInformationMessage: jest.fn(),
         showErrorMessage: jest.fn(),
+        showQuickPick: jest.fn(),
     },
     workspace: {
         textDocuments: [] as unknown[],

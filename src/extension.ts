@@ -3038,6 +3038,21 @@ function describeEditor(editor: vscode.TextEditor | undefined): string {
     });
 }
 
+async function choosePersistenceMode(): Promise<void> {
+    const current = getPersistenceMode();
+    const selected = await vscode.window.showQuickPick([
+        { label: tr('Persistence: Automatic'), description: tr('Save history automatically after changes'), mode: 'auto' as const, picked: current === 'auto' },
+        { label: tr('Persistence: Manual'), description: tr('Save history only with Save Persisted State'), mode: 'manual' as const, picked: current === 'manual' },
+    ], { title: tr('Undo Tree persistence'), placeHolder: tr('Choose persistent save mode') });
+    if (selected && selected.mode !== getPersistenceMode()) {
+        const config = vscode.workspace.getConfiguration('undotree');
+        const target = config.inspect('persistenceMode')?.workspaceValue !== undefined
+            ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+        await config.update('persistenceMode', selected.mode, target);
+        updateStatusBar(vscode.window.activeTextEditor);
+    }
+}
+
 function updateStatusBar(editor: vscode.TextEditor | undefined) {
     if (!statusBarItem || !manager) {
         return;
@@ -3059,8 +3074,10 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
     }
     if (manager.paused) {
         statusBarItem.text = tr('$(debug-pause) Undo Tree: PAUSED');
-        statusBarItem.tooltip = tr('Undo Tree is paused. Click to resume.');
-        statusBarItem.command = 'undotree.togglePause';
+        statusBarItem.tooltip = [tr('Undo Tree is paused.'),
+            getPersistenceMode() === 'auto' ? tr('Persistence: Automatic') : tr('Persistence: Manual'),
+            tr('Click for tracking, persistence and history actions.')].join('\n');
+        statusBarItem.command = 'undotree.showMenu';
         manager.debugLog?.('[statusBar] showing paused state');
         statusBarItem.show();
         return;
@@ -3070,9 +3087,6 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
     const ext = trackingStatus.matchedBy === 'fileName' ? fileName : trackingStatus.extension || fileName;
     const trackingConfig = getTrackingConfiguration(targetEditor.document);
     const enabled = trackingConfig.enabledExtensions;
-    const enabledFileNames = trackingConfig.fileNamesExplicit || !trackingConfig.extensionsExplicit
-        ? trackingConfig.enabledFileNames
-        : [];
     const excluded = trackingStatus.reason === 'excludePattern';
     const tracked = trackingStatus.tracked;
     manager.debugLog?.(
@@ -3082,25 +3096,14 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         ? tr('$(history) Undo Tree: ON')
         : tr('$(circle-slash) Undo Tree: OFF');
     statusBarItem.tooltip = [
-        trackingStatus.reason === 'size' ? tr('File exceeds the tracking size limit. Click to adjust the limit.')
+        trackingStatus.reason === 'size' ? tr('File exceeds the tracking size limit.')
             : trackingStatus.reason === 'binary' ? tr('Binary files are not tracked.')
-            : excluded
-            ? tr('Excluded by pattern. Click to edit exclude patterns.')
-            : tracked
-            ? tr('Tracking {0}. Click to disable.', ext)
-            : tr('Not tracking {0}. Click to enable.', ext),
-        usesTextTracking(trackingConfig) ? tr('Tracking text files, subject to exclusions and size limit.') : tr('Enabled: {0}', enabled.join(', ') || '(none)'),
-        !usesTextTracking(trackingConfig) && enabledFileNames.length > 0 ? tr('Enabled file names: {0}', enabledFileNames.join(', ')) : '',
-    ].filter(Boolean).join('\n');
-    statusBarItem.command = trackingStatus.reason === 'binary' ? undefined : trackingStatus.reason === 'size'
-        ? { command: 'workbench.action.openSettings', title: tr('Open Settings'), arguments: [getSettingSearchQuery('undotree.maxTrackedFileChars')] }
-        : excluded
-        ? {
-            command: 'workbench.action.openSettings',
-            title: tr('Open Exclude Settings'),
-            arguments: [getSettingSearchQuery('undotree.excludePatterns')],
-        }
-        : 'undotree.toggleTracking';
+            : excluded ? tr('Excluded by pattern.')
+            : tracked ? tr('Tracking {0}.', ext) : tr('Not tracking {0}.', ext),
+        getPersistenceMode() === 'auto' ? tr('Persistence: Automatic') : tr('Persistence: Manual'),
+        tr('Click for tracking, persistence and history actions.'),
+    ].join('\n');
+    statusBarItem.command = 'undotree.showMenu';
     statusBarItem.show();
 }
 
@@ -3680,7 +3683,8 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('undotree.showMenu', async () => {
-            const editor = vscode.window.activeTextEditor;
+            const editor = getTrackedContextEditor(vscode.window.activeTextEditor);
+            const trackingStatus = editor ? getDocumentTrackingStatus(editor.document) : undefined;
             const isCurrentTracked = !!editor && isTracked(editor.document);
             const items: Array<{
                 label: string;
@@ -3688,6 +3692,23 @@ export async function activate(context: vscode.ExtensionContext) {
                 command?: string;
                 settingId?: string;
             }> = [
+                {
+                    label: manager?.paused
+                        ? tr('$(debug-start) Resume Tracking')
+                        : tr('$(debug-pause) Pause Tracking'),
+                    description: tr('Temporarily disable or resume history capture'),
+                    command: 'undotree.togglePause',
+                },
+                {
+                    label: trackingStatus?.reason === 'size' ? tr('Track this file until closed')
+                        : trackingStatus?.reason === 'excludePattern' ? tr('Open Exclude Settings')
+                        : tr('$(symbol-file) Toggle Tracking for This Extension'),
+                    description: tr('Enable or disable tracking for the current file extension or exact file name'),
+                    command: !editor || trackingStatus?.reason === 'binary' ? undefined
+                        : trackingStatus?.reason === 'size' ? 'undotree.trackLargeFileForSession'
+                        : trackingStatus?.reason === 'excludePattern' ? 'workbench.action.openSettings' : 'undotree.toggleTracking',
+                    settingId: trackingStatus?.reason === 'excludePattern' ? 'undotree.excludePatterns' : undefined,
+                },
                 {
                     label: tr('$(gear) Open Settings'),
                     description: tr('Open Undo Tree extension settings'),
@@ -3707,7 +3728,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     label: getPersistenceMode() === 'auto'
                         ? tr('$(sync-ignored) Auto Persist: On')
                         : tr('$(sync) Auto Persist: Off'),
-                    description: tr('Open settings to change persistent save mode'),
+                    description: tr('Choose automatic or manual persistence'),
                     command: 'workbench.action.openSettings',
                     settingId: 'undotree.persistenceMode',
                 },
@@ -3732,18 +3753,6 @@ export async function activate(context: vscode.ExtensionContext) {
                     command: isCurrentTracked ? 'undotree.hardCompactDryRun' : undefined,
                 },
                 {
-                    label: manager?.paused
-                        ? tr('$(debug-start) Resume Tracking')
-                        : tr('$(debug-pause) Pause Tracking'),
-                    description: tr('Temporarily disable or resume history capture'),
-                    command: 'undotree.togglePause',
-                },
-                {
-                    label: tr('$(symbol-file) Toggle Tracking for This Extension'),
-                    description: tr('Enable or disable tracking for the current file extension or exact file name'),
-                    command: editor ? 'undotree.toggleTracking' : undefined,
-                },
-                {
                     label: tr('$(tools) Open Diagnostics'),
                     description: tr('Inspect persisted storage, manifest state, and orphan files'),
                     command: getDiagnosticsEnabled(context) ? 'undotree.openDiagnostics' : undefined,
@@ -3761,6 +3770,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
+            if (picked.settingId === 'undotree.persistenceMode') {
+                await choosePersistenceMode();
+                return;
+            }
             if (picked.command === 'workbench.action.openSettings') {
                 const query = picked.settingId
                     ? getSettingSearchQuery(picked.settingId)
@@ -3769,6 +3782,14 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
+            const documentCommands = new Set([
+                'undotree.toggleTracking', 'undotree.trackLargeFileForSession', 'undotree.restorePersistedState',
+                'undotree.compact', 'undotree.compactDryRun', 'undotree.hardCompactDryRun',
+            ]);
+            if (editor && documentCommands.has(picked.command)) {
+                if (editor.document.isClosed) { return; }
+                await vscode.window.showTextDocument(editor.document);
+            }
             await vscode.commands.executeCommand(picked.command);
         }),
 
@@ -4403,6 +4424,7 @@ export async function deactivate() {
 }
 
 export const __test__ = {
+    choosePersistenceMode,
     persistStateToDisk,
     getPersistenceMode,
     schedulePersistState,

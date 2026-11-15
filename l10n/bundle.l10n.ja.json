@@ -286,5 +286,18 @@
   "Collapse branch": "枝を折りたたむ",
   "Expand branch": "枝を展開する",
   "{0} hidden states": "{0} 件の履歴を非表示",
-  "Collapse or move to parent; expand or move to child": "折りたたむ／親へ移動・展開する／子へ移動"
+  "Collapse or move to parent; expand or move to child": "折りたたむ／親へ移動・展開する／子へ移動",
+  "Undo Tree is paused.": "Undo Tree は一時停止中です。",
+  "Persistence: Automatic": "履歴の永続化: 自動",
+  "Persistence: Manual": "履歴の永続化: 手動",
+  "Click for tracking, persistence and history actions.": "クリックして追跡・永続化・履歴整理の操作を選択します。",
+  "File exceeds the tracking size limit.": "文書が追跡サイズ上限を超えています。",
+  "Excluded by pattern.": "除外パターンの対象です。",
+  "Tracking {0}.": "{0} を追跡中です。",
+  "Not tracking {0}.": "{0} は追跡対象外です。",
+  "Choose automatic or manual persistence": "履歴の永続化を自動／手動から選択します",
+  "Save history automatically after changes": "履歴の変更後に自動で永続化します",
+  "Save history only with Save Persisted State": "「永続化状態を保存」を実行したときに履歴を保存します",
+  "Undo Tree persistence": "Undo Tree の永続化",
+  "Choose persistent save mode": "履歴の永続化モードを選択してください"
 }

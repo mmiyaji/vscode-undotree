@@ -159,7 +159,6 @@ describe('UndoTreeProvider initialization', () => {
         const html = (provider as any).buildHtml([], 42, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false, 'blue', 'tree', '', '', '', 41);
 
         expect(html).toContain('let rootId = 41;');
-        expect(html).toContain('const isRoot = id === rootId;');
     });
 
     it('sends only presentation metadata to the webview for full and delta nodes', () => {

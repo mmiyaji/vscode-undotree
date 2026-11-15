@@ -838,12 +838,12 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .diff-base { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--undotree-accent-strong) 70%, transparent); }
   .diff-base-badge { font-size: 9px; color: var(--undotree-accent-strong); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .current-badge { font-size: 9px; color: var(--vscode-list-activeSelectionForeground); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
-  .graph { position: relative; display: inline-flex; align-items: center; width: 42px; flex: 0 0 42px; height: 22px; color: var(--vscode-editorLineNumber-foreground); }
-  .graph svg.graph-segment { width: 42px; height: 22px; display: block; overflow: hidden; }
+  .graph { position: relative; display: inline-flex; align-items: center; width: var(--undotree-graph-width, 14px); flex: 0 0 var(--undotree-graph-width, 14px); height: 22px; color: var(--vscode-editorLineNumber-foreground); }
+  .graph svg.graph-segment { width: var(--undotree-graph-width, 14px); height: 22px; display: block; overflow: hidden; }
   .graph .graph-dot { fill: var(--vscode-sideBar-background, #181818); stroke: currentColor; stroke-width: 1.5; }
   .node.current .graph-dot { fill: var(--undotree-accent-strong); stroke: var(--undotree-accent-strong); }
   .node .node-label { flex: 0 0 auto; }
-  .tree-header .label-col { padding-left: 46px; }
+  .tree-header .label-col { padding-left: calc(var(--undotree-graph-width, 14px) + 4px); }
   .node.current .graph, .node.focused .graph { color: currentColor; }
   .node .branch-toggle { position: absolute; left: var(--branch-x); top: 3px; transform: translateX(-50%); width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: var(--vscode-sideBar-background, #181818); color: inherit; }
   .node.current .branch-toggle { background: var(--undotree-current); }
@@ -860,6 +860,10 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .time.latest { opacity: 0.9; color: var(--undotree-latest); }
   .empty { opacity: 0.5; padding: 8px; }
   .actions { display: flex; flex-wrap: nowrap; gap: 3px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 2; padding: 8px 0 4px; }
+  /* Controls can overflow their flex box in a narrow, horizontally scrolled
+     sidebar. Cover the viewport too, so scrolled rows/header cannot bleed
+     through behind those controls. The pseudo-element also blocks row clicks. */
+  .actions::before { content: ''; position: fixed; inset: 0 0 auto; height: var(--undotree-actions-height, 36px); background: var(--vscode-sideBar-background); z-index: -1; }
   .actions button { padding-left: 4px; padding-right: 4px; flex: 0 0 auto; }
   button { background: var(--undotree-accent); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
   button:hover { background: var(--undotree-accent-strong); }
@@ -1241,6 +1245,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   }
   window.addEventListener('scroll', scheduleVirtualRows, { passive: true });
   window.addEventListener('resize', scheduleVirtualRows);
+  window.addEventListener('resize', syncStickyOffsets);
   let treeMap = {};
   let contextMenuNodeId = null;
 
@@ -1365,6 +1370,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const diffTools = document.getElementById('diff-tools');
     const historyTools = document.getElementById('history-tools');
     const actionsHeight = actions?.offsetHeight ?? 42;
+    document.documentElement.style.setProperty('--undotree-actions-height', actionsHeight + 'px');
     const diffHeight = diffTools?.classList.contains('visible') ? diffTools.offsetHeight + 6 : 0;
     if (diffTools) { diffTools.style.top = actionsHeight + 'px'; }
     if (historyTools) { historyTools.style.top = (actionsHeight + diffHeight) + 'px'; }
@@ -1741,7 +1747,15 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     }
     // Four display lanes keep arbitrarily deep/wide trees inside the gutter.
     // Excess lanes share the outer rail; topology and folding still use IDs.
-    for (const entry of layout) { entry.lane = Math.min(entry.lane, 3); }
+    let lastLane = 0;
+    for (const entry of layout) {
+      entry.lane = Math.min(entry.lane, 3);
+      lastLane = Math.max(lastLane, entry.lane);
+    }
+    // Size once from the complete history, not the filtered/folded rows, so
+    // labels stay aligned and do not jump when a branch is opened or searched.
+    const graphWidth = 14 + lastLane * 10;
+    document.documentElement.style.setProperty('--undotree-graph-width', graphWidth + 'px');
     const laneX = lane => 6 + lane * 10;
     const entries = [];
     const hidden = new Set();
@@ -1797,7 +1811,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         [...new Set(entry.startLanes)].map(lane => '<path stroke="' + (lane ? 'var(--undotree-accent)' : 'currentColor') + '" d="M' + x + ' 11 C' + x + ' 18 ' + laneX(lane) + ' 15 ' + laneX(lane) + ' 22"/>').join('');
       const canFold = !filterActive && branchRootIds.has(entry.id) && map[entry.id].children.length > 0;
       const toggle = canFold ? '<button class="branch-toggle" tabindex="-1" title="' + escHtml(collapsed.has(entry.id) ? i18n.expandBranch : i18n.collapseBranch) + '" aria-label="' + escHtml(collapsed.has(entry.id) ? i18n.expandBranch : i18n.collapseBranch) + '"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="' + (collapsed.has(entry.id) ? 'M4 2 L8 6 L4 10' : 'M2 4 L6 8 L10 4') + '" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></button>' : '';
-      return '<span class="graph"><svg class="graph-segment" viewBox="0 0 42 22" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1">' + paths + '</g>' +
+      return '<span class="graph"><svg class="graph-segment" viewBox="0 0 ' + graphWidth + ' 22" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1">' + paths + '</g>' +
         (!canFold ? '<circle class="graph-dot" cx="' + (filterActive ? 6 : x) + '" cy="11" r="3"/>' : '') + '</svg>' + toggle + '</span>';
     }
     function renderNode(id, index) {

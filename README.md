@@ -62,12 +62,12 @@ Alternatively, search the Extensions view for `@id:mmiyaji.vscode-undotree`. For
 | Compare between two nodes | Switch to **Diff**, choose **Pair Diff**, select a base node, then select another node |
 | Pause / Resume tracking | Click **Pause** / **Resume** |
 | Open actions menu | Click the gear button |
-| Toggle tracking for the current file type or exact file name | Click the status bar item |
+| Choose tracking, persistence, or history actions | Click the status bar item |
 | Find history by note or date / show only pinned nodes | Click **Search** and use the search field or pinned filter |
 | Reveal the current node and clear filters | Click **Current** |
 | Collapse / expand a branch | Click the chevron at the start of a branch, or use `Left` / `Right` on that row |
 
-The graph occupies a fixed 42-pixel column, so labels and the Current badge do not shift with branch depth. Only the starts of branches at a fork have disclosure controls; ordinary linear saves use dots. A collapsed branch shows the number of hidden states. Up to four graph lanes are drawn; additional lanes share the outer rail while navigation and folding retain the actual node relationships.
+The graph column uses 14–44 pixels according to the number of lanes in the complete history. All rows share that width, so labels and the Current badge stay aligned; folding and filtering do not change it. Only the starts of branches at a fork have disclosure controls; ordinary linear saves use dots. A collapsed branch shows the number of hidden states. Up to four graph lanes are drawn; additional lanes share the outer rail while navigation and folding retain the actual node relationships.
 
 Branch folding is kept separately for each file in the webview state. Search and the pinned filter include matching nodes inside collapsed branches without changing the folding state. **Current** clears filters and expands the current node's ancestors; history navigation also reveals the selected node. Virtual scrolling applies to the remaining visible rows after folding and filtering.
 
@@ -84,6 +84,8 @@ The sidebar shows a tree of save checkpoints. The highlighted row is the current
 ### Status bar
 
 The status bar item shows tracking state for the current file:
+
+Click it to open the action menu, including pause/resume, file-type tracking, automatic/manual persistence, explicit save/restore, and compaction previews. The tooltip shows tracking state and the persistence mode. Switching persistence mode updates an existing workspace override, or otherwise your user settings; it does not delete saved history.
 
 | Display | Meaning |
 |---------|---------|
