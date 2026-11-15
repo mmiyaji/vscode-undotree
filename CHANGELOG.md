@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 ### History and navigation
 
@@ -12,6 +12,12 @@
 ### Diagnostics
 
 - Group storage validation, cleanup and multi-window information by task. Require confirmation before failure simulations or deleting history.
+- Protect persisted history when manifest recovery is required and retain unreferenced content files while other windows may need them.
+
+### Documentation and tooling
+
+- Refresh the documentation and screenshots, and explain how full snapshots and changes balance history storage and reconstruction.
+- Update development dependencies and use the system theme by default on the website.
 
 ## 0.3.11
 
