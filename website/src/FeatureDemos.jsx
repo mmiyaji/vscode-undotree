@@ -14,13 +14,12 @@ const copy = {
     pinCaption: "「在庫・価格順・円表示を追加」のチェックポイントをピン留めした実画面。「商品カードの基本表示」の履歴も残っています。",
     pinAlt: "商品一覧のTypeScriptコードとUndo Tree。ピン一覧に在庫・価格順・円表示を追加というメモ付きのチェックポイントが表示されている",
     full: "画像を拡大して見る",
-    language: "スクリーンショットは日本語UIです。拡張機能の表示言語は設定で変更できます。",
   },
   en: {
     title: "Using the extension",
     diffTitle: "Compare a saved state with your current content",
     diffText: "Check what changed before restoring a file. Select a checkpoint in Undo Tree’s Diff mode to inspect changes in the VS Code diff editor.",
-    diffSteps: ["Switch Undo Tree to Diff mode", "Choose a checkpoint under Compare with current", "Review the diff before choosing a state to restore"],
+    diffSteps: ["Switch Undo Tree to Diff mode", "Choose a checkpoint under vs Current", "Review the diff before choosing a state to restore"],
     diffCaption: "Before and after a TypeScript product-card change: exclude out-of-stock products, sort by price, and format prices in Japanese yen. Deletions are red; additions are green.",
     diffAlt: "VS Code comparing a saved products.ts checkpoint with current content, adding a stock filter, price sort, and yen formatting with Intl.NumberFormat",
     pairTitle: "Compare two earlier states, too",
@@ -28,15 +27,17 @@ const copy = {
     pinTitle: "Add notes and pins to reviewed states",
     pinText: "Leave a note when you finish checking a change or before trying another approach. Pinned checkpoints appear in a separate list so you can find them after more saves.",
     pinSteps: ["Note a checkpoint’s purpose or review result", "Pin a state you want to return to", "Find that checkpoint in the pinned list"],
-    pinCaption: "A pinned checkpoint with a note meaning “Add stock filtering, price sorting, and yen formatting.” The “Basic product cards” checkpoint remains in history.",
+    pinCaption: "The “Stock, price & JPY” checkpoint is pinned. The earlier “Basic product cards” checkpoint remains in history.",
     pinAlt: "TypeScript product-list code alongside Undo Tree, with a pinned checkpoint for stock filtering, price sorting, and yen formatting",
     full: "View full-size screenshot",
-    language: "Screenshots show the Japanese UI. The extension’s display language can be changed in its settings.",
   },
 };
 
 export function FeatureDemos({ lang }) {
   const t = copy[lang];
+  const suffix = lang === "en" ? "-en" : "";
+  const diffImage = `/assets/products-diff${suffix}.jpg`;
+  const pinImage = `/assets/products-pins${suffix}.jpg`;
   return (
     <section className="section feature-demos" id="demos" aria-labelledby="demos-title">
       <h2 id="demos-title">{t.title}</h2>
@@ -45,10 +46,10 @@ export function FeatureDemos({ lang }) {
         <p>{t.diffText}</p>
         <ol className="demo-steps">{t.diffSteps.map(step => <li key={step}>{step}</li>)}</ol>
         <figure>
-          <a className="demo-image-link" href="/assets/products-diff.jpg" aria-label={`${t.full} — Diff`}>
-            <img src="/assets/products-diff.jpg" alt={t.diffAlt} width="1442" height="601" loading="lazy" decoding="async" />
+          <a className="demo-image-link" href={diffImage} aria-label={`${t.full} — Diff`}>
+            <img src={diffImage} alt={t.diffAlt} width="1442" height="601" loading="lazy" decoding="async" />
           </a>
-          <figcaption>{t.diffCaption} <a href="/assets/products-diff.jpg">{t.full}</a></figcaption>
+          <figcaption>{t.diffCaption} <a href={diffImage}>{t.full}</a></figcaption>
         </figure>
         <aside className="demo-detail" aria-labelledby="pair-demo-title">
           <h4 id="pair-demo-title">{t.pairTitle}</h4>
@@ -60,13 +61,12 @@ export function FeatureDemos({ lang }) {
         <p>{t.pinText}</p>
         <ol className="demo-steps">{t.pinSteps.map(step => <li key={step}>{step}</li>)}</ol>
         <figure>
-          <a className="demo-image-link" href="/assets/products-pins.jpg" aria-label={`${t.full} — ${lang === "ja" ? "ピン留め" : "Pins"}`}>
-            <img src="/assets/products-pins.jpg" alt={t.pinAlt} width="1442" height="601" loading="lazy" decoding="async" />
+          <a className="demo-image-link" href={pinImage} aria-label={`${t.full} — ${lang === "ja" ? "ピン留め" : "Pins"}`}>
+            <img src={pinImage} alt={t.pinAlt} width="1442" height="601" loading="lazy" decoding="async" />
           </a>
-          <figcaption>{t.pinCaption} <a href="/assets/products-pins.jpg">{t.full}</a></figcaption>
+          <figcaption>{t.pinCaption} <a href={pinImage}>{t.full}</a></figcaption>
         </figure>
       </article>
-      <p className="note">{t.language}</p>
     </section>
   );
 }

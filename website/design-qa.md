@@ -87,3 +87,11 @@ No blocking findings remain. The small trigger-width difference is accepted as a
 - Captured the same code with the improvement checkpoint pinned. Updated Japanese/English captions and alt text to match the new code and actual checkpoint notes.
 - Build and all four Sites tests passed. Deployed https://d2cc3915.undotree.pages.dev and verified both new JPEG assets load at their expected dimensions on the production custom domain.
 - Production screenshot: D:/AI/Codex/.codex/visualizations/2026/11/14/01a1db51-f642-7530-85d1-88ce88bcd173/realistic-code-demos.png.
+
+## Localized demo screenshots (2026-11-15)
+
+- Captured actual English Undo Tree Diff and pinned-list views at 1442 × 601, using the same products.ts content and history as the Japanese screenshots. Translated the notes to “Basic product cards” and “Stock, price & JPY”.
+- The site language now switches image sources and both full-size links for each demo. Removed the Japanese-only screenshot notice.
+- Browser verification: English → Japanese → English updates both screenshot paths and all four image links. Both English images load at the expected dimensions; Japanese images remain available. Checked the English production rendering; no browser warnings/errors.
+- Production build and all four Sites tests passed. Deployed https://466eff86.undotree.pages.dev; verified the localized assets on the custom domain.
+- Production screenshot: D:/AI/Codex/.codex/visualizations/2026/11/14/01a1db51-f642-7530-85d1-88ce88bcd173/published-english-demos.png.

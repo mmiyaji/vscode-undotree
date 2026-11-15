@@ -2,7 +2,7 @@
 
 Use only mmiyaji as the provider name in legal-page body text, in both Japanese and English.
 
-Show actual Diff and notes/pins screenshots with concrete usage steps and full-size image links. Translate descriptions and captions; identify Japanese-only screenshot UI explicitly in English. Keep the existing branching explanation and compact hero.
+Show actual Diff and notes/pins screenshots with concrete usage steps and full-size image links. Switch the actual screenshot assets and full-size links between Japanese and English UI with the site's language control, including translated checkpoint notes. Translating captions alone is insufficient. Keep the existing branching explanation and compact hero.
 
 Demo screenshots must contain realistic, readable code, not long repeated dummy strings. Use a compact actual VS Code window with purposeful changes such as stock filtering, price sorting, and currency formatting in products.ts. Keep captions and checkpoint notes consistent with the screenshot.
 
