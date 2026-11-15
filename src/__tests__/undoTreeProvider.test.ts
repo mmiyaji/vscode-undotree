@@ -124,24 +124,6 @@ describe('UndoTreeProvider initialization', () => {
         manager.dispose();
     });
 
-    it('marks only direct branch children with a connector', () => {
-        const manager = new UndoTreeManager();
-        const provider = new UndoTreeProvider({} as any, manager);
-
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
-
-        expect(html).toContain('const isDirectBranchChild = !isRoot && parentChildCount > 1;');
-        expect(html).toContain("function renderSegment(kind) {");
-        expect(html).toContain("case 'pipe':");
-        expect(html).toContain("case 'tee':");
-        expect(html).toContain("case 'elbow':");
-        expect(html).toContain("const graphHtml = filterActive ? '' : prefixParts.map(renderSegment).join('') +");
-        expect(html).toContain("isDirectBranchChild ? (isLast ? 'elbow' : 'tee')");
-        expect(html).toContain("const childPrefix = (isDirectBranchChild || isBranchParent)");
-        expect(html).toContain("[...prefixParts, isLast ? 'blank' : 'pipe']");
-        expect(html).toContain('traversal.push({ id: node.children[i], prefixParts: childPrefix,');
-    });
-
     it('does not build a synthetic main path', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
@@ -150,27 +132,6 @@ describe('UndoTreeProvider initialization', () => {
 
         expect(html).not.toContain('function findMainPath()');
         expect(html).not.toContain('const mainPath');
-    });
-
-    it('renders children directly in stored order', () => {
-        const manager = new UndoTreeManager();
-        const provider = new UndoTreeProvider({} as any, manager);
-
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
-
-        expect(html).toContain('for (let i = node.children.length - 1; i >= 0; i--)');
-        expect(html).not.toContain('mainChild');
-        expect(html).not.toContain('branchChildren');
-    });
-
-    it('does not indent a linear chain', () => {
-        const manager = new UndoTreeManager();
-        const provider = new UndoTreeProvider({} as any, manager);
-
-        const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
-
-        expect(html).not.toContain('const isLinear');
-        expect(html).toContain('const traversal = [{ id: rootId, prefixParts: [], isLast: false, parentChildCount: 0, level: 1 }];');
     });
 
     it('keeps standard keyboard traversal and exposes compact metadata filters and current navigation', () => {
@@ -750,7 +711,7 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'none', 'current', false);
 
-        expect(html).toContain(`'<span class="label">' + escHtml(node.label) + '</span>'`);
+        expect(html).toContain('escHtml(node.note || node.label)');
         expect(html).toContain('escHtml(node.formattedTime)');
     });
 

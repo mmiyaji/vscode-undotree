@@ -12,6 +12,8 @@ Unlike standard linear undo/redo, **vscode-undotree** preserves branches. If you
 
 The extension records history on saves and periodic autosave checkpoints. It does not replace VS Code's native undo stack; it adds a separate history layer for navigating meaningful states.
 
+Native Undo/Redo also updates the tree selection. Before following an undo or redo, pending tracked edits are kept as a history state, so undoing and typing a new version preserves the previous future as another branch. If the native undo group lands between checkpoints, that state is recorded too. Ordinary typing continues to use save-based and periodic checkpoints; this does not record every keystroke as a node. These states use the same persistence and compaction rules as other history nodes.
+
 ![Undo Tree hero](./media/undotree-readme-hero.png)
 
 ## Color Themes
@@ -63,6 +65,11 @@ Alternatively, search the Extensions view for `@id:mmiyaji.vscode-undotree`. For
 | Toggle tracking for the current file type or exact file name | Click the status bar item |
 | Find history by note or date / show only pinned nodes | Click **Search** and use the search field or pinned filter |
 | Reveal the current node and clear filters | Click **Current** |
+| Collapse / expand a branch | Click the chevron at the start of a branch, or use `Left` / `Right` on that row |
+
+The graph occupies a fixed 42-pixel column, so labels and the Current badge do not shift with branch depth. Only the starts of branches at a fork have disclosure controls; ordinary linear saves use dots. A collapsed branch shows the number of hidden states. Up to four graph lanes are drawn; additional lanes share the outer rail while navigation and folding retain the actual node relationships.
+
+Branch folding is kept separately for each file in the webview state. Search and the pinned filter include matching nodes inside collapsed branches without changing the folding state. **Current** clears filters and expands the current node's ancestors; history navigation also reveals the selected node. Virtual scrolling applies to the remaining visible rows after folding and filtering.
 
 ### Panel layout
 
@@ -92,8 +99,8 @@ The shortcuts below apply when the history tree has focus. Text fields and butto
 |-----|--------|
 | `Up` / `k` | Move focus up |
 | `Down` / `j` | Move focus down |
-| `Left` | Move focus to parent |
-| `Right` | Move focus to last child |
+| `Left` | Collapse an expanded branch, otherwise move focus to parent |
+| `Right` | Expand a collapsed branch, otherwise move focus to last child |
 | `Tab` / `Shift+Tab` | Move to next / previous control |
 | `Home` / `End` | Move to first / last node |
 | `Enter` / `Space` | Jump to focused node, or compare in Diff mode |
@@ -152,7 +159,7 @@ Behavior:
 - `Save Persisted State` writes the current tracked trees to disk
 - `Restore Persisted State` reloads the saved tree for the active file
 - Opening a tracked file reloads its saved tree on demand
-- If the file content differs from the saved current node, a new `restore` node is appended
+- If the file content matches an existing history node, that node becomes current and its other branches are retained; otherwise a new `restore` node is appended
 - Root-only untouched trees are not persisted until history actually grows
 - `manifest.json.bak` is used as a fallback if the main manifest cannot be read
 - Persisted files are written through temporary files first to avoid leaving zero-byte history files behind on interrupted writes

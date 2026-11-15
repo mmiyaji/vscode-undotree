@@ -1,4 +1,5 @@
 const vscode = {
+    TextDocumentChangeReason: { Undo: 1, Redo: 2 },
     commands: {
         executeCommand: jest.fn(),
     },

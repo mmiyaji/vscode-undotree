@@ -357,6 +357,7 @@ export class UndoTreeManager implements vscode.Disposable {
     private diffBuffer = new Map<string, Diff[][]>();
     private forceFullSnapshotUris = new Set<string>();
     private pendingSaves = new Map<string, number>();
+    private pendingSaveRecords = new Map<string, Set<() => void>>();
     private dirtyTrees = new Set<string>();
     private mutationGenerations = new Map<string, number>();
     private pendingCheckpointGenerations = new Map<string, Map<string, number>>();
@@ -797,6 +798,7 @@ export class UndoTreeManager implements vscode.Disposable {
     resetAll(): void {
         this.managerEpoch++;
         this.pendingSaves.clear();
+        this.pendingSaveRecords.clear();
         this.checkpointCompressionQueue.clear();
         this.trees.clear();
         this.diffBuffer.clear();
@@ -898,6 +900,10 @@ export class UndoTreeManager implements vscode.Disposable {
         if ((this.restoringByUri.get(key)?.size ?? 0) > 0) {
             return;
         }
+        if (e.reason === vscode.TextDocumentChangeReason.Undo || e.reason === vscode.TextDocumentChangeReason.Redo) {
+            this.followNativeHistory(e);
+            return;
+        }
         this.jumpSuppressedHashes.delete(key);
         const buffer = this.diffBuffer.get(key) ?? [];
         const eventDiffs: Diff[] = e.contentChanges.map(c => ({
@@ -907,6 +913,52 @@ export class UndoTreeManager implements vscode.Disposable {
         }));
         buffer.push(eventDiffs);
         this.diffBuffer.set(key, buffer);
+    }
+
+    private followNativeHistory(e: vscode.TextDocumentChangeEvent): void {
+        const key = e.document.uri.toString();
+        const tree = this.trees.get(key);
+        // A document awaiting its initial lazy load has no reliable baseline.
+        // Keep buffering its changes; the load/save pipeline will reconcile it.
+        if (!tree) {
+            const buffer = this.diffBuffer.get(key) ?? [];
+            buffer.push(e.contentChanges.map(c => ({
+                offset: c.rangeOffset, removeLength: c.rangeLength, inserted: c.text,
+            })));
+            this.diffBuffer.set(key, buffer);
+            return;
+        }
+
+        // Finish captured saves first when their tree is already resident.
+        // This restores the baseline of edits buffered after the capture.
+        for (const record of [...this.pendingSaveRecords.get(key) ?? []]) { record(); }
+
+        // Invalidate both in-flight jumps and captured saves' logical cursor.
+        // A save captured before this event must retain its original parent
+        // and must not advance the live cursor when it eventually completes.
+        this.jumpGenerations.set(tree, (this.jumpGenerations.get(tree) ?? 0) + 1);
+        const diffs = this.diffBuffer.get(key);
+        if (diffs?.length && !this.forceFullSnapshotUris.has(key) && !this.pendingSaves.has(key)) {
+            // The event document already contains the result of Undo/Redo.
+            // Recover the pre-event text from the recorded baseline and edits,
+            // without keeping another full document copy on every keystroke.
+            const before = this.applyDiffs(this.reconstructContent(tree, tree.currentId), diffs);
+            this.syncDocumentState(e.document.uri, before, 'edit', true);
+        }
+        this.diffBuffer.delete(key);
+        this.jumpSuppressedHashes.delete(key);
+        const content = e.document.getText();
+        const matchingId = tree.hashMap.get(this.hashContent(content));
+        if (matchingId !== undefined && tree.nodes.has(matchingId)) {
+            tree.currentId = matchingId;
+        } else {
+            // Native undo groups need not coincide with save checkpoints.
+            // Keep an independently reconstructible state when no node matches.
+            this.syncDocumentState(e.document.uri, content,
+                e.reason === vscode.TextDocumentChangeReason.Undo ? 'undo' : 'redo', true);
+        }
+        this.markDirtyKey(key);
+        this.onRefresh?.();
     }
 
     invalidateTrackingBaseline(uri: vscode.Uri): void {
@@ -944,6 +996,9 @@ export class UndoTreeManager implements vscode.Disposable {
         const dispose = () => {
             if (consumed) { return; }
             consumed = true;
+            const records = this.pendingSaveRecords.get(key);
+            records?.delete(save.record);
+            if (records?.size === 0) { this.pendingSaveRecords.delete(key); }
             if (epoch !== this.managerEpoch) { return; }
             // A cancelled save detached edits that later changes depend on.
             if (!recorded) { this.forceFullSnapshotUris.add(key); }
@@ -951,7 +1006,7 @@ export class UndoTreeManager implements vscode.Disposable {
             if (count > 0) { this.pendingSaves.set(key, count); }
             else { this.pendingSaves.delete(key); }
         };
-        return {
+        const save = {
             document: frozenDocument,
             record: () => {
                 if (consumed) { return; }
@@ -977,6 +1032,10 @@ export class UndoTreeManager implements vscode.Disposable {
             },
             dispose,
         };
+        const records = this.pendingSaveRecords.get(key) ?? new Set<() => void>();
+        records.add(save.record);
+        this.pendingSaveRecords.set(key, records);
+        return save;
     }
 
     onDidSaveTextDocument(document: vscode.TextDocument) {
@@ -1948,6 +2007,7 @@ export class UndoTreeManager implements vscode.Disposable {
         }
         this.managerEpoch++;
         this.pendingSaves.clear();
+        this.pendingSaveRecords.clear();
         this.checkpointCompressionQueue.clear();
         this.trees.clear();
         this.diffBuffer.clear();
@@ -2074,18 +2134,18 @@ export class UndoTreeManager implements vscode.Disposable {
         }
     }
 
-    syncDocumentState(uri: vscode.Uri, content: string, label = 'restore'): UndoTree {
+    syncDocumentState(uri: vscode.Uri, content: string, label = 'restore', preserveRoot = false): UndoTree {
         if (this.pendingSaves.has(uri.toString())) { this.forceFullSnapshotUris.add(uri.toString()); }
-        const tree = this.getTree(uri, content);
+        const tree = preserveRoot ? this.trees.get(uri.toString()) ?? this.getTree(uri, content) : this.getTree(uri, content);
         const currentContent = this.reconstructContent(tree, tree.currentId);
         if (currentContent === content) {
             return tree;
         }
 
-        const reusableLatestLeafId = this.findReusableLatestLeafForContent(tree, content);
-        if (reusableLatestLeafId !== undefined) {
-            if (tree.currentId !== reusableLatestLeafId) {
-                tree.currentId = reusableLatestLeafId;
+        const reusableId = this.findReusableNodeForContent(tree, content);
+        if (reusableId !== undefined) {
+            if (tree.currentId !== reusableId) {
+                tree.currentId = reusableId;
                 this.markDirtyKey(uri.toString());
             }
             this.diffBuffer.delete(uri.toString());
@@ -2122,7 +2182,7 @@ export class UndoTreeManager implements vscode.Disposable {
         return tree;
     }
 
-    private findReusableLatestLeafForContent(tree: UndoTree, content: string): number | undefined {
+    private findReusableNodeForContent(tree: UndoTree, content: string): number | undefined {
         const hash = this.hashContent(content);
         const candidateId = tree.hashMap.get(hash);
         if (candidateId === undefined) {
@@ -2132,13 +2192,9 @@ export class UndoTreeManager implements vscode.Disposable {
         if (!candidate) {
             return undefined;
         }
-        if (candidate.children.length !== 0) {
-            return undefined;
-        }
-        const latestNodeId = this.getLatestNodeId(tree);
-        if (candidateId !== latestNodeId) {
-            return undefined;
-        }
+        // Reopening a file can return to a saved ancestor while the persisted
+        // cursor is at an unsaved autosave/undo state. Reuse that ancestor and
+        // retain its future instead of appending the same restore repeatedly.
         if (this.reconstructContent(tree, candidateId) !== content) {
             return undefined;
         }
@@ -2561,6 +2617,7 @@ export class UndoTreeManager implements vscode.Disposable {
     dispose() {
         this.managerEpoch++;
         this.pendingSaves.clear();
+        this.pendingSaveRecords.clear();
         this.checkpointCompressionQueue.clear();
         this.compressedCheckpoints.clear();
         if (this.autosaveTimer) {

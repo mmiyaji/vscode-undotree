@@ -54,6 +54,22 @@ exports.run = async function () {
     }
 
     if (restarting) {
+        await run('restart and repeated reopen select the saved ancestor without duplicate restores', async () => {
+            const expected = JSON.parse(await fs.readFile(path.join(root, 'saved-ancestor.json'), 'utf8'));
+            const uri = vscode.Uri.parse(expected.uri);
+            for (let round = 0; round < 2; round++) {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                await vscode.window.showTextDocument(doc);
+                await sleep(500);
+                assert.equal(doc.getText(), base + 'saved');
+                const tree = await snapshot(uri);
+                assert.equal(tree.currentId, expected.savedId);
+                assert.deepEqual(tree.nodes.map(n => n.hash), expected.hashes);
+                assert.equal(tree.nodes.some(n => n.label === 'restore'), false);
+                await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                await sleep(500);
+            }
+        });
         await run('saved histories and renamed descendants survive a VS Code restart', async () => {
             const expected = JSON.parse(await fs.readFile(path.join(root, 'expected.json'), 'utf8'));
             for (const item of expected) {
@@ -84,6 +100,21 @@ exports.run = async function () {
         return;
     }
 
+    await run('native undo and redo preserve an unsaved future and a saved branch', async () => {
+        const editor = await open('native-history.md');
+        await append(editor, 'B', false);
+        await vscode.commands.executeCommand('undo');
+        assert.equal(editor.document.getText(), base);
+        await vscode.commands.executeCommand('redo');
+        assert.equal(editor.document.getText(), base + 'B');
+        await vscode.commands.executeCommand('undo');
+        await append(editor, 'C');
+        const tree = await snapshot(editor.document.uri);
+        assert.equal(tree.nodes.length, 3);
+        assert.equal(tree.nodes.find(n => n.id === tree.rootId).children.length, 2);
+        assert.ok(tree.nodes.some(n => n.label === 'edit'));
+        assert.equal(tree.nodes.find(n => n.id === tree.currentId).label, 'save');
+    });
     await run('ordinary saves retain delta nodes', async () => {
         const editor = await open('saves.md');
         for (let i = 0; i < 4; i++) { await append(editor, 'x'); }
@@ -130,6 +161,28 @@ exports.run = async function () {
         await command('redo');
         await sleep(300);
         assert.equal(editor.document.getText(), `X${base}Y`);
+    });
+    await run('persisted unsaved auto state survives discarding the edited file', async () => {
+        await config.update('persistenceMode', 'auto', vscode.ConfigurationTarget.Global);
+        const editor = await open('reopen-saved-ancestor.md');
+        await append(editor, 'saved');
+        const uri = editor.document.uri;
+        const saved = await snapshot(uri);
+        await append(editor, 'unsaved', false);
+        await config.update('autosaveInterval', 5, vscode.ConfigurationTarget.Global);
+        await sleep(5600);
+        await config.update('autosaveInterval', 0, vscode.ConfigurationTarget.Global);
+        const withAuto = await snapshot(uri);
+        assert.equal(withAuto.nodes.length, saved.nodes.length + 1);
+        assert.equal(withAuto.nodes.find(n => n.id === withAuto.currentId).label, 'auto');
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+        await sleep(500);
+        assert.equal(await fs.readFile(uri.fsPath, 'utf8'), base + 'saved');
+        // A closed VS Code model can remain resident. The restart phase forces
+        // a real load of the persisted auto cursor against the saved ancestor.
+        await fs.writeFile(path.join(root, 'saved-ancestor.json'), JSON.stringify({
+            uri: uri.toString(), savedId: saved.currentId, hashes: withAuto.nodes.map(n => n.hash),
+        }));
     });
     await run('folder rename preserves open and closed descendant histories', async () => {
         await config.update('persistenceMode', 'auto', vscode.ConfigurationTarget.Global);
@@ -209,7 +262,7 @@ exports.run = async function () {
     await vscode.commands.executeCommand('workbench.action.files.saveAll');
     await sleep(500);
     const expected = [];
-    for (const name of ['saves.md', 'resume.md', 'after/open.md', 'after/nested/closed.md', 'reopen.md', 'large-full.md']) {
+    for (const name of ['native-history.md', 'saves.md', 'resume.md', 'after/open.md', 'after/nested/closed.md', 'reopen.md', 'large-full.md']) {
         const uri = vscode.Uri.file(path.join(workspace, name));
         const tree = await snapshot(uri);
         if (tree) {

@@ -56,7 +56,8 @@ async function main() {
         page.on('pageerror', error => { errors.push(String(error)); console.error(error); });
         await page.addInitScript(() => {
             window.messages = [];
-            window.acquireVsCodeApi = () => ({ postMessage(message) { window.messages.push(message); }, getState() {}, setState() {} });
+            window.viewState = JSON.parse(sessionStorage.getItem('viewState') || '{}');
+            window.acquireVsCodeApi = () => ({ postMessage(message) { window.messages.push(message); }, getState() { return window.viewState; }, setState(state) { window.viewState = state; sessionStorage.setItem('viewState', JSON.stringify(state)); } });
         });
         await page.goto(pathToFileURL(htmlPath).toString());
         const check = async (name, fn) => { await fn(); console.log(`PASS: ${name}`); };
@@ -204,6 +205,180 @@ async function main() {
             const last = await page.locator('.node.focused').boundingBox();
             assert.ok(last && last.y >= 0 && last.y + last.height <= 181, 'last focused row must fit');
             assert.ok(await page.locator('.node').count() < 150);
+        });
+        await page.setViewportSize({ width: 620, height: 600 });
+        const fixture = Array.from({ length: 1201 }, (_, id) => ({
+            id, parents: id ? [id === 601 ? 0 : id - 1] : [],
+            children: id === 0 ? [1, 601] : id === 600 || id === 1200 ? [] : [id + 1],
+            timestamp: Date.now() + id, label: `save ${id}`, storage: { kind: 'delta' },
+            lineCount: 10 + id, byteCount: 100 + id, formattedTime: '12:00:00',
+            ...(id === 400 ? { note: 'Hidden target', pinned: true } : {}),
+        }));
+        async function renderFixture(uri = 'file:///collapse-test.md', selected = 1200) {
+            await page.evaluate(({ fixture, uri, selected }) => renderState({
+                view: 'tree', nodes: fixture, currentId: selected, sourceUri: uri, rootId: 0,
+                mode: 'navigate', timeFormat: 'time', timeFormatCustom: '', nodeSizeMetric: 'lines',
+                nodeSizeMetricBase: 'parent', showStorageKind: false, colorTheme: 'auto', paused: false,
+            }), { fixture, uri, selected });
+        }
+        await renderFixture();
+        await check('collapsing removes descendants from the virtual list without changing content', async () => {
+            const before = await page.evaluate(() => window.messages.length);
+            await page.evaluate(() => setFocused(nodeIds.indexOf(1), true, true));
+            await page.locator('[data-node-id="1"] .branch-toggle').click();
+            assert.equal(await page.locator('.node[data-node-id="1"]').getAttribute('aria-expanded'), 'false');
+            assert.equal(await page.evaluate(() => nodeIds.length), 602);
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            assert.equal(await page.locator('#tree').evaluate(el => el.classList.contains('virtual-tree')), true);
+            assert.ok(await page.locator('.node').count() < 150);
+            assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 1);
+            assert.equal(await page.evaluate(() => window.messages.length), before);
+            assert.equal(await page.locator('.node[data-node-id="1"] .collapsed-mark').innerText(), '599 hidden states');
+            const disclosureX = await page.locator('.node[data-node-id="1"] .branch-toggle').evaluate(button => {
+                const rect = button.getBoundingClientRect();
+                return rect.left + rect.width / 2 - button.closest('.graph').getBoundingClientRect().left;
+            });
+            assert.equal(disclosureX, 6, 'disclosure replaces the node dot in its lane under the webview CSP');
+            assert.equal(await page.locator('.node[data-node-id="0"] .branch-toggle').count(), 0, 'fork parent does not collapse all branches together');
+        });
+        await check('virtualization uses visible rows and arrows expand or collapse before navigating', async () => {
+            await page.evaluate(() => setFocused(nodeIds.indexOf(601), true, true));
+            await page.keyboard.press('ArrowLeft');
+            assert.deepEqual(await page.evaluate(() => nodeIds), [0, 1, 601]);
+            assert.equal(await page.locator('#tree').evaluate(el => el.classList.contains('virtual-tree')), false);
+            await page.keyboard.press('ArrowRight');
+            assert.equal(await page.evaluate(() => nodeIds.length), 602);
+            assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 601);
+            await page.keyboard.press('ArrowRight');
+            assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 602);
+            await page.keyboard.press('ArrowLeft');
+            assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 601);
+            assert.equal(await page.evaluate(() => nodeIds.length), 602, 'linear edits do not collapse');
+            assert.equal(await page.locator('.node[data-node-id="602"] .branch-toggle').count(), 0);
+            await page.keyboard.press('ArrowLeft');
+            assert.deepEqual(await page.evaluate(() => nodeIds), [0, 1, 601]);
+        });
+        await check('search and pins find hidden descendants and restore the collapsed tree afterwards', async () => {
+            const before = await page.evaluate(() => window.messages.length);
+            await openSearch();
+            await page.locator('#history-search').fill('Hidden target');
+            assert.deepEqual(await page.evaluate(() => nodeIds), [400]);
+            assert.equal(await page.locator('.branch-toggle').count(), 0);
+            await renderFixture();
+            assert.equal(await page.evaluate(() => collapsedBranches().has(1)), true, 'a refresh of filtered results must not unfold their ancestors');
+            await page.locator('#history-search').fill('');
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            await page.locator('#pinned-only').check();
+            assert.deepEqual(await page.evaluate(() => nodeIds), [400]);
+            await page.locator('#pinned-only').uncheck();
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            assert.equal(await page.evaluate(() => window.messages.length), before);
+        });
+        await check('Current reveals only its ancestors and never restores file contents', async () => {
+            const before = await page.evaluate(() => window.messages.length);
+            assert.ok((await page.locator('#current-indicator').innerText()).includes('collapsed'));
+            await page.locator('#show-current').click();
+            assert.equal(await page.evaluate(() => nodeIds.includes(currentId)), true);
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 1200);
+            assert.equal(await page.evaluate(() => window.messages.length), before);
+        });
+        await check('refresh and file switches retain independent collapsed branches', async () => {
+            await renderFixture();
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            await renderFixture('file:///other-collapse.md');
+            assert.equal(await page.evaluate(() => nodeIds.length), 1201);
+            await renderFixture();
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            assert.ok(await page.evaluate(() => window.viewState.collapsedBranches.some(([uri, ids]) => uri === sourceUri && ids.includes(1))));
+        });
+        await check('history navigation into a hidden branch opens its path', async () => {
+            await renderFixture('file:///collapse-test.md', 400);
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), true);
+            assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 400);
+            assert.equal(await page.locator('.node.current').getAttribute('data-node-id'), '400');
+        });
+        await check('pinned shortcuts reveal collapsed ancestors before jumping', async () => {
+            await page.evaluate(() => toggleBranch(1));
+            const before = await page.evaluate(() => window.messages.length);
+            await page.locator('.pinned-link').click();
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), true);
+            assert.equal(await page.evaluate(() => window.messages.length), before + 1);
+            assert.equal(await page.evaluate(() => window.messages.at(-1).nodeId), 400);
+        });
+        await check('connectors span exactly one row and screenshots show expanded and collapsed forks', async () => {
+            await page.evaluate(() => { toggleBranch(1); toggleBranch(601); setFocused(0, true, true); });
+            const row = page.locator('.node[data-node-id="1"]');
+            assert.equal(await row.evaluate(el => el.getBoundingClientRect().height), 22);
+            assert.equal(await row.locator('.graph-segment').first().evaluate(el => el.getBoundingClientRect().height), 22);
+            await page.screenshot({ path: path.join(root, 'collapsed-branches.png') });
+            await page.locator('[data-node-id="1"] .branch-toggle').click();
+            await page.screenshot({ path: path.join(root, 'expanded-branch.png') });
+        });
+        await check('webview recreation restores per-file folding state', async () => {
+            await page.evaluate(() => toggleBranch(1));
+            await page.reload();
+            await renderFixture();
+            assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
+            assert.equal(await page.evaluate(() => nodeIds.includes(currentId)), true);
+        });
+        await check('graph width and label alignment remain fixed across branches, filters and current', async () => {
+            await page.evaluate(() => { setFocused(nodeIds.indexOf(1200), true, true); });
+            const geometry = await page.locator('.node').evaluateAll(rows => rows.map(row => ({
+                graphWidth: row.querySelector('.graph').getBoundingClientRect().width,
+                labelX: row.querySelector('.node-label').getBoundingClientRect().left,
+            })));
+            assert.ok(geometry.every(row => row.graphWidth === 42));
+            assert.ok(geometry.every(row => Math.abs(row.labelX - geometry[0].labelX) < 0.1));
+            const badgeGap = await page.locator('.node.current').evaluate(row =>
+                row.querySelector('.current-badge').getBoundingClientRect().left - row.querySelector('.node-label').getBoundingClientRect().right);
+            assert.ok(badgeGap >= 0 && badgeGap <= 5, 'Current follows the label without a disclosure placeholder');
+            await openSearch();
+            await page.locator('#history-search').fill('Hidden target');
+            assert.equal(await page.locator('.node-label').evaluate(el => el.getBoundingClientRect().left), geometry[0].labelX);
+            await page.locator('#show-current').click();
+        });
+        await check('wide forks keep bounded graph geometry and valid folding', async () => {
+            const wide = Array.from({ length: 1501 }, (_, id) => ({
+                id, parents: id ? [0] : [], children: id ? [] : Array.from({ length: 1500 }, (_, i) => i + 1),
+                timestamp: id, label: 'save', lineCount: id, byteCount: id, storage: { kind: 'full' },
+            }));
+            await page.evaluate(wide => renderState({ view: 'tree', nodes: wide, currentId: 1500,
+                sourceUri: 'file:///wide.md', rootId: 0, mode: 'navigate', nodeSizeMetric: 'lines', colorTheme: 'auto', paused: false }), wide);
+            assert.equal(await page.evaluate(() => nodeIds.length), 1501);
+            assert.ok(await page.locator('.node').count() < 150);
+            assert.equal(await page.locator('.branch-toggle').count(), 0, 'leaf branches have nothing to fold');
+            assert.ok(await page.locator('.graph-dot').evaluateAll(dots => dots.every(dot => Number(dot.getAttribute('cx')) <= 36)));
+        });
+        await check('compact dark sidebar matches the selected fixed-lane direction', async () => {
+            await page.setViewportSize({ width: 340, height: 560 });
+            await page.evaluate(() => {
+                const theme = {
+                    '--vscode-font-family': 'Segoe UI, sans-serif', '--vscode-sideBar-background': '#181818',
+                    '--vscode-foreground': '#cccccc', '--vscode-editorLineNumber-foreground': '#858585',
+                    '--vscode-button-background': '#007acc', '--vscode-button-foreground': '#ffffff',
+                    '--vscode-list-activeSelectionBackground': '#094771', '--vscode-list-activeSelectionForeground': '#ffffff',
+                    '--vscode-list-hoverBackground': '#2a2d2e', '--vscode-descriptionForeground': '#999999',
+                };
+                for (const [name, value] of Object.entries(theme)) { document.documentElement.style.setProperty(name, value); }
+                document.body.style.background = '#181818'; document.body.style.color = '#cccccc';
+                const compact = Array.from({ length: 19 }, (_, id) => ({
+                    id, parents: id ? [id === 12 ? 6 : id - 1] : [],
+                    children: id === 6 ? [7, 12] : id === 11 || id === 18 ? [] : [id + 1],
+                    timestamp: id, label: id === 0 ? 'initial' : id === 18 ? 'auto' : 'save',
+                    lineCount: 13 + id, byteCount: 100 + id, formattedTime: '20:54:' + String(id).padStart(2, '0'),
+                    storage: { kind: 'delta' },
+                }));
+                renderState({ view: 'tree', nodes: compact, currentId: 18, sourceUri: 'file:///compact.md',
+                    rootId: 0, mode: 'navigate', timeFormat: 'time', nodeSizeMetric: 'lines',
+                    nodeSizeMetricBase: 'parent', colorTheme: 'blue', paused: false });
+                toggleBranch(7);
+                setFocused(nodeIds.indexOf(18), false, true);
+                window.scrollTo(0, 0);
+            });
+            assert.equal(await page.locator('.branch-toggle').count(), 2);
+            assert.equal(await page.locator('.node.current .node-label').innerText(), 'auto');
+            await page.screenshot({ path: path.join(root, 'fixed-graph-dark.png'), fullPage: true });
         });
         assert.deepEqual(errors, [], 'renderer has no uncaught exceptions');
         console.log(`UI regression artifacts: ${root}`);

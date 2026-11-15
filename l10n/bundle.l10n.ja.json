@@ -281,5 +281,10 @@
   "Unknown history node": "不明な履歴",
   "Navigate": "履歴移動",
   "Diff": "差分",
-  "Search": "検索"
+  "Search": "検索",
+  "Current node is in a collapsed branch": "現在の履歴は折りたたんだ枝の中にあります",
+  "Collapse branch": "枝を折りたたむ",
+  "Expand branch": "枝を展開する",
+  "{0} hidden states": "{0} 件の履歴を非表示",
+  "Collapse or move to parent; expand or move to child": "折りたたむ／親へ移動・展開する／子へ移動"
 }

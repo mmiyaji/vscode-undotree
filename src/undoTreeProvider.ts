@@ -823,7 +823,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   }
   #tree { min-width: max-content; }
   #tree.plain-view { min-width: 0; }
-  .node { display: flex; align-items: center; gap: 4px; padding: 2px 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
+  .node { display: flex; align-items: center; gap: 4px; height: 22px; box-sizing: border-box; padding: 0 4px; cursor: pointer; border-radius: 3px; user-select: none; white-space: nowrap; }
   #tree.virtual-tree .node { height: 22px; box-sizing: border-box; }
   .node { scroll-margin-top: 42px; }
   .node:hover { background: var(--vscode-list-hoverBackground); }
@@ -838,8 +838,19 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .diff-base { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--undotree-accent-strong) 70%, transparent); }
   .diff-base-badge { font-size: 9px; color: var(--undotree-accent-strong); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
   .current-badge { font-size: 9px; color: var(--vscode-list-activeSelectionForeground); border: 1px solid currentColor; border-radius: 999px; padding: 0 4px; flex-shrink: 0; }
-  .graph { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--vscode-editorLineNumber-foreground); }
-  .graph svg.graph-segment { width: 12px; height: 14px; display: block; overflow: visible; }
+  .graph { position: relative; display: inline-flex; align-items: center; width: 42px; flex: 0 0 42px; height: 22px; color: var(--vscode-editorLineNumber-foreground); }
+  .graph svg.graph-segment { width: 42px; height: 22px; display: block; overflow: hidden; }
+  .graph .graph-dot { fill: var(--vscode-sideBar-background, #181818); stroke: currentColor; stroke-width: 1.5; }
+  .node.current .graph-dot { fill: var(--undotree-accent-strong); stroke: var(--undotree-accent-strong); }
+  .node .node-label { flex: 0 0 auto; }
+  .tree-header .label-col { padding-left: 46px; }
+  .node.current .graph, .node.focused .graph { color: currentColor; }
+  .node .branch-toggle { position: absolute; left: var(--branch-x); top: 3px; transform: translateX(-50%); width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: var(--vscode-sideBar-background, #181818); color: inherit; }
+  .node.current .branch-toggle { background: var(--undotree-current); }
+  .branch-toggle:hover { background: var(--vscode-toolbar-hoverBackground); }
+  .branch-toggle:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+  .branch-toggle svg { width: 12px; height: 12px; }
+  .collapsed-mark { color: var(--vscode-descriptionForeground); }
   .storage { font-size: 9px; opacity: 0.5; border: 1px solid currentColor; border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
   .label { opacity: var(--undotree-label-opacity); }
   .right-area { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-left: 6px; position: sticky; right: 4px; background: var(--vscode-sideBar-background); }
@@ -968,7 +979,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       <div class="help-section-title">${tr('Navigation')}</div>
       <div class="shortcut-row"><span class="shortcut-key">↑ / ↓, j / k</span><span class="shortcut-desc">${tr('Move focus')}</span></div>
       <div class="shortcut-row"><span class="shortcut-key">Enter / Space</span><span class="shortcut-desc">${tr('Jump or preview diff')}</span></div>
-      <div class="shortcut-row"><span class="shortcut-key">← / →</span><span class="shortcut-desc">${tr('Move to parent or child')}</span></div>
+      <div class="shortcut-row"><span class="shortcut-key">← / →</span><span class="shortcut-desc">${tr('Collapse or move to parent; expand or move to child')}</span></div>
       <div class="shortcut-row"><span class="shortcut-key">Tab / Shift+Tab</span><span class="shortcut-desc">${tr('Move to the next or previous control')}</span></div>
       <div class="shortcut-row"><span class="shortcut-key">n / N</span><span class="shortcut-desc">${tr('Jump to next or previous noted node')}</span></div>
     </div>
@@ -1002,6 +1013,41 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   let diffBaseNodeId = null;
   let searchExpanded = false;
   const searchMetadataCache = new Map();
+  const savedViewState = vscode.getState() || {};
+  const collapsedByUri = new Map(Array.isArray(savedViewState.collapsedBranches)
+    ? savedViewState.collapsedBranches.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' && Array.isArray(entry[1]))
+      .map(([uri, ids]) => [uri, new Set(ids.filter(Number.isSafeInteger))]) : []);
+  let filterActiveInTree = false;
+  let branchRootIds = new Set();
+  function collapsedBranches() {
+    if (!collapsedByUri.has(sourceUri)) { collapsedByUri.set(sourceUri, new Set()); }
+    return collapsedByUri.get(sourceUri);
+  }
+  function saveCollapsedBranches() {
+    vscode.setState({ ...savedViewState, collapsedBranches: [...collapsedByUri].map(([uri, ids]) => [uri, [...ids]]) });
+  }
+  function revealAncestors(nodeId, map) {
+    const collapsed = collapsedBranches();
+    const pending = [...(map[nodeId]?.parents || [])];
+    const seen = new Set();
+    let changed = false;
+    while (pending.length) {
+      const id = pending.pop();
+      if (seen.has(id)) { continue; }
+      seen.add(id);
+      changed = collapsed.delete(id) || changed;
+      pending.push(...(map[id]?.parents || []));
+    }
+    if (changed) { saveCollapsedBranches(); }
+  }
+  function toggleBranch(nodeId) {
+    if (filterActiveInTree || !branchRootIds.has(nodeId) || !treeMap[nodeId]?.children.length) { return; }
+    const collapsed = collapsedBranches();
+    if (collapsed.has(nodeId)) { collapsed.delete(nodeId); } else { collapsed.add(nodeId); }
+    saveCollapsedBranches();
+    buildTree(nodes, currentId, rootId, nodeId);
+    setFocused(nodeIds.indexOf(nodeId), true, true);
+  }
   const i18n = {
     noteDoubleClickToEdit: ${serializeForInlineScript(tr(' (double-click to edit)'))},
     noteAdd: ${serializeForInlineScript(tr('Add note'))},
@@ -1046,6 +1092,10 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     headerTime: ${serializeForInlineScript(tr('Time'))},
     current: ${serializeForInlineScript(tr('Current'))},
     currentHidden: ${serializeForInlineScript(tr('Current node is hidden by filters'))},
+    currentCollapsed: ${serializeForInlineScript(tr('Current node is in a collapsed branch'))},
+    collapseBranch: ${serializeForInlineScript(tr('Collapse branch'))},
+    expandBranch: ${serializeForInlineScript(tr('Expand branch'))},
+    hiddenStates: ${serializeForInlineScript(tr('{0} hidden states'))},
     noMatches: ${serializeForInlineScript(tr('No matching history nodes'))},
     matchingCount: ${serializeForInlineScript(tr('{0} matching nodes / {1} total'))},
     navigateMode: ${serializeForInlineScript(tr('History navigation mode'))},
@@ -1453,6 +1503,10 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       e.preventDefault();
       if (focusedIndex >= 0) {
         const node = treeMap[nodeIds[focusedIndex]];
+        if (!filterActiveInTree && branchRootIds.has(node?.id) && node?.children.length && !collapsedBranches().has(node.id)) {
+          toggleBranch(node.id);
+          return;
+        }
         const parentId = node?.parents?.[node.parents.length - 1];
         const idx = parentId !== undefined ? nodeIds.indexOf(parentId) : -1;
         if (idx >= 0) { setFocused(idx, true); }
@@ -1461,6 +1515,10 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       e.preventDefault();
       if (focusedIndex >= 0) {
         const node = treeMap[nodeIds[focusedIndex]];
+        if (!filterActiveInTree && branchRootIds.has(node?.id) && node?.children.length && collapsedBranches().has(node.id)) {
+          toggleBranch(node.id);
+          return;
+        }
         const childId = node?.children?.[node.children.length - 1];
         const idx = childId !== undefined ? nodeIds.indexOf(childId) : -1;
         if (idx >= 0) { setFocused(idx, true); }
@@ -1543,10 +1601,18 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const latestId = nodes.reduce((best, n) => n.timestamp > map[best].timestamp ? n.id : best, nodes[0].id);
     const pinnedContainer = document.getElementById('pinned');
     const container = document.getElementById('tree');
-    const virtual = nodes.length > 500;
     const query = (document.getElementById('history-search')?.value ?? '').trim().toLocaleLowerCase();
     const onlyPinned = !!document.getElementById('pinned-only')?.checked;
     const filterActive = query.length > 0 || onlyPinned;
+    filterActiveInTree = filterActive;
+    branchRootIds = new Set(nodes.filter(node => node.parents.some(id => map[id]?.children.length > 1)).map(node => node.id));
+    const collapsed = collapsedBranches();
+    let pruned = false;
+    for (const id of collapsed) {
+      if (!branchRootIds.has(id) || !map[id]?.children.length) { collapsed.delete(id); pruned = true; }
+    }
+    if (pruned) { saveCollapsedBranches(); }
+    if (!filterActive && preferredFocusId !== undefined) { revealAncestors(preferredFocusId, map); }
     const isMatch = (node) => {
       if (!query) { return !onlyPinned || !!node.pinned; }
       const signature = JSON.stringify([node.timestamp, node.note ?? '', node.formattedTime ?? '']);
@@ -1580,7 +1646,6 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         : i18n.currentHidden;
       currentIndicator.setAttribute('aria-live', 'polite');
     }
-    container.classList.toggle('virtual-tree', virtual);
     container.classList.remove('plain-view');
     pinnedContainer.innerHTML = '';
     container.innerHTML = '';
@@ -1621,6 +1686,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
             '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
             (node.formattedTime ? '<span class="right-area"><span class="metrics"><span class="meta-col size-diff empty"></span><span class="meta-col size-total empty"></span><span class="time">' + escHtml(node.formattedTime) + '</span></span></span>' : '');
           row.addEventListener('click', () => {
+            revealAncestors(node.id, map);
+            buildTree(nodes, currentId, rootId, node.id);
             const idx = nodeIds.indexOf(node.id);
             if (idx >= 0) { setFocused(idx); }
             if (mode !== 'diff') {
@@ -1645,50 +1712,116 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       pinnedContainer.appendChild(wrap);
     }
 
-    function renderSegment(kind) {
-      switch (kind) {
-        case 'pipe':
-          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.75"/></svg>';
-        case 'tee':
-          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 14 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
-        case 'elbow':
-          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"><path d="M6 0 L6 7 M6 7 L12 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/></svg>';
-        default:
-          return '<svg class="graph-segment" viewBox="0 0 12 14" aria-hidden="true"></svg>';
+    // Build a spanning layout once. Linear edits retain their lane; sibling
+    // branches reserve separate lanes until their entire subtree is visited.
+    // Lane coordinates stay inside the fixed graph column, never labels.
+    const layout = [];
+    const freeLanes = [];
+    let nextLane = 1;
+    const tasks = [{ id: rootId, parentId: undefined, lane: 0, level: 1 }];
+    while (tasks.length) {
+      const entry = tasks.pop();
+      if (entry.release !== undefined) { freeLanes.push(entry.release); continue; }
+      if (visitedNodes.has(entry.id) || !map[entry.id]) { continue; }
+      visitedNodes.add(entry.id);
+      layout.push(entry);
+      const children = map[entry.id].children.filter(id => map[id] && !visitedNodes.has(id));
+      const childTasks = children.map((id, index) => {
+        let lane = entry.lane;
+        if (index > 0) {
+          lane = freeLanes.pop() ?? nextLane++;
+        }
+        return { id, parentId: entry.id, lane, level: entry.level + (children.length > 1 ? 1 : 0), ownLane: index > 0 };
+      });
+      for (let i = childTasks.length - 1; i >= 0; i--) {
+        const child = childTasks[i];
+        if (child.ownLane) { tasks.push({ release: child.lane }); }
+        tasks.push(child);
       }
     }
-
-    const traversal = [{ id: rootId, prefixParts: [], isLast: false, parentChildCount: 0, level: 1 }];
-    function renderNode(id, prefixParts, isLast, parentChildCount, index) {
+    // Four display lanes keep arbitrarily deep/wide trees inside the gutter.
+    // Excess lanes share the outer rail; topology and folding still use IDs.
+    for (const entry of layout) { entry.lane = Math.min(entry.lane, 3); }
+    const laneX = lane => 6 + lane * 10;
+    const entries = [];
+    const hidden = new Set();
+    const subtreeSizes = new Map(layout.map(entry => [entry.id, 1]));
+    for (let i = layout.length - 1; i >= 0; i--) {
+      const entry = layout[i];
+      if (entry.parentId !== undefined) {
+        subtreeSizes.set(entry.parentId, subtreeSizes.get(entry.parentId) + subtreeSizes.get(entry.id));
+      }
+    }
+    for (const entry of layout) {
+      if (filterActive) {
+        if (isMatch(map[entry.id])) { entries.push({ ...entry, level: 1 }); }
+      } else {
+        if (hidden.has(entry.parentId)) { hidden.add(entry.id); continue; }
+        entries.push(entry);
+        if (collapsed.has(entry.id)) { hidden.add(entry.id); }
+      }
+    }
+    entries.forEach(entry => nodeIds.push(entry.id));
+    const entryById = new Map(entries.map((entry, index) => [entry.id, { ...entry, index }]));
+    const starts = new Map();
+    const ends = new Map();
+    if (!filterActive) {
+      for (const entry of entries) {
+        const parent = entryById.get(entry.parentId);
+        if (!parent) { continue; }
+        if (!starts.has(parent.id)) { starts.set(parent.id, []); }
+        starts.get(parent.id).push(entry.lane);
+        if (!ends.has(entry.id)) { ends.set(entry.id, []); }
+        ends.get(entry.id).push(entry.lane);
+      }
+    }
+    // Sweep edge intervals, keeping only occupied lanes rather than walking
+    // every intervening row for each edge (important for wide fork histories).
+    const activeLanes = new Map();
+    for (const entry of entries) {
+      entry.topLanes = [...activeLanes.keys()];
+      for (const lane of ends.get(entry.id) || []) {
+        const count = activeLanes.get(lane) - 1;
+        if (count) { activeLanes.set(lane, count); } else { activeLanes.delete(lane); }
+      }
+      entry.throughLanes = [...activeLanes.keys()];
+      entry.startLanes = starts.get(entry.id) || [];
+      for (const lane of entry.startLanes) { activeLanes.set(lane, (activeLanes.get(lane) || 0) + 1); }
+    }
+    function renderGraph(entry) {
+      const x = laneX(entry.lane);
+      const line = (lane, from, to) => '<path stroke="' + (lane ? 'var(--undotree-accent)' : 'currentColor') + '" d="M' + laneX(lane) + ' ' + from + 'V' + to + '"/>';
+      const paths = filterActive ? '' :
+        entry.topLanes.map(lane => line(lane, 0, 11)).join('') +
+        entry.throughLanes.map(lane => line(lane, 11, 22)).join('') +
+        [...new Set(entry.startLanes)].map(lane => '<path stroke="' + (lane ? 'var(--undotree-accent)' : 'currentColor') + '" d="M' + x + ' 11 C' + x + ' 18 ' + laneX(lane) + ' 15 ' + laneX(lane) + ' 22"/>').join('');
+      const canFold = !filterActive && branchRootIds.has(entry.id) && map[entry.id].children.length > 0;
+      const toggle = canFold ? '<button class="branch-toggle" tabindex="-1" title="' + escHtml(collapsed.has(entry.id) ? i18n.expandBranch : i18n.collapseBranch) + '" aria-label="' + escHtml(collapsed.has(entry.id) ? i18n.expandBranch : i18n.collapseBranch) + '"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="' + (collapsed.has(entry.id) ? 'M4 2 L8 6 L4 10' : 'M2 4 L6 8 L10 4') + '" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></button>' : '';
+      return '<span class="graph"><svg class="graph-segment" viewBox="0 0 42 22" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1">' + paths + '</g>' +
+        (!canFold ? '<circle class="graph-dot" cx="' + (filterActive ? 6 : x) + '" cy="11" r="3"/>' : '') + '</svg>' + toggle + '</span>';
+    }
+    function renderNode(id, index) {
       const node = map[id];
       if (!node) {
         return;
       }
 
       const isCurrent = node.id === currentId;
-      const isRoot = id === rootId;
       const storageKind =
         node.storage?.kind === 'full' ? 'F' :
         node.storage?.kind === 'delta' ? 'D' :
         '';
-      const isDirectBranchChild = !isRoot && parentChildCount > 1;
-      const graphHtml = filterActive ? '' : prefixParts.map(renderSegment).join('') +
-        (!isRoot ? renderSegment(isDirectBranchChild ? (isLast ? 'elbow' : 'tee') : (node.children.length === 1 ? 'tee' : 'elbow')) : '');
-
       const div = document.createElement('div');
       div.className = 'node' + (isCurrent ? ' current' : '');
       div.setAttribute('role', 'treeitem');
       div.setAttribute('aria-level', String(entries[index].level));
       div.setAttribute('aria-current', isCurrent ? 'location' : 'false');
+      if (!filterActive && branchRootIds.has(id) && node.children.length) { div.setAttribute('aria-expanded', String(!collapsed.has(id))); }
+      div.dataset.nodeId = String(id);
       div.setAttribute('aria-label', [node.note || node.label, node.formattedTime, isCurrent ? i18n.current : ''].filter(Boolean).join(', '));
       div.title = mode === 'diff' ? i18n.titleClickDiff : i18n.titleClickJump;
-      const noteHtml = node.note
-        ? '<span class="note note-text" data-node-id="' + node.id + '" title="' + escHtml(node.note) + i18n.noteDoubleClickToEdit + '">' + escHtml(node.note) + '</span>' +
-          '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.contextEditNote + '">&#9998;</span>'
-        : '<span class="note-edit note-action" data-node-id="' + node.id + '" title="' + i18n.noteAdd + '">&#9998;</span>';
-      const graphWrapHtml = graphHtml
-        ? '<span class="graph">' + graphHtml + '</span>'
-        : '';
+      const noteHtml = '<span class="note-edit note-action" data-node-id="' + id + '" title="' + escHtml(node.note ? i18n.contextEditNote : i18n.noteAdd) + '">&#9998;</span>';
+      const graphWrapHtml = renderGraph(entries[index]);
       const parentId = node.parents?.length ? node.parents[node.parents.length - 1] : undefined;
       const refNode = nodeSizeMetricBase === 'current'
         ? ((isCurrent && node.id !== 0) ? node : map[currentId])
@@ -1698,17 +1831,24 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
             ? map[parentId]
             : null;
       const sizeParts = formatSizeDiff(node, refNode);
-      const labelHtml = node.note ? '' : '<span class="label">' + escHtml(node.label) + '</span>';
+      const labelHtml = '<span class="node-label label">' + escHtml(node.note || node.label) + '</span>';
       div.innerHTML =
         graphWrapHtml +
-        (isCurrent ? '<span class="current-badge">' + escHtml(i18n.current) + '</span>' : '') +
         labelHtml +
+        (isCurrent ? '<span class="current-badge">' + escHtml(i18n.current) + '</span>' : '') +
+        (!filterActive && collapsed.has(id) ? '<span class="collapsed-mark">' + escHtml(i18n.hiddenStates.replace('{0}', String(subtreeSizes.get(id) - 1))) + '</span>' : '') +
         (mode === 'diff' && diffCompareMode === 'pair' && node.id === diffBaseNodeId ? '<span class="diff-base-badge">' + escHtml(i18n.badgeBase) + '</span>' : '') +
         (mode === 'diff' && ((diffCompareMode === 'current' && !isCurrent) || (diffCompareMode === 'pair' && node.id !== diffBaseNodeId)) ? '<span class="diff-target-badge">' + escHtml(i18n.badgeDiff) + '</span>' : '') +
         (node.isEmpty ? '<span class="empty-badge">(empty)</span>' : '') +
         noteHtml +
         (showStorageKind && storageKind ? '<span class="storage">' + storageKind + '</span>' : '') +
         '<span class="right-area"><span class="metrics">' + sizeParts.diffHtml + sizeParts.totalHtml + (node.formattedTime ? '<span class="time' + (node.id === latestId ? ' latest' : '') + '">' + escHtml(node.formattedTime) + '</span>' : '<span class="time empty"></span>') + '</span></span>';
+      const branchToggle = div.querySelector('.branch-toggle');
+      branchToggle?.style.setProperty('--branch-x', laneX(entries[index].lane) + 'px');
+      branchToggle?.addEventListener('click', (event) => {
+        event.stopPropagation();
+        toggleBranch(id);
+      });
       const noteAction = div.querySelector('.note-action');
       if (noteAction) {
         noteAction.addEventListener('click', (event) => {
@@ -1716,7 +1856,8 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
           send('editNote', { nodeId: node.id, sourceUri });
         });
       }
-      const noteText = div.querySelector('.note-text');
+      const noteText = node.note ? div.querySelector('.node-label') : null;
+      if (noteText) { noteText.title = node.note + i18n.noteDoubleClickToEdit; }
       if (noteText) {
         noteText.addEventListener('dblclick', (event) => {
           event.stopPropagation();
@@ -1751,27 +1892,10 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
       return div;
     }
 
-        const entries = [];
-        while (traversal.length > 0) {
-          const entry = traversal.pop();
-          if (visitedNodes.has(entry.id) || !map[entry.id]) { continue; }
-          visitedNodes.add(entry.id);
-          if (!filterActive || isMatch(map[entry.id])) {
-            entries.push(filterActive ? { ...entry, prefixParts: [], level: 1 } : entry);
-            nodeIds.push(entry.id);
-          }
-          const node = map[entry.id];
-          const isRoot = entry.id === rootId;
-          const isDirectBranchChild = !isRoot && entry.parentChildCount > 1;
-          const isBranchParent = !isRoot && node.children.length > 1;
-          const prefixParts = entry.prefixParts;
-          const isLast = entry.isLast;
-          const childPrefix = (isDirectBranchChild || isBranchParent)
-            ? [...prefixParts, isLast ? 'blank' : 'pipe'] : prefixParts;
-          for (let i = node.children.length - 1; i >= 0; i--) {
-            traversal.push({ id: node.children[i], prefixParts: childPrefix,
-              isLast: i === node.children.length - 1, parentChildCount: node.children.length, level: entry.level + 1 });
-          }
+        const virtual = entries.length > 500;
+        container.classList.toggle('virtual-tree', virtual);
+        if (!filterActive && currentIndicator && !nodeIds.includes(currentId)) {
+          currentIndicator.textContent = i18n.currentCollapsed;
         }
         if (entries.length === 0) {
           container.innerHTML = filterActive ? '<div class="empty">' + escHtml(i18n.noMatches) + '</div>' : '';
@@ -1800,7 +1924,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
           if (virtual) { spacer(start * 22); }
           for (let index = start; index < end; index++) {
             const entry = entries[index];
-            fragment.appendChild(renderNode(entry.id, entry.prefixParts, entry.isLast, entry.parentChildCount, index));
+            fragment.appendChild(renderNode(entry.id, index));
           }
           if (virtual) { spacer((entries.length - end) * 22); }
           const focusedNodeWasActive = rows.contains(document.activeElement);
