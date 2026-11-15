@@ -1,5 +1,15 @@
 # Prototype Instructions
 
+Use only mmiyaji as the provider name in legal-page body text, in both Japanese and English.
+
+Show actual Diff and notes/pins screenshots with concrete usage steps and full-size image links. Translate descriptions and captions; identify Japanese-only screenshot UI explicitly in English. Keep the existing branching explanation and compact hero.
+
+Demo screenshots must contain realistic, readable code, not long repeated dummy strings. Use a compact actual VS Code window with purposeful changes such as stock filtering, price sorting, and currency formatting in products.ts. Keep captions and checkpoint notes consistent with the screenshot.
+
+Keep Terms of Use (/terms), Privacy Policy (/privacy), and the author's website (https://ruhenheim.org/) linked from the footer. Legal pages must support the same language and theme controls. Describe actual extension storage behavior, including persisted unsaved edits and workspace-scoped deletion; do not add conditions that restrict the MIT License.
+
+The language switcher follows the user's globe-button reference: show the selected language and a small chevron in a bordered button; open a right-aligned rounded menu below it with Japanese and English rows, a blue vertical indicator beside the selected language, and a subtle shadow. Support both site themes, outside-click/Escape dismissal, keyboard selection, and saved language preference.
+
 The branching diagram must switch between Japanese and English image variants with the language dropdown; translating alternative text alone is insufficient.
 
 Hero imagery must use a compact actual VS Code window with Undo Tree occupying roughly half the width and visible branching history. Prefer clear branch-point and branch notes over a mostly empty full editor screenshot.

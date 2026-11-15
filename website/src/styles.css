@@ -184,20 +184,85 @@ h2 {
   align-items: center;
 }
 .language-control {
-  display: flex;
+  position: relative;
+}
+.language-trigger {
+  display: inline-flex;
   align-items: center;
   gap: 7px;
-  color: var(--muted);
-}
-select {
+  justify-content: center;
+  min-width: 100px;
+  height: 36px;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 5px 7px;
+  border-radius: 5px;
+  padding: 0 10px;
+  font-family: inherit;
   font-size: 13px;
-  min-height: 34px;
+  font-weight: 600;
   cursor: pointer;
+}
+.language-trigger > .codicon-globe {
+  font-size: 14px;
+}
+.language-trigger > .codicon:last-child {
+  font-size: 12px;
+  color: var(--muted);
+}
+.language-trigger:hover {
+  background: var(--hover);
+}
+.language-trigger[aria-expanded="true"] {
+  background: var(--bg);
+}
+.language-trigger:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.language-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 140px;
+  margin: 0;
+  padding: 5px 0;
+  background: var(--control);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+  list-style: none;
+}
+:root[data-theme="light"] .language-menu {
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(16 24 40 / 18%);
+}
+.language-option {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 14px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.language-option > span {
+  display: block;
+  border-left: 3px solid transparent;
+  padding-left: 8px;
+  line-height: 14px;
+}
+.language-option[aria-selected="true"] > span {
+  border-left-color: var(--blue);
+}
+.language-option:hover {
+  background: var(--hover);
+}
+.language-option:focus-visible {
+  background: var(--hover);
+  outline: 2px solid var(--blue);
+  outline-offset: -3px;
 }
 .theme-toggle {
   display: grid;
@@ -302,6 +367,60 @@ select {
 }
 .feature-list {
   border-top: 1px solid var(--line);
+}
+.feature-demo + .feature-demo {
+  margin-top: 40px;
+  padding-top: 32px;
+  border-top: 1px solid var(--line);
+}
+.feature-demo h3 {
+  font-size: 20px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.feature-demo p,
+.demo-steps {
+  font-size: 14px;
+  line-height: 1.9;
+}
+.demo-steps {
+  margin: 16px 0 22px;
+  padding-left: 24px;
+}
+.demo-steps li + li {
+  margin-top: 4px;
+}
+.demo-image-link {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  background: #111315;
+  cursor: zoom-in;
+}
+.demo-image-link img {
+  width: 100%;
+}
+.feature-demo figcaption {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.9;
+}
+.feature-demo figcaption a {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+.demo-detail {
+  margin-top: 22px;
+  padding-left: 18px;
+  border-left: 2px solid var(--line);
+}
+.demo-detail h4 {
+  font-size: 15px;
+  margin: 0 0 6px;
 }
 .feature-list > div {
   display: grid;
@@ -410,10 +529,43 @@ kbd {
   display: flex;
   justify-content: space-between;
   gap: 20px;
+  flex-wrap: wrap;
 }
-.footer > div {
+.footer-links {
   display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+.legal-page {
+  max-width: 760px;
+  overflow-wrap: anywhere;
+}
+.legal-back {
+  display: inline-block;
+  margin-bottom: 24px;
+}
+.legal-page > p {
+  margin-top: 20px;
+}
+.legal-page section {
+  margin-top: 36px;
+}
+.legal-page h2 {
+  font-size: 20px;
+  margin-bottom: 16px;
+}
+.legal-page a {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.legal-references {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-top: 36px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
 }
 .sr-only {
   position: absolute;
@@ -533,9 +685,6 @@ kbd {
   .preferences {
     gap: 8px;
   }
-  .language-control > .codicon {
-    display: none;
-  }
   .content {
     padding: 28px 20px 0;
   }
@@ -578,9 +727,6 @@ kbd {
   }
   .footer {
     padding-inline: 20px;
-  }
-  .language-control select {
-    max-width: 95px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

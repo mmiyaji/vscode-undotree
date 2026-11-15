@@ -1,5 +1,8 @@
 import { useState, useEffect } from "react";
 import { SettingsGuide } from "./SettingsGuide.jsx";
+import { LanguageMenu } from "./LanguageMenu.jsx";
+import { LegalPage } from "./LegalPage.jsx";
+import { FeatureDemos } from "./FeatureDemos.jsx";
 const repo = "https://github.com/mmiyaji/vscode-undotree";
 const marketplace =
   "https://marketplace.visualstudio.com/items?itemName=mmiyaji.vscode-undotree";
@@ -97,10 +100,14 @@ export function App() {
   const [active, setActive] = useState("overview");
   const t = copy[lang];
   const ja = lang === "ja";
+  const path = window.location.pathname.replace(/\/$/, "");
+  const legalPage = path === "/terms" ? "terms" : path === "/privacy" ? "privacy" : null;
+  const home = legalPage ? "/" : "";
   const sections = [
     ["overview", ja ? "概要" : "Overview", "file-text"],
     ["how-it-works", ja ? "履歴ツリー" : "History tree", "git-merge"],
     ["features", ja ? "機能" : "Features", "diff"],
+    ["demos", ja ? "画面で見る使い方" : "Using the extension", "device-camera"],
     ["settings", ja ? "設定ガイド" : "Settings", "settings-gear"],
     ["keyboard", ja ? "キーボード操作" : "Keyboard", "keyboard"],
     ["install", t.nav[2], "cloud-download"],
@@ -110,10 +117,19 @@ export function App() {
     localStorage.setItem("undotree-site-language", lang);
   }, [lang]);
   useEffect(() => {
+    const title = legalPage === "terms" ? (ja ? "利用規約" : "Terms of Use") : (ja ? "プライバシーポリシー" : "Privacy Policy");
+    document.title = legalPage ? `${title} | vscode-undotree` : "vscode-undotree — VS Code 拡張機能";
+    document.querySelector('link[rel="canonical"]')?.setAttribute("href", `https://undotree.ruhenheim.org/${legalPage || ""}`);
+  }, [legalPage, ja]);
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("undotree-site-theme", theme);
   }, [theme]);
   useEffect(() => {
+    const initialSection = window.location.hash.slice(1);
+    if (initialSection && !legalPage) {
+      document.getElementById(initialSection)?.scrollIntoView();
+    }
     const update = () => {
       let current = "overview";
       for (const [id] of sections) {
@@ -152,16 +168,16 @@ export function App() {
         {ja ? "本文へ移動" : "Skip to content"}
       </a>
       <aside className="sidebar">
-        <a className="sidebar-brand" href="#overview">
-          <img src="./assets/icon.png" alt="" width="76" height="76" />
+        <a className="sidebar-brand" href={`${home}#overview`}>
+          <img src="/assets/icon.png" alt="" width="76" height="76" />
           <span>vscode-undotree</span>
         </a>
         <nav aria-label={ja ? "目次" : "Contents"}>
           {sections.map(([id, label, icon]) => (
             <a
-              href={`#${id}`}
+              href={`${home}#${id}`}
               key={id}
-              aria-current={active === id ? "location" : undefined}
+              aria-current={!legalPage && active === id ? "location" : undefined}
             >
               <i className={`codicon codicon-${icon}`} aria-hidden="true" />
               {label}
@@ -175,29 +191,16 @@ export function App() {
       </aside>
       <div className="document">
         <header className="topbar">
-          <a className="wordmark" href="#overview">
+          <a className="wordmark" href={`${home}#overview`}>
             vscode-undotree
           </a>
           <nav aria-label={ja ? "メインナビゲーション" : "Main navigation"}>
-            <a href="#features">{t.nav[0]}</a>
-            <a href="#how-it-works">{t.nav[1]}</a>
-            <a href="#install">{t.nav[2]}</a>
+            <a href={`${home}#features`}>{t.nav[0]}</a>
+            <a href={`${home}#how-it-works`}>{t.nav[1]}</a>
+            <a href={`${home}#install`}>{t.nav[2]}</a>
           </nav>
           <div className="preferences">
-            <label className="language-control">
-              <i className="codicon codicon-globe" aria-hidden="true" />
-              <span className="sr-only">
-                {ja ? "表示言語" : "Display language"}
-              </span>
-              <select
-                value={lang}
-                onChange={(e) => setLang(e.target.value)}
-                aria-label={ja ? "表示言語" : "Display language"}
-              >
-                <option value="ja">日本語</option>
-                <option value="en">English</option>
-              </select>
-            </label>
+            <LanguageMenu value={lang} onChange={setLang} />
             <button
               className="theme-toggle"
               type="button"
@@ -226,6 +229,7 @@ export function App() {
           </div>
         </header>
         <main id="main" className="content">
+          {legalPage ? <LegalPage page={legalPage} lang={lang} /> : <>
           <section className="overview" id="overview" aria-labelledby="title">
             <h1 id="title">vscode-undotree</h1>
             <p className="intro">{t.intro}</p>
@@ -318,6 +322,7 @@ export function App() {
               <i className="codicon codicon-link-external" aria-hidden="true" />
             </a>
           </section>
+          <FeatureDemos lang={lang} />
           <SettingsGuide lang={lang} />
           <section
             className="section"
@@ -366,12 +371,18 @@ export function App() {
               ))}
             </ol>
           </section>
+          </>}
         </main>
         <footer className="footer">
-          <a href="#overview">vscode-undotree</a>
-          <div>
+          <a href={`${home}#overview`}>vscode-undotree</a>
+          <div className="footer-links">
+            <a href="/terms">{ja ? "利用規約" : "Terms of Use"}</a>
+            <a href="/privacy">{ja ? "プライバシーポリシー" : "Privacy Policy"}</a>
             <a href={`${repo}/blob/main/LICENSE`}>MIT</a>
             <a href={repo}>GitHub</a>
+            <a href="https://ruhenheim.org/">
+              {ja ? "作者サイト" : "Author website"} · ruhenheim.org
+            </a>
           </div>
         </footer>
       </div>
