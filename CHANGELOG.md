@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### History and navigation
+
+- Follow VS Code Undo and Redo while retaining saved checkpoints and abandoned branches.
+- Show branches in a compact graph with per-branch folding and virtual scrolling. Search includes history names, notes and dates; Escape clears the search.
+- Move secondary sidebar actions into a responsive menu and show compact smart timestamps by default. Explicit time-format settings are preserved.
+- Open tracking, persistence and history actions from the status bar.
+
+### Diagnostics
+
+- Group storage validation, cleanup and multi-window information by task. Require confirmation before failure simulations or deleting history.
+
 ## 0.3.11
 
 ### Fixes

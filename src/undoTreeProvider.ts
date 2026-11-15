@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
@@ -326,7 +326,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private getRenderState(
         document: vscode.TextDocument | undefined,
         isLoadingCurrentEditor: boolean,
-        timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
+        timeFormat: 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
@@ -561,12 +561,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return scheme === 'file' || document.isUntitled;
     }
 
-    private getTimeFormat(): 'none' | 'time' | 'dateTime' | 'relative' | 'custom' {
+    private getTimeFormat(): 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom' {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('timeFormat');
-        if (value === 'none' || value === 'dateTime' || value === 'relative' || value === 'custom') {
+        if (value === 'time' || value === 'smart' || value === 'none' || value === 'dateTime' || value === 'relative' || value === 'custom') {
             return value;
         }
-        return 'time';
+        return 'smart';
     }
 
     private getTimeFormatCustom(): string {
@@ -625,9 +625,18 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     private formatTimestamp(
         timestamp: number,
-        timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
+        timeFormat: 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string
     ): string {
+        if (timeFormat === 'smart') {
+            const date = new Date(timestamp);
+            const today = new Date();
+            const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+            const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+            if (sameDay(date, today)) { return formatDate(date, 'HH:mm'); }
+            if (sameDay(date, yesterday)) { return tr('Yesterday {0}', formatDate(date, 'HH:mm')); }
+            return formatDate(date, date.getFullYear() === today.getFullYear() ? 'MM/dd HH:mm' : 'yyyy/MM/dd');
+        }
         if (timeFormat === 'none') { return ''; }
         if (timeFormat === 'relative') {
             return this.formatRelativeTimestamp(timestamp);
@@ -709,7 +718,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         currentId: number,
         paused: boolean,
         mode: 'navigate' | 'diff',
-        timeFormat: 'none' | 'time' | 'dateTime' | 'relative' | 'custom',
+        timeFormat: 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom',
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
@@ -730,7 +739,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <style nonce="${nonce}">
-  body { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
+  body { margin: 0; font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; padding-top: 0; overflow-x: auto; }
   :root {
     --undotree-accent: #3794ff;
     --undotree-accent-strong: #4ca0ff;
@@ -859,11 +868,20 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
   .time { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
   .time.latest { opacity: 0.9; color: var(--undotree-latest); }
   .empty { opacity: 0.5; padding: 8px; }
-  .actions { display: flex; flex-wrap: nowrap; gap: 3px; margin-bottom: 8px; align-items: center; position: sticky; top: 0; background: var(--vscode-sideBar-background); z-index: 2; padding: 8px 0 4px; }
+  body::before { content: ''; display: block; height: calc(var(--undotree-actions-height, 36px) + 8px); }
+  .actions { display: flex; flex-wrap: nowrap; gap: 3px; margin-bottom: 8px; align-items: center; position: fixed; top: 0; left: 8px; background: var(--vscode-sideBar-background); z-index: 2; padding: 8px 0 4px; }
   /* Controls can overflow their flex box in a narrow, horizontally scrolled
      sidebar. Cover the viewport too, so scrolled rows/header cannot bleed
      through behind those controls. The pseudo-element also blocks row clicks. */
-  .actions::before { content: ''; position: fixed; inset: 0 0 auto; height: var(--undotree-actions-height, 36px); background: var(--vscode-sideBar-background); z-index: -1; }
+  .actions::before { content: ''; position: absolute; inset: 0 -8px auto; height: var(--undotree-actions-height, 36px); background: var(--vscode-sideBar-background); z-index: -1; }
+  .actions [hidden], #toolbar-overflow[hidden] { display: none !important; }
+  #toolbar-overflow { min-width: min(180px, calc(100vw - 16px)); max-width: calc(100vw - 16px); max-height: calc(100vh - 48px); overflow-y: auto; }
+  #toolbar-overflow > button { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; column-gap: 8px; width: 100%; min-width: 0; height: 30px; margin: 0; padding: 6px 10px; background: transparent; color: var(--vscode-menu-foreground, var(--vscode-foreground)); text-align: left; white-space: nowrap; opacity: 1; }
+  #toolbar-overflow > button:hover { background: var(--vscode-list-hoverBackground); }
+  #toolbar-overflow .icon-button::after { content: attr(data-menu-label); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #toolbar-overflow .icon-glyph { display: block; width: 16px; text-align: center; }
+  #toolbar-overflow .menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .actions .menu-only-icon { display: none; }
   .actions button { padding-left: 4px; padding-right: 4px; flex: 0 0 auto; }
   button { background: var(--undotree-accent); color: var(--vscode-button-foreground); border: none; padding: 3px 8px; cursor: pointer; border-radius: 2px; font-size: 11px; }
   button:hover { background: var(--undotree-accent-strong); }
@@ -953,11 +971,13 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
 <div class="actions">
   <button id="btn-undo">${tr('Undo')}</button>
   <button id="btn-redo">${tr('Redo')}</button>
-  <button id="btn-search" class="btn-search" title="${tr('Search notes or dates')}" aria-label="${tr('Search notes or dates')}" aria-expanded="false">${tr('Search')}</button>
-  <button id="show-current" class="show-current" title="${tr('Show current')}" aria-label="${tr('Show current')}">${tr('Current')}</button>
-  <button class="btn-pause icon-button" id="btn-pause" title="${paused ? tr('Resume tracking') : tr('Pause tracking')}" aria-label="${paused ? tr('Resume tracking') : tr('Pause tracking')}">${paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>'}</button>
-  <button class="btn-mode" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}" aria-label="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${mode === 'navigate' ? tr('Navigate') : tr('Diff')}</button>
-  <button class="btn-settings icon-button" id="btn-settings" title="${tr('Open Undo Tree menu')}" aria-label="${tr('Open Undo Tree menu')}">&#9881;</button>
+  <button class="btn-mode" id="btn-mode" title="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}" aria-label="${mode === 'navigate' ? tr('Switch to Diff mode') : tr('Switch to Navigate mode')}">${tr('Diff')}</button>
+  <button id="btn-search" class="btn-search" title="${tr('Search names, notes or dates')}" aria-label="${tr('Search names, notes or dates')}" aria-expanded="false"><span class="icon-glyph menu-only-icon" aria-hidden="true">⌕</span><span class="menu-label">${tr('Search')}</span></button>
+
+  <button class="btn-pause icon-button" id="btn-pause" data-menu-label="${paused ? tr('Resume history') : tr('Pause history')}" title="${paused ? tr('Resume tracking') : tr('Pause tracking')}" aria-label="${paused ? tr('Resume tracking') : tr('Pause tracking')}">${paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>'}</button>
+
+  <button class="btn-settings icon-button" id="btn-settings" data-menu-label="${tr('History actions')}" title="${tr('Open Undo Tree menu')}" aria-label="${tr('Open Undo Tree menu')}"><span class="icon-glyph" aria-hidden="true">&#9881;</span></button>
+  <button id="btn-more" class="btn-settings icon-button" title="${tr('More actions')}" aria-label="${tr('More actions')}" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow" hidden>⋯</button>
 </div>
 ${paused ? `<div class="paused-badge">${tr('Tracking paused - history is frozen')}</div>` : ''}
 <div id="diff-tools" class="diff-tools${mode === 'diff' ? ' visible' : ''}">
@@ -967,7 +987,7 @@ ${paused ? `<div class="paused-badge">${tr('Tracking paused - history is frozen'
 </div>
 ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to compare, then use ↑/↓ to keep reviewing')}</div>` : ''}
 <div id="history-tools" class="history-tools" hidden>
-  <input id="history-search" class="history-search" type="search" placeholder="${tr('Search notes or dates')}" aria-label="${tr('Search notes or dates')}" />
+  <input id="history-search" class="history-search" type="search" placeholder="${tr('Search names, notes or dates')}" aria-label="${tr('Search names, notes or dates')}" />
   <label class="pinned-only-label"><input id="pinned-only" type="checkbox" />${tr('Pinned only')}</label>
   <span id="filter-status" class="filter-status" aria-live="polite"></span>
   <span id="current-indicator" class="current-indicator"></span>
@@ -1000,6 +1020,9 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   </div>
 </div>
 <div id="context-menu" class="context-menu" aria-hidden="true"></div>
+<div id="toolbar-overflow" class="context-menu" role="menu" hidden>
+  <button id="show-current" class="show-current" role="menuitem" title="${tr('Reveal current history (clear filters)')}" aria-label="${tr('Reveal current history (clear filters)')}"><span class="icon-glyph" aria-hidden="true">◎</span><span class="menu-label">${tr('Reveal current history')}</span></button>
+</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   let nodes = ${nodesJson};
@@ -1094,6 +1117,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     headerLines: ${serializeForInlineScript(tr('Lines'))},
     headerSize: ${serializeForInlineScript(tr('Size'))},
     headerTime: ${serializeForInlineScript(tr('Time'))},
+    yesterday: ${serializeForInlineScript(tr('Yesterday {0}'))},
     current: ${serializeForInlineScript(tr('Current'))},
     currentHidden: ${serializeForInlineScript(tr('Current node is hidden by filters'))},
     currentCollapsed: ${serializeForInlineScript(tr('Current node is in a collapsed branch'))},
@@ -1112,6 +1136,27 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     return template.replace('{ext}', ext);
   }
 
+  let smartDateKey = new Date().toDateString();
+  function refreshSmartTimes(force = false) {
+    const now = new Date();
+    if (timeFormat !== 'smart' || !Array.isArray(nodes) || (!force && smartDateKey === now.toDateString())) { return; }
+    smartDateKey = now.toDateString();
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).toDateString();
+    const pad = value => String(value).padStart(2, '0');
+    for (const node of nodes) {
+      const date = new Date(node.timestamp);
+      const clock = pad(date.getHours()) + ':' + pad(date.getMinutes());
+      node.formattedTime = date.toDateString() === smartDateKey ? clock : date.toDateString() === yesterday
+        ? i18n.yesterday.replace('{0}', clock) : date.getFullYear() === now.getFullYear()
+          ? pad(date.getMonth() + 1) + '/' + pad(date.getDate()) + ' ' + clock
+          : date.getFullYear() + '/' + pad(date.getMonth() + 1) + '/' + pad(date.getDate());
+    }
+    searchMetadataCache.clear();
+    buildTree(nodes, currentId, rootId);
+  }
+  setInterval(() => refreshSmartTimes(), 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshSmartTimes(); } });
+
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
 
   const undoButton = document.getElementById('btn-undo');
@@ -1124,6 +1169,87 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
   if (modeButton) { modeButton.addEventListener('click', () => send('toggleMode')); }
   const settingsButton = document.getElementById('btn-settings');
   if (settingsButton) { settingsButton.addEventListener('click', () => send('showMenu')); }
+  const toolbar = document.querySelector('.actions');
+  const moreButton = document.getElementById('btn-more');
+  const overflowMenu = document.getElementById('toolbar-overflow');
+  const optionalButtons = ['btn-search', 'btn-pause', 'btn-settings'].map(id => document.getElementById(id));
+  let toolbarSignature = '';
+  function closeOverflow(restoreFocus = false) {
+    overflowMenu.hidden = true;
+    overflowMenu.classList.remove('visible');
+    moreButton.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) { moreButton.focus(); }
+  }
+  function updateToolbar() {
+    const width = Math.max(0, document.documentElement.clientWidth - 16);
+    toolbar.style.width = width + 'px';
+    const signature = width + ':' + optionalButtons.map(button => button.getAttribute('aria-label') + button.textContent).join('|') + ':' + modeButton.textContent;
+    if (signature === toolbarSignature) { return; }
+    toolbarSignature = signature;
+    const focused = document.activeElement;
+    closeOverflow();
+    for (const button of optionalButtons) {
+      button.removeAttribute('role');
+      toolbar.insertBefore(button, moreButton);
+    }
+    moreButton.hidden = false;
+    const gap = 3;
+    const primaryWidth = [undoButton, redoButton, modeButton].reduce((total, button) => total + button.getBoundingClientRect().width, 0);
+    const widths = optionalButtons.map(button => button.getBoundingClientRect().width);
+    let visibleCount = widths.length;
+    const total = count => primaryWidth + widths.slice(0, count).reduce((sum, value) => sum + value, 0) + gap * (3 + count) + moreButton.getBoundingClientRect().width;
+    while (visibleCount > 0 && total(visibleCount) > width) { visibleCount--; }
+    for (const button of optionalButtons.slice(visibleCount)) {
+      button.setAttribute('role', 'menuitem');
+      overflowMenu.appendChild(button);
+    }
+    if (optionalButtons.includes(focused)) {
+      if (overflowMenu.contains(focused)) { moreButton.focus(); } else { focused.focus(); }
+    }
+  }
+  moreButton.addEventListener('click', () => {
+    if (!overflowMenu.hidden) { closeOverflow(true); return; }
+    hideContextMenu();
+    overflowMenu.hidden = false;
+    overflowMenu.classList.add('visible');
+    moreButton.setAttribute('aria-expanded', 'true');
+    const rect = moreButton.getBoundingClientRect();
+    overflowMenu.style.top = Math.min(rect.bottom + 4, Math.max(4, innerHeight - overflowMenu.offsetHeight - 4)) + 'px';
+    overflowMenu.style.left = Math.max(4, Math.min(rect.right - overflowMenu.offsetWidth, innerWidth - overflowMenu.offsetWidth - 8)) + 'px';
+    overflowMenu.querySelector('button')?.focus();
+  });
+  moreButton.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { closeOverflow(true); }
+    else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (overflowMenu.hidden) { moreButton.click(); }
+      const items = [...overflowMenu.querySelectorAll('button')];
+      (event.key === 'ArrowUp' ? items[items.length - 1] : items[0])?.focus();
+    }
+  });
+  overflowMenu.addEventListener('click', event => {
+    if (!event.target.closest('button')) { return; }
+    closeOverflow(overflowMenu.contains(document.activeElement));
+  });
+  overflowMenu.addEventListener('keydown', event => {
+    const buttons = [...overflowMenu.querySelectorAll('button:not(:disabled)')];
+    const index = buttons.indexOf(document.activeElement);
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverflow(true); }
+    else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 :
+        (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    }
+  });
+  document.addEventListener('click', event => {
+    if (!overflowMenu.contains(event.target) && !moreButton.contains(event.target)) { closeOverflow(); }
+  });
+  document.addEventListener('focusin', event => {
+    if (!overflowMenu.contains(event.target) && event.target !== moreButton) { closeOverflow(); }
+  });
+  window.addEventListener('resize', () => closeOverflow());
+  window.addEventListener('scroll', () => closeOverflow(), { passive: true });
   const diffCurrentButton = document.getElementById('btn-diff-current');
   const diffPairButton = document.getElementById('btn-diff-pair');
   if (diffCurrentButton) { diffCurrentButton.addEventListener('click', () => setDiffCompareMode('current')); }
@@ -1240,7 +1366,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     if (scrollFrame) { return; }
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
-      if (updateVirtualRows) { updateVirtualRows(); }
+        if (updateVirtualRows) { updateVirtualRows(); }
     });
   }
   window.addEventListener('scroll', scheduleVirtualRows, { passive: true });
@@ -1369,6 +1495,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const actions = document.querySelector('.actions');
     const diffTools = document.getElementById('diff-tools');
     const historyTools = document.getElementById('history-tools');
+    updateToolbar();
     const actionsHeight = actions?.offsetHeight ?? 42;
     document.documentElement.style.setProperty('--undotree-actions-height', actionsHeight + 'px');
     const diffHeight = diffTools?.classList.contains('visible') ? diffTools.offsetHeight + 6 : 0;
@@ -1482,6 +1609,21 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     } else if (e.key === 'Escape' && isHelpVisible()) {
       e.preventDefault();
       setHelpVisible(false);
+      return;
+    }
+    if (e.key === 'Escape' && searchExpanded) {
+      e.preventDefault();
+      historySearch.value = '';
+      pinnedOnly.checked = false;
+      searchExpanded = false;
+      const panel = document.getElementById('history-tools');
+      panel.hidden = true;
+      panel.classList.remove('visible');
+      searchToggle?.setAttribute('aria-expanded', 'false');
+      syncStickyOffsets();
+      buildTree(nodes, currentId, rootId);
+      if (focusedIndex >= 0) { setFocused(focusedIndex, true, true); }
+      else { searchToggle?.focus(); }
       return;
     }
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') { return; }
@@ -1621,7 +1763,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     if (!filterActive && preferredFocusId !== undefined) { revealAncestors(preferredFocusId, map); }
     const isMatch = (node) => {
       if (!query) { return !onlyPinned || !!node.pinned; }
-      const signature = JSON.stringify([node.timestamp, node.note ?? '', node.formattedTime ?? '']);
+      const signature = JSON.stringify([node.timestamp, node.label, node.note ?? '', node.formattedTime ?? '']);
       let cached = searchMetadataCache.get(node.id);
       if (!cached || cached.signature !== signature) {
         const date = new Date(node.timestamp);
@@ -1630,7 +1772,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         const localTime = String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
         cached = {
           signature,
-          text: [node.note ?? '', node.formattedTime ?? '', localDate, localDate + ' ' + localTime, date.toISOString()]
+          text: [node.label, node.note ?? '', node.formattedTime ?? '', localDate, localDate + ' ' + localTime, date.toISOString()]
             .join(' ').toLocaleLowerCase(),
         };
         searchMetadataCache.set(node.id, cached);
@@ -1691,6 +1833,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
             '<span class="pin-mark" data-node-id="' + node.id + '" title="' + escHtml(i18n.contextUnpin) + '" aria-label="' + escHtml(i18n.contextUnpin) + '"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8 9.9 5.7l4.3.6-3.1 3 0.7 4.2L8 11.5l-3.8 2 0.7-4.2-3.1-3 4.3-.6L8 1.8Z" fill="currentColor"/></svg></span>' +
             '<span class="pinned-label">' + escHtml(node.note || node.label) + '</span>' +
             (node.formattedTime ? '<span class="right-area"><span class="metrics"><span class="meta-col size-diff empty"></span><span class="meta-col size-total empty"></span><span class="time">' + escHtml(node.formattedTime) + '</span></span></span>' : '');
+          row.querySelector('.time')?.setAttribute('title', new Date(node.timestamp).toLocaleString());
           row.addEventListener('click', () => {
             revealAncestors(node.id, map);
             buildTree(nodes, currentId, rootId, node.id);
@@ -1863,6 +2006,7 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
         event.stopPropagation();
         toggleBranch(id);
       });
+      div.querySelector('.time')?.setAttribute('title', new Date(node.timestamp).toLocaleString());
       const noteAction = div.querySelector('.note-action');
       if (noteAction) {
         noteAction.addEventListener('click', (event) => {
@@ -2055,10 +2199,11 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     pauseButton.innerHTML = state.paused ? '<span class="icon-glyph">&#9654;</span>' : '<span class="icon-glyph">&#10074;&#10074;</span>';
     pauseButton.title = pauseTitle;
     pauseButton.setAttribute('aria-label', pauseTitle);
+    pauseButton.setAttribute('data-menu-label', state.paused ? ${serializeForInlineScript(tr('Resume history'))} : ${serializeForInlineScript(tr('Pause history'))});
 
     const modeButton = document.querySelector('.btn-mode');
     const modeTitle = mode === 'navigate' ? ${serializeForInlineScript(tr('Switch to Diff mode'))} : ${serializeForInlineScript(tr('Switch to Navigate mode'))};
-    modeButton.textContent = mode === 'navigate' ? ${serializeForInlineScript(tr('Navigate'))} : ${serializeForInlineScript(tr('Diff'))};
+    modeButton.textContent = ${serializeForInlineScript(tr('Diff'))};
     modeButton.title = modeTitle;
     modeButton.setAttribute('aria-label', modeTitle);
     modeButton.setAttribute('aria-pressed', mode === 'diff' ? 'true' : 'false');

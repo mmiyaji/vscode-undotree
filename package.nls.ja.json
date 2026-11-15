@@ -25,7 +25,7 @@
   "config.excludePatterns.description": "追跡から除外するパターンです。除外設定は常に優先されます。スラッシュなしのパターンはファイル名に、パスパターンはワークスペース相対パスに一致します。`*` と `?` は1階層内、`**` は複数階層に一致します。例: `[\"*.min.*\", \"generated/**\", \"**/cache/**\"]`",
   "config.persistenceMode.description": "Undo 履歴の永続化モードです。既定の `auto` は履歴変更後に自動保存します。`manual` は「永続化状態を保存」コマンドの実行時のみ保存します。明示的に指定した `manual` は維持されます。",
   "config.autosaveInterval.description": "履歴スナップショットを自動取得する間隔（秒）です。最小値は 5 です。`0` で無効化します。既定値: `30`。",
-  "config.timeFormat.description": "Undo Tree ビューで表示する時刻形式です。`none` は非表示です。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) 互換です。`time` は `HH:mm:ss`、`dateTime` は `yyyy-MM-dd HH:mm:ss`、`relative` は `5m ago` のような相対表記、`custom` は `undotree.timeFormatCustom` を使います。",
+  "config.timeFormat.description": "Undo Tree ビューで表示する時刻形式です。`none` は非表示です。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) 互換です。`time` は `HH:mm:ss`、`dateTime` は `yyyy-MM-dd HH:mm:ss`、`relative` は `5m ago` のような相対表記、`custom` は `undotree.timeFormatCustom` を使います。 `smart`（既定）は、今日を HH:mm、昨日を「昨日 HH:mm」、今年の過去日を MM/dd HH:mm、過去年を yyyy/MM/dd で表示します。ホバーで正確な日時を確認できます。",
   "config.warnOnMultiWindowConflict.description": "`undotree.persistenceMode` が `auto` のときに、同じ tracked file が別の VS Code ウィンドウでも開かれている可能性を警告します。短命の lock heartbeat で競合の可能性を検出します。推奨: 有効。",
   "config.language.description": "Undo Tree の実行時 UI の言語を上書きします。`auto` は VS Code の表示言語に従い、`en` は英語、`ja` は日本語を強制します。ランタイムのパネル、通知、メニュー、webview には即時反映されます。コマンドパレット名や設定画面の文言は VS Code の manifest ローカライズに従うため、ウィンドウ再読み込み後に反映される場合があります。",
   "config.timeFormatCustom.description": "Undo Tree ビューのカスタム時刻書式です。この設定は `undotree.timeFormat` が `custom` のときだけ使われます。書式は [date-fns `format`](https://date-fns.org/v4.1.0/docs/format) 互換です。例: `yyyy-MM-dd HH:mm:ss`。",

@@ -189,7 +189,7 @@ describe('UndoTreeProvider initialization', () => {
         expect(html).toContain('id="btn-settings"');
         expect(html).toContain(`settingsButton.addEventListener('click', () => send('showMenu'));`);
         expect(html).toContain('title="Open Undo Tree menu"');
-        expect(html).toContain('&#9881;</button>');
+        expect(html).toContain('&#9881;</span></button>');
     });
 
     it('supports dateTime timestamp formatting', () => {

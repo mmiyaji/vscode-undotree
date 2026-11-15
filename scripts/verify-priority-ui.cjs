@@ -61,8 +61,13 @@ async function main() {
         });
         await page.goto(pathToFileURL(htmlPath).toString());
         const check = async (name, fn) => { await fn(); console.log(`PASS: ${name}`); };
+        const toolbarAction = async id => {
+            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+            if (!(await page.locator(id).isVisible())) { await page.locator('#btn-more').click(); }
+            await page.locator(id).click();
+        };
         const openSearch = async () => {
-            if (!(await page.locator('#history-search').isVisible())) { await page.locator('#btn-search').click(); }
+            if (!(await page.locator('#history-search').isVisible())) { await toolbarAction('#btn-search'); }
         };
         await check('10,001 histories retain bounded DOM rendering', async () => {
             assert.equal(await page.evaluate(() => nodeIds.length), 10001);
@@ -116,6 +121,22 @@ async function main() {
             await page.locator('#history-search').fill('Review complete');
             await page.waitForFunction(() => nodeIds.length === 1 && nodeIds[0] === 9000);
         });
+        await check('default history labels are searchable and Escape clears filters without editing', async () => {
+            const before = await page.evaluate(() => window.messages.length);
+            await page.locator('#history-search').fill('save');
+            await page.waitForFunction(() => nodeIds.length === 10000);
+            await page.locator('#pinned-only').check();
+            await page.waitForFunction(() => nodeIds.length === 2);
+            await page.locator('#history-search').focus();
+            await page.keyboard.press('Escape');
+            await page.waitForFunction(() => nodeIds.length === 10001);
+            assert.equal(await page.locator('#history-search').isVisible(), false);
+            assert.equal(await page.locator('#history-search').inputValue(), '');
+            assert.equal(await page.locator('#pinned-only').isChecked(), false);
+            assert.equal(await page.evaluate(() => document.getElementById('tree').contains(document.activeElement)), true);
+            assert.equal(await page.evaluate(() => window.messages.length), before);
+            await openSearch();
+        });
         await check('empty search and pin filtering are explicit and do not alter the document', async () => {
             const before = await page.evaluate(() => window.messages.length);
             await page.locator('#history-search').fill('no-such-history');
@@ -129,7 +150,7 @@ async function main() {
         });
         await check('show current clears filters and moves focus without restoring content', async () => {
             const before = await page.evaluate(() => window.messages.length);
-            await page.locator('#show-current').click();
+            await toolbarAction('#show-current');
             await page.waitForFunction(() => nodeIds.length === 10001);
             assert.equal(await page.locator('#history-search').inputValue(), '');
             assert.equal(await page.locator('#pinned-only').isChecked(), false);
@@ -165,7 +186,7 @@ async function main() {
                 nodeSizeMetric, nodeSizeMetricBase, showStorageKind, colorTheme, sourceUri, rootId, paused: false }));
             assert.ok((await page.locator('#diff-base-label').innerText()).includes('Review complete'), 'comparison names the selected note');
             const before = await page.evaluate(() => window.messages.length);
-            await page.locator('#show-current').click();
+            await toolbarAction('#show-current');
             assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 10000);
             assert.equal(await page.evaluate(() => window.messages.length), before);
         });
@@ -278,7 +299,7 @@ async function main() {
         await check('Current reveals only its ancestors and never restores file contents', async () => {
             const before = await page.evaluate(() => window.messages.length);
             assert.ok((await page.locator('#current-indicator').innerText()).includes('collapsed'));
-            await page.locator('#show-current').click();
+            await toolbarAction('#show-current');
             assert.equal(await page.evaluate(() => nodeIds.includes(currentId)), true);
             assert.equal(await page.evaluate(() => nodeIds.includes(400)), false);
             assert.equal(await page.evaluate(() => nodeIds[focusedIndex]), 1200);
@@ -337,7 +358,7 @@ async function main() {
             await openSearch();
             await page.locator('#history-search').fill('Hidden target');
             assert.equal(await page.locator('.node-label').evaluate(el => el.getBoundingClientRect().left), geometry[0].labelX);
-            await page.locator('#show-current').click();
+            await toolbarAction('#show-current');
         });
         await check('wide forks keep bounded graph geometry and valid folding', async () => {
             const wide = Array.from({ length: 1501 }, (_, id) => ({
@@ -401,7 +422,7 @@ async function main() {
             await page.setViewportSize({ width: 220, height: 180 });
             await page.evaluate(() => window.scrollTo(10000, 45));
             const before = await page.evaluate(() => window.messages.length);
-            await page.locator('#btn-settings').click();
+            await toolbarAction('#btn-settings');
             assert.equal(await page.evaluate(() => window.messages.length), before + 1);
             assert.equal(await page.evaluate(() => window.messages.at(-1).command), 'showMenu');
             await page.screenshot({ path: path.join(root, 'narrow-toolbar-fixed.png') });
@@ -414,16 +435,72 @@ async function main() {
             }));
             await page.evaluate(deep => renderState({ view: 'tree', nodes: deep, currentId: 600,
                 sourceUri: 'file:///deep.md', rootId: 0, mode: 'navigate', nodeSizeMetric: 'lines', colorTheme: 'blue', paused: false }), deep);
-            const before = await page.locator('.node-label').first().evaluate(el => el.getBoundingClientRect().left);
+            const before = await page.locator('.node-label').first().evaluate(el => el.getBoundingClientRect().left + scrollX);
             assert.equal(await page.locator('.graph').first().evaluate(el => el.getBoundingClientRect().width), 44);
             assert.ok(await page.locator('.node').count() < 150);
             await page.evaluate(() => toggleBranch(2));
             assert.deepEqual(await page.evaluate(() => nodeIds), [0, 1, 2]);
-            assert.ok(await page.locator('.node-label').evaluateAll((els, x) => els.every(el => el.getBoundingClientRect().left === x), before));
+            assert.ok(await page.locator('.node-label').evaluateAll((els, x) => els.every(el => el.getBoundingClientRect().left + scrollX === x), before));
             assert.equal(await page.locator('.graph').first().evaluate(el => el.getBoundingClientRect().width), 44, 'folding does not shrink the lane column');
-            await page.locator('#show-current').click();
+            await toolbarAction('#show-current');
             assert.equal(await page.evaluate(() => nodeIds.length), 601);
-            assert.equal(await page.locator('.node.current .node-label').evaluate(el => el.getBoundingClientRect().left), before);
+            assert.equal(await page.locator('.node.current .node-label').evaluate(el => el.getBoundingClientRect().left + scrollX), before);
+        });
+        await check('narrow headers retain Undo, Redo and Diff and overflow secondary controls', async () => {
+            await page.setViewportSize({ width: 180, height: 300 });
+            await page.evaluate(() => { syncStickyOffsets(); window.scrollTo(0, 0); });
+            for (const id of ['btn-undo', 'btn-redo', 'btn-mode', 'btn-more']) {
+                assert.equal(await page.locator('.actions #' + id).isVisible(), true);
+                const rect = await page.locator('#' + id).boundingBox();
+                assert.ok(rect.x >= 0 && rect.x + rect.width <= 180, id + ' fits');
+            }
+            assert.equal(await page.locator('#btn-mode').innerText(), 'Diff');
+            const before = await page.evaluate(() => window.messages.length);
+            await page.locator('#btn-mode').click();
+            assert.equal(await page.evaluate(() => window.messages.at(-1).command), 'toggleMode');
+            await page.locator('#btn-more').focus();
+            await page.keyboard.press('ArrowDown');
+            assert.equal(await page.locator('#btn-more').getAttribute('aria-expanded'), 'true');
+            assert.equal(await page.evaluate(() => document.activeElement.parentElement.id), 'toolbar-overflow');
+            await page.keyboard.press('End');
+            assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-settings');
+            await page.keyboard.press('Escape');
+            assert.equal(await page.evaluate(() => document.activeElement.id), 'btn-more');
+            assert.equal(await page.locator('#toolbar-overflow').isVisible(), false);
+            assert.equal(await page.evaluate(() => window.messages.length), before + 1);
+            await toolbarAction('#btn-search');
+            assert.equal(await page.locator('#history-search').isVisible(), true);
+            await toolbarAction('#show-current');
+            await toolbarAction('#btn-pause');
+            assert.equal(await page.evaluate(() => window.messages.at(-1).command), 'togglePause');
+            await page.locator('#btn-more').click();
+            await page.screenshot({ path: path.join(root, 'overflow-menu.png') });
+            await page.setViewportSize({ width: 620, height: 600 });
+            await page.evaluate(() => syncStickyOffsets());
+            assert.equal(await page.locator('#btn-more').isVisible(), true);
+            assert.equal(await page.locator('.actions #show-current').count(), 0, 'reveal current is not a toolbar action even when wide');
+            await page.locator('#btn-more').click();
+            assert.equal(await page.locator('#show-current .menu-label').innerText(), 'Reveal current history');
+            await page.keyboard.press('Escape');
+            assert.equal(await page.locator('.actions #btn-settings').isVisible(), true);
+        });
+        await check('smart timestamps distinguish yesterday, retain exact hover text and update without content edits', async () => {
+            const before = await page.evaluate(() => window.messages.length);
+            await page.evaluate(() => {
+                const today = new Date();
+                const dates = [today, new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 14, 32), new Date(today.getFullYear() - 1, 3, 5)];
+                const smartNodes = dates.map((date, id) => ({ id, timestamp: date.getTime(), label: 'save',
+                    parents: id ? [id - 1] : [], children: id < 2 ? [id + 1] : [], storage: { kind: 'full' },
+                    formattedTime: 'stale', lineCount: 1 }));
+                renderState({ view: 'tree', nodes: smartNodes, currentId: 2, sourceUri: 'file:///smart-time.md',
+                    rootId: 0, mode: 'navigate', timeFormat: 'smart', nodeSizeMetric: 'none', colorTheme: 'blue', paused: false });
+                refreshSmartTimes(true);
+            });
+            assert.match(await page.locator('.node[data-node-id="0"] .time').innerText(), /^\d{2}:\d{2}$/);
+            assert.equal(await page.locator('.node[data-node-id="1"] .time').innerText(), 'Yesterday 14:32');
+            assert.match(await page.locator('.node[data-node-id="2"] .time').innerText(), /^\d{4}\/04\/05$/);
+            assert.ok((await page.locator('.node[data-node-id="1"] .time').getAttribute('title')).length > 12);
+            assert.equal(await page.evaluate(() => window.messages.length), before);
         });
         assert.deepEqual(errors, [], 'renderer has no uncaught exceptions');
         console.log(`UI regression artifacts: ${root}`);

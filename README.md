@@ -14,7 +14,7 @@ The extension records history on saves and periodic autosave checkpoints. It doe
 
 Native Undo/Redo also updates the tree selection. Before following an undo or redo, pending tracked edits are kept as a history state, so undoing and typing a new version preserves the previous future as another branch. If the native undo group lands between checkpoints, that state is recorded too. Ordinary typing continues to use save-based and periodic checkpoints; this does not record every keystroke as a node. These states use the same persistence and compaction rules as other history nodes.
 
-![Undo Tree hero](./media/undotree-readme-hero.png)
+![Undo Tree hero](./media/screenshots/history.png)
 
 ## Color Themes
 
@@ -63,13 +63,17 @@ Alternatively, search the Extensions view for `@id:mmiyaji.vscode-undotree`. For
 | Pause / Resume tracking | Click **Pause** / **Resume** |
 | Open actions menu | Click the gear button |
 | Choose tracking, persistence, or history actions | Click the status bar item |
-| Find history by note or date / show only pinned nodes | Click **Search** and use the search field or pinned filter |
-| Reveal the current node and clear filters | Click **Current** |
+| Find history by name, note or date / show only pinned nodes | Click **Search** and use the search field or pinned filter |
+| Reveal the current node and clear filters | Choose **More actions → Reveal current history** |
 | Collapse / expand a branch | Click the chevron at the start of a branch, or use `Left` / `Right` on that row |
 
 The graph column uses 14–44 pixels according to the number of lanes in the complete history. All rows share that width, so labels and the Current badge stay aligned; folding and filtering do not change it. Only the starts of branches at a fork have disclosure controls; ordinary linear saves use dots. A collapsed branch shows the number of hidden states. Up to four graph lanes are drawn; additional lanes share the outer rail while navigation and folding retain the actual node relationships.
 
-Branch folding is kept separately for each file in the webview state. Search and the pinned filter include matching nodes inside collapsed branches without changing the folding state. **Current** clears filters and expands the current node's ancestors; history navigation also reveals the selected node. Virtual scrolling applies to the remaining visible rows after folding and filtering.
+Branch folding is kept separately for each file in the webview state. Search and the pinned filter include matching nodes inside collapsed branches without changing the folding state. **Reveal current history** clears filters and expands the current node's ancestors; history navigation also reveals the selected node. Virtual scrolling applies to the remaining visible rows after folding and filtering.
+
+The toolbar always keeps Undo, Redo, and the Diff toggle visible. At narrow widths, secondary actions move into **More actions**; widening the sidebar restores them. The header stays in view while the history scrolls horizontally.
+
+Smart timestamps show `HH:mm` today, `Yesterday HH:mm` yesterday, `MM/dd HH:mm` for older edits this year, and `yyyy/MM/dd` for other years. Hover for the complete local date and time. Existing explicit time-format settings remain unchanged.
 
 ### Panel layout
 
@@ -113,7 +117,7 @@ The shortcuts below apply when the history tree has focus. Text fields and butto
 | `p` | Toggle Pause / Resume |
 | `n` / `N` | Move to next / previous noted node |
 | `?` | Show the shortcut help overlay |
-| `Esc` | Close help or exit Diff mode |
+| `Esc` | Clear and close search, close help, or exit Diff mode |
 
 ### Context menu
 
@@ -219,6 +223,10 @@ The preview panel shows:
 ## Diagnostics
 
 Undo Tree includes a diagnostics panel for persisted storage maintenance. It is intended for development mode or when `undotree.enableDiagnostics` is enabled.
+
+The panel starts with a health summary, then groups operations beside their results: validation and index repair under **Integrity**, folder access and orphan cleanup under **Storage**, and conflict details under **Multi-window Locks**. Unknown orphan counts are shown as unknown rather than an empty result. Cleanup is unavailable when the index cannot be trusted or no known orphan files need removal; the storage operations still verify current references and locks when executed.
+
+Failure simulations and history reset live under collapsed **Advanced** sections. Simulations require confirmation because they modify the saved manifest. Actions prevent repeated execution while running, and refreshes preserve expanded details and scroll position. Opening Output or the storage folder does not trigger another full storage scan.
 
 The panel can show:
 
@@ -327,7 +335,7 @@ These are the list-mode presets and default exclusions. Copying enabledExtension
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `undotree.timeFormat` | `"time"` | `none`, `time`, `dateTime`, `relative`, or `custom` |
+| `undotree.timeFormat` | `"smart"` | `smart`, `none`, `time`, `dateTime`, `relative`, or `custom` |
 | `undotree.timeFormatCustom` | `"yyyy-MM-dd HH:mm:ss"` | Custom timestamp format using [date-fns format](https://date-fns.org/v4.1.0/docs/format); used only when `timeFormat` is `custom` |
 | `undotree.showStorageKind` | `false` | Show `F` / `D` badges |
 | `undotree.nodeSizeMetric` | `"lines"` | `none`, `lines`, or `bytes` |

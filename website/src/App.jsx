@@ -42,7 +42,7 @@ const copy = {
       </>,
     ],
     editor:
-      "コンパクトなVS Code画面。左側のUndo Treeに分岐点、元の枝、新しい枝が表示されています。",
+      "VS Codeの左下に表示されたUndo Treeの分岐履歴。",
     diffAlt: "VS Codeの差分エディターによる保存状態の比較",
     pinAlt: "メモ付きのチェックポイントとピン留め一覧",
     branchAlt: "保存3から新しい枝に分岐し、元の保存4・5も残る履歴の図",
@@ -83,7 +83,7 @@ const copy = {
       </>,
     ],
     editor:
-      "Compact VS Code window with Undo Tree taking the left half, showing Branch point, Stable branch, and Alternate branch.",
+      "VS Code with branching Undo Tree history in the lower left sidebar.",
     diffAlt: "Saved states compared in the VS Code diff editor",
     pinAlt: "Pinned checkpoints and checkpoint notes",
     branchAlt:
@@ -248,7 +248,7 @@ export function App() {
             </div>
             <figure className="editor-shot">
               <img
-                src="./assets/editor-compact.jpg"
+                src="./assets/history-current.png"
                 alt={t.editor}
                 width="903"
                 height="439"

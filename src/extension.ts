@@ -11,6 +11,7 @@ import { gzip as gzipCb, gunzip as gunzipCb, gunzipSync } from 'zlib';
 const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
 import { UndoTreeProvider } from './undoTreeProvider';
+import { buildDiagnosticsHtml, DiagnosticsSnapshot } from './diagnosticsView';
 import { CompactPreviewItem, CompactPreviewResult, SerializedUndoTree, UndoTreeManager, mergeSerializedTrees } from './undoTreeManager';
 import { initializeRuntimeL10n, t as tr } from './runtimeL10n';
 import { isValidContentHash } from './contentHash';
@@ -113,6 +114,7 @@ const documentTaskQueues = new Map<string, Promise<void>>();
 const treeLoadPromises = new Map<string, Promise<void>>();
 let documentTaskEpoch = 0;
 let resetInProgress = false;
+let resetConfirmationPending = false;
 let storageEpochRebaseInProgress = false;
 let windowStorageEpoch: number | undefined;
 let windowStorageEpochLoad: Promise<number> | undefined;
@@ -187,45 +189,6 @@ class StorageEpochMismatchError extends Error {
     }
 }
 
-type DiagnosticsSnapshot = {
-    manifestStatus: ManifestReadResult['status'];
-    storageDir: string;
-    manifestPath: string;
-    backupManifestPath: string;
-    manifestExists: boolean;
-    backupExists: boolean;
-    manifestTreeCount: number;
-    treeFileCount: number;
-    contentFileCount: number;
-    orphanTreeFileCount: number | null;
-    orphanContentFileCount: number | null;
-    orphanTreeFiles: string[];
-    orphanContentFiles: string[];
-    validation: {
-        status: 'ok' | 'warning' | 'error';
-        checkedTreeFiles: number;
-        missingTreeFiles: string[];
-        unreadableTreeFiles: string[];
-        missingContentHashes: string[];
-    };
-    locks: {
-        enabled: boolean;
-        sessionId: string;
-        total: number;
-        live: number;
-        stale: number;
-        owned: number;
-        items: Array<{
-            uri: string;
-            sessionId: string;
-            workspace: string;
-            updatedAt: number;
-            ageMs: number;
-            isOwned: boolean;
-            isLive: boolean;
-        }>;
-    };
-};
 
 type MultiWindowLockRecord = {
     sessionId: string;
@@ -329,22 +292,6 @@ function formatPreviewBytes(bytes: number): string {
     return `${new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value)} ${units[unitIndex]}`;
 }
 
-function formatRelativeDurationShort(ms: number): string {
-    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-    if (totalSeconds < 60) {
-        return `${totalSeconds}s`;
-    }
-    const totalMinutes = Math.floor(totalSeconds / 60);
-    if (totalMinutes < 60) {
-        return `${totalMinutes}m`;
-    }
-    const totalHours = Math.floor(totalMinutes / 60);
-    if (totalHours < 24) {
-        return `${totalHours}h`;
-    }
-    const totalDays = Math.floor(totalHours / 24);
-    return `${totalDays}d`;
-}
 
 function formatPreviewMetrics(item: CompactPreviewItem): string {
     const parts = [
@@ -520,185 +467,6 @@ async function collectDiagnosticsSnapshot(context: vscode.ExtensionContext): Pro
     };
 }
 
-function buildDiagnosticsHtml(snapshot: DiagnosticsSnapshot): string {
-    const t = vscode.l10n.t;
-    const nonce = getWebviewNonce();
-    const manifestStateClass = snapshot.manifestStatus === 'invalid'
-        ? 'danger'
-        : snapshot.manifestStatus === 'backup'
-            ? 'warn'
-            : 'ok';
-    const renderCount = (value: number | null) => value == null ? t('unknown') : formatPreviewCount(value);
-    const renderList = (items: string[], emptyText: string) => items.length === 0
-        ? `<div class="empty">${escHtml(emptyText)}</div>`
-        : `<ul>${items.slice(0, 20).map((item) => `<li>${escHtml(item)}</li>`).join('')}</ul>${items.length > 20 ? `<div class="hint">${t('{0} more...', items.length - 20)}</div>` : ''}`;
-    const renderLockList = (items: DiagnosticsSnapshot['locks']['items']) => items.length === 0
-        ? `<div class="empty">${escHtml(t('No lock files detected.'))}</div>`
-        : `<ul>${items.slice(0, 20).map((item) => {
-            const flags = [
-                item.isOwned ? t('owned') : t('foreign'),
-                item.isLive ? t('live') : t('stale'),
-                formatRelativeDurationShort(item.ageMs),
-            ].join(' · ');
-            return `<li><strong>${escHtml(item.uri)}</strong><br><span class="hint">${escHtml(flags)} · ${escHtml(item.workspace || '-')}</span></li>`;
-        }).join('')}</ul>${items.length > 20 ? `<div class="hint">${t('{0} more...', items.length - 20)}</div>` : ''}`;
-    const validationClass = snapshot.validation.status === 'error'
-        ? 'danger'
-        : snapshot.validation.status === 'warning'
-            ? 'warn'
-            : 'ok';
-    const lockClass = snapshot.locks.enabled ? 'ok' : 'warn';
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  ${buildWebviewCspMeta(nonce)}
-  <style nonce="${nonce}">
-    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
-    h1, h2 { font-weight: 600; margin: 0 0 12px; }
-    h1 { font-size: 16px; }
-    h2 { font-size: 13px; margin-top: 20px; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-    button {
-      border: 1px solid var(--vscode-button-border, transparent);
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      padding: 6px 12px;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: var(--vscode-button-secondaryBackground, transparent);
-      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-    }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
-    .card {
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 8px;
-      padding: 12px;
-      background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-foreground) 6%);
-    }
-    .label { opacity: 0.7; font-size: 12px; margin-bottom: 4px; }
-    .value { font-size: 14px; word-break: break-all; }
-    .card-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
-    .card-actions button { padding: 4px 10px; font-size: 12px; }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      padding: 4px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--vscode-panel-border);
-      font-size: 12px;
-      margin-bottom: 8px;
-    }
-    .pill.ok { color: var(--vscode-testing-iconPassed); }
-    .pill.warn { color: var(--vscode-testing-iconQueued); }
-    .pill.danger { color: var(--vscode-errorForeground); }
-    .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-    ul { margin: 0; padding-left: 18px; }
-    li { margin-bottom: 4px; }
-    .hint, .empty { opacity: 0.7; font-size: 12px; }
-  </style>
-</head>
-<body>
-  <h1>${t('Undo Tree Diagnostics')}</h1>
-  <div class="pill ${manifestStateClass}">${t('Manifest status')}: ${escHtml(snapshot.manifestStatus)}</div>
-  <div class="toolbar">
-    <button data-command="refresh">${t('Refresh')}</button>
-    <button data-command="validate">${t('Validate Persisted Storage')}</button>
-    <button data-command="pruneOrphans">${t('Prune Orphan Files')}</button>
-    <button data-command="rebuildManifest">${t('Rebuild Manifest')}</button>
-    <button class="secondary" data-command="showOutput">${t('Open Output')}</button>
-    <button class="secondary" data-command="simulateBackup">${t('Simulate backup fallback')}</button>
-    <button class="secondary" data-command="simulateInvalid">${t('Simulate invalid manifest')}</button>
-    <button class="secondary" data-command="resetAll">${t('Reset All State')}</button>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <div class="label">${t('Storage folder')}</div>
-      <div class="value">${escHtml(snapshot.storageDir)}</div>
-      <div class="card-actions"><button class="secondary" data-command="openStorage">${t('Open Folder')}</button></div>
-    </div>
-    <div class="card">
-      <div class="label">${t('manifest.json')}</div>
-      <div class="value">${escHtml(snapshot.manifestExists ? snapshot.manifestPath : t('missing'))}</div>
-      <div class="card-actions"><button class="secondary" data-command="openStorage">${t('Open Folder')}</button></div>
-    </div>
-    <div class="card">
-      <div class="label">${t('manifest.json.bak')}</div>
-      <div class="value">${escHtml(snapshot.backupExists ? snapshot.backupManifestPath : t('missing'))}</div>
-      <div class="card-actions"><button class="secondary" data-command="openStorage">${t('Open Folder')}</button></div>
-    </div>
-    <div class="card"><div class="label">${t('Manifest tree entries')}</div><div class="value">${formatPreviewCount(snapshot.manifestTreeCount)}</div></div>
-    <div class="card"><div class="label">${t('Persisted tree files')}</div><div class="value">${formatPreviewCount(snapshot.treeFileCount)}</div></div>
-    <div class="card"><div class="label">${t('Persisted content files')}</div><div class="value">${formatPreviewCount(snapshot.contentFileCount)}</div></div>
-    <div class="card"><div class="label">${t('Orphan tree files')}</div><div class="value">${renderCount(snapshot.orphanTreeFileCount)}</div></div>
-    <div class="card"><div class="label">${t('Orphan content files')}</div><div class="value">${renderCount(snapshot.orphanContentFileCount)}</div></div>
-  </div>
-
-  <h2>${t('Multi-window Locks')}</h2>
-  <div class="pill ${lockClass}">${t('Lock warnings')}: ${snapshot.locks.enabled ? t('enabled') : t('disabled')}</div>
-  <div class="grid">
-    <div class="card"><div class="label">${t('Current session')}</div><div class="value">${escHtml(snapshot.locks.sessionId)}</div></div>
-    <div class="card"><div class="label">${t('Total locks')}</div><div class="value">${formatPreviewCount(snapshot.locks.total)}</div></div>
-    <div class="card"><div class="label">${t('Live locks')}</div><div class="value">${formatPreviewCount(snapshot.locks.live)}</div></div>
-    <div class="card"><div class="label">${t('Stale locks')}</div><div class="value">${formatPreviewCount(snapshot.locks.stale)}</div></div>
-    <div class="card"><div class="label">${t('Owned locks')}</div><div class="value">${formatPreviewCount(snapshot.locks.owned)}</div></div>
-  </div>
-
-  <h2>${t('Validation')}</h2>
-  <div class="pill ${validationClass}">${t('Validation status')}: ${escHtml(snapshot.validation.status)}</div>
-  <div class="grid">
-    <div class="card"><div class="label">${t('Checked tree files')}</div><div class="value">${formatPreviewCount(snapshot.validation.checkedTreeFiles)}</div></div>
-    <div class="card"><div class="label">${t('Missing tree files')}</div><div class="value">${formatPreviewCount(snapshot.validation.missingTreeFiles.length)}</div></div>
-    <div class="card"><div class="label">${t('Unreadable tree files')}</div><div class="value">${formatPreviewCount(snapshot.validation.unreadableTreeFiles.length)}</div></div>
-    <div class="card"><div class="label">${t('Missing content hashes')}</div><div class="value">${formatPreviewCount(snapshot.validation.missingContentHashes.length)}</div></div>
-  </div>
-
-  <div class="columns">
-    <div>
-      <h2>${t('Lock Files')}</h2>
-      ${renderLockList(snapshot.locks.items)}
-    </div>
-  </div>
-  <div class="columns">
-    <div>
-      <h2>${t('Orphan Tree Files')}</h2>
-      ${renderList(snapshot.orphanTreeFiles, t('No orphan tree files detected.'))}
-    </div>
-    <div>
-      <h2>${t('Orphan Content Files')}</h2>
-      ${renderList(snapshot.orphanContentFiles, t('No orphan content files detected.'))}
-    </div>
-  </div>
-  <div class="columns">
-    <div>
-      <h2>${t('Missing Tree Files')}</h2>
-      ${renderList(snapshot.validation.missingTreeFiles, t('No missing tree files detected.'))}
-    </div>
-    <div>
-      <h2>${t('Unreadable Tree Files')}</h2>
-      ${renderList(snapshot.validation.unreadableTreeFiles, t('No unreadable tree files detected.'))}
-    </div>
-  </div>
-  <div>
-    <h2>${t('Missing Content Hashes')}</h2>
-    ${renderList(snapshot.validation.missingContentHashes, t('No missing content hashes detected.'))}
-  </div>
-
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    document.querySelectorAll('[data-command]').forEach((button) => {
-      button.addEventListener('click', () => {
-        vscode.postMessage({ command: button.dataset.command });
-      });
-    });
-  </script>
-</body>
-</html>`;
-}
 
 function buildCompactPreviewHtml(
     fileName: string,
@@ -2534,6 +2302,10 @@ async function pruneOrphanPersistedFiles(context: vscode.ExtensionContext): Prom
     contentSkippedForLiveWindow: boolean;
 }> {
     const snapshot = await collectDiagnosticsSnapshot(context);
+    if (snapshot.manifestStatus !== 'ok' || snapshot.validation.status === 'error' ||
+        snapshot.orphanTreeFileCount === null || snapshot.orphanContentFileCount === null) {
+        throw new Error('Cannot prune orphan files while the history index or references are unavailable.');
+    }
     const treesDir = path.join(context.globalStorageUri.fsPath, 'undo-trees');
     const contentDir = path.join(treesDir, 'content');
 
@@ -3038,6 +2810,24 @@ function describeEditor(editor: vscode.TextEditor | undefined): string {
     });
 }
 
+async function confirmDiagnosticsSimulation(): Promise<boolean> {
+    const confirm = tr('Run simulation');
+    const selected = await vscode.window.showWarningMessage(
+        tr('This developer action modifies the saved history manifest to simulate a storage failure.'),
+        { modal: true }, confirm
+    );
+    return selected === confirm;
+}
+
+async function confirmHistoryReset(): Promise<boolean> {
+    const label = tr('Delete all history');
+    const selected = await vscode.window.showWarningMessage(
+        tr('Delete all Undo Tree history from memory and shared extension storage across workspaces? Current file contents will not change. This cannot be undone.'),
+        { modal: true }, label
+    );
+    return selected === label;
+}
+
 async function choosePersistenceMode(): Promise<void> {
     const current = getPersistenceMode();
     const selected = await vscode.window.showQuickPick([
@@ -3380,12 +3170,17 @@ export async function activate(context: vscode.ExtensionContext) {
         await renderCompactPreviewPanel();
     };
 
+    let diagnosticsRenderGeneration = 0;
     const renderDiagnosticsPanel = async () => {
-        if (!diagnosticsPanel) {
+        const panel = diagnosticsPanel;
+        if (!panel) {
             return;
         }
+        const generation = ++diagnosticsRenderGeneration;
         const snapshot = await collectDiagnosticsSnapshot(context);
-        diagnosticsPanel.webview.html = buildDiagnosticsHtml(snapshot);
+        if (diagnosticsPanel === panel && generation === diagnosticsRenderGeneration) {
+            panel.webview.html = buildDiagnosticsHtml(snapshot);
+        }
     };
 
     const showDiagnosticsPanel = async () => {
@@ -3400,11 +3195,20 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active,
                 { enableScripts: true, retainContextWhenHidden: true }
             );
-            diagnosticsPanel.onDidDispose(() => {
-                diagnosticsPanel = undefined;
+            const panel = diagnosticsPanel;
+            panel.webview.html = buildWebviewMessageHtml(tr('Inspecting persisted history…'));
+            let actionRunning = false;
+            panel.onDidDispose(() => {
+                if (diagnosticsPanel === panel) { diagnosticsPanel = undefined; }
             });
-            diagnosticsPanel.webview.onDidReceiveMessage(async (message) => {
+            panel.webview.onDidReceiveMessage(async (message) => {
+                if (actionRunning || diagnosticsPanel !== panel || typeof message?.command !== 'string') { return; }
+                actionRunning = true;
+                let failed = false;
                 try {
+                    if (message.command === 'simulateBackup' || message.command === 'simulateInvalid') {
+                        if (!await confirmDiagnosticsSimulation() || diagnosticsPanel !== panel) { return; }
+                    }
                     switch (message.command) {
                         case 'refresh':
                         case 'validate':
@@ -3438,10 +3242,10 @@ export async function activate(context: vscode.ExtensionContext) {
                         }
                         case 'openStorage':
                             await openStorageFolder(context);
-                            break;
+                            return;
                         case 'showOutput':
                             outputChannel.show(true);
-                            break;
+                            return;
                         case 'simulateBackup':
                             await enqueuePersistOperation(() =>
                                 withPersistStorageEpochLock(
@@ -3465,8 +3269,17 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                     await renderDiagnosticsPanel();
                 } catch (error) {
+                    failed = true;
                     outputChannel.appendLine(`[diagnostics] command failed: ${String(error)}`);
                     void vscode.window.showErrorMessage(tr('Undo Tree: diagnostics action failed. See Output for details.'));
+                } finally {
+                    actionRunning = false;
+                    if (diagnosticsPanel === panel) {
+                        void panel.webview.postMessage({
+                            command: 'diagnosticsActionComplete',
+                            message: failed ? tr('Action failed. Open Output for details.') : '',
+                        });
+                    }
                 }
             });
         } else {
@@ -3571,20 +3384,16 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('undotree.resetAllState', async () => {
-            if (resetInProgress || !manager) {
+            if (resetInProgress || resetConfirmationPending || !manager) {
                 return;
             }
             const treeManager = manager;
 
-            const resetLabel = tr('Reset');
-            const confirmed = await vscode.window.showWarningMessage(
-                tr(
-                    'Undo Tree: delete all in-memory and persisted history for this workspace? This only resets Undo Tree history and does not roll back the current file contents. This cannot be undone.'
-                ),
-                { modal: true },
-                resetLabel
-            );
-            if (confirmed !== resetLabel) {
+            resetConfirmationPending = true;
+            let confirmed: boolean;
+            try { confirmed = await confirmHistoryReset(); }
+            finally { resetConfirmationPending = false; }
+            if (!confirmed || resetInProgress || manager !== treeManager) {
                 return;
             }
 
@@ -4424,6 +4233,10 @@ export async function deactivate() {
 }
 
 export const __test__ = {
+    pruneOrphanPersistedFiles,
+    confirmHistoryReset,
+    buildDiagnosticsHtml,
+    confirmDiagnosticsSimulation,
     choosePersistenceMode,
     persistStateToDisk,
     getPersistenceMode,

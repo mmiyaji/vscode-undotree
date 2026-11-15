@@ -29,6 +29,39 @@ describe('native Undo/Redo with save checkpoints', () => {
     });
     afterEach(() => manager.dispose());
 
+    it('discards stale edits after a checkpoint read failure before saving', () => {
+        manager.resetAll();
+        const base = 'a'.repeat(1000);
+        const tree = manager.getTree(uri, base);
+        const root = tree.nodes.get(tree.rootId)!;
+        root.storage = { kind: 'checkpoint', contentHash: root.hash };
+        manager.contentResolver = () => { throw new Error('missing checkpoint'); };
+        const edit = (text: string, offset: number, remove: number, insert: string, reason?: vscode.TextDocumentChangeReason) =>
+            manager.onDidChangeTextDocument({ document: doc(text), reason, contentChanges: [{ rangeOffset: offset, rangeLength: remove, text: insert, range: new vscode.Range(0, 0, 0, 0) }] } as vscode.TextDocumentChangeEvent);
+        edit(base + 'X', 1000, 0, 'X');
+        edit(base, 1000, 1, '', vscode.TextDocumentChangeReason.Undo);
+        manager.contentResolver = () => base;
+        edit(base + 'Y', 1000, 0, 'Y');
+        manager.onDidSaveTextDocument(doc(base + 'Y'));
+        expect(current()).toBe(base + 'Y');
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
+    });
+
+    it('stores small abandoned edits as deltas even for large documents', () => {
+        manager.resetAll();
+        const base = 'a'.repeat(500000);
+        const tree = manager.getTree(uri, base);
+        for (let i = 0; i < 8; i++) {
+            const inserted = String(i);
+            manager.onDidChangeTextDocument({ document: doc(base + inserted), reason: undefined, contentChanges: [{ rangeOffset: base.length, rangeLength: 0, text: inserted, range: new vscode.Range(0, 0, 0, 0) }] } as vscode.TextDocumentChangeEvent);
+            manager.onDidChangeTextDocument({ document: doc(base), reason: vscode.TextDocumentChangeReason.Undo, contentChanges: [{ rangeOffset: base.length, rangeLength: 1, text: '', range: new vscode.Range(0, 0, 0, 0) }] } as vscode.TextDocumentChangeEvent);
+        }
+        const edits = [...tree.nodes.values()].filter(node => node.label === 'edit');
+        expect(edits).toHaveLength(8);
+        expect(edits.every(node => node.storage.kind === 'delta')).toBe(true);
+        edits.forEach((node, index) => expect(manager.reconstructContent(tree, node.id)).toBe(base + index));
+    });
+
     it('keeps ordinary typing buffered until save', () => {
         change('A', 'AB');
         expect(contents()).toEqual(['A']);

@@ -48,6 +48,19 @@ describe('persisted storage integration', () => {
         await fs.rm(tempDir, { recursive: true, force: true });
     });
 
+    it('refuses to prune files when only an older backup manifest is readable', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, 'manifest.json'), '{');
+        await fs.writeFile(path.join(dir, 'manifest.json.bak'), JSON.stringify({ trees: [{ uri: 'file:///old', file: 'old.json' }] }));
+        await fs.writeFile(path.join(dir, 'old.json'), JSON.stringify({ tree: { nodes: [] } }));
+        await fs.writeFile(path.join(dir, 'recent.json'), JSON.stringify({ tree: { nodes: [] } }));
+        await expect(extension.__test__.pruneOrphanPersistedFiles(context)).rejects.toThrow('Cannot prune');
+        await expect(fs.access(path.join(dir, 'recent.json'))).resolves.toBeUndefined();
+    });
+
     it('defaults to automatic persistence while respecting an explicit manual setting', async () => {
         const extension = require('../extension') as typeof import('../extension');
         const vscode = require('vscode');

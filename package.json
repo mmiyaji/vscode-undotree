@@ -368,12 +368,13 @@
             "type": "string",
             "enum": [
               "none",
+              "smart",
               "time",
               "dateTime",
               "relative",
               "custom"
             ],
-            "default": "time",
+            "default": "smart",
             "order": 10,
             "markdownDescription": "%config.timeFormat.description%"
           },
@@ -503,6 +504,7 @@
     "test:e2e:tracking": "npm run compile && node scripts/run-vscode-tracking.mjs",
     "test:e2e:tracking:auto": "npm run compile && node scripts/run-vscode-tracking.mjs --auto",
     "test:e2e:ui": "node scripts/verify-priority-ui.cjs",
+    "test:e2e:diagnostics": "node scripts/verify-diagnostics-ui.cjs",
     "test:perf": "jest --testPathPatterns=\"perf\\.test\\.ts$\"",
     "report": "jest --json --outputFile=test-report.json && node scripts/generate-report.js",
     "release:patch": "npm version patch",
