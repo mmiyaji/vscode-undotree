@@ -1,5 +1,6 @@
 const example = JSON.stringify(
   {
+    "undotree.trackingMode": "listed",
     "undotree.enabledExtensions": [".ts", ".tsx", ".js", ".json", ".md"],
     "undotree.enabledFileNames": [
       "Dockerfile",
@@ -17,11 +18,25 @@ export function SettingsGuide({ lang }) {
   const ja = lang === "ja";
   const tracking = [
     [
+      "undotree.trackingMode",
+      ja ? "追跡対象の選び方" : "Tracking scope",
+      ja
+        ? "既定のautoは未知の拡張子を含むテキスト全般を追跡します。既存の対象リストが明示されていれば尊重します。textはテキスト全般、listedは指定リストを使います。"
+        : "The default auto mode tracks text files, including unknown extensions, while respecting explicit existing lists. Choose text for all text files or listed for selected extensions and names.",
+    ],
+    [
+      "undotree.maxTrackedFileChars",
+      ja ? "大きな文書の制限" : "Large document limit",
+      ja
+        ? "既定は100万UTF-16単位（UTF-16テキストで約2MB）。上限超過は記録しません。サイドバーでそのファイルを閉じるまで追跡するか、0で上限を解除できます。大きな文書は編集・保存が重くなる場合があります。"
+        : "Defaults to one million UTF-16 code units (about 2 MB of UTF-16 text). Larger files are skipped. Track one until closed from the sidebar, or set 0 to remove the limit. Large files can slow editing and persistence.",
+    ],
+    [
       "undotree.enabledExtensions",
       ja ? "追跡する拡張子" : "Tracked extensions",
       ja
-        ? "既定では一般的なコード・設定・テキストを対象にします。絞り込む場合は、.tsや.mdのように先頭のドットを含めて指定します。"
-        : "Common code, configuration and text files are tracked by default. To narrow the list, include the leading dot, for example .ts or .md.",
+        ? "リスト方式で追跡する拡張子です。絞り込む場合は、.tsや.mdのように先頭のドットを含めて指定します。"
+        : "Extensions used in list mode. To narrow the list, include the leading dot, for example .ts or .md.",
     ],
     [
       "undotree.enabledFileNames",
@@ -41,10 +56,10 @@ export function SettingsGuide({ lang }) {
   const other = [
     [
       "undotree.persistenceMode",
-      "manual",
+      "auto",
       ja
-        ? "再起動後も履歴を使うならauto。manualでは「Save Persisted State」で明示的に保存します。"
-        : "Choose auto to save history automatically for future sessions. With manual, use Save Persisted State explicitly.",
+        ? "既定のautoは履歴を自動保存し、再起動後も利用できます。manualを明示した場合は「Save Persisted State」で保存します。"
+        : "The default auto mode saves history for future sessions. An explicit manual setting is respected; use Save Persisted State in that mode.",
     ],
     [
       "undotree.autosaveInterval",
@@ -104,14 +119,14 @@ export function SettingsGuide({ lang }) {
       <p className="settings-callout">
         {ja ? (
           <>
-            拡張子の配列は既定値への追加ではなく、置き換えです。
+            リスト方式では、拡張子の配列は既定値への追加ではなく、置き換えです。
             <code>enabledExtensions</code>
             を独自に指定すると、既定のファイル名の追跡も無効になります。名前でも追跡したい場合は
             <code>enabledFileNames</code>を一緒に指定します。
           </>
         ) : (
           <>
-            The extensions array replaces the defaults rather than extending
+            In list mode, the extensions array replaces the defaults rather than extending
             them. Customizing <code>enabledExtensions</code> also disables
             default file-name tracking. Set <code>enabledFileNames</code>{" "}
             explicitly to keep tracking files by name.

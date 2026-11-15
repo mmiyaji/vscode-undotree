@@ -34,6 +34,7 @@ describe('UndoTreeProvider initialization', () => {
         vscode.workspace.getConfiguration = jest.fn((section?: string) => {
             if (section === 'undotree') {
                 return {
+                    inspect: (key: string) => key === 'enabledExtensions' ? { globalValue: ['.txt', '.md'] } : undefined,
                     get: jest.fn((key: string) => {
                         switch (key) {
                             case 'enabledExtensions':
@@ -323,6 +324,30 @@ describe('UndoTreeProvider initialization', () => {
         expect(tree.currentId).toBe(1);
         expect(tree.nodes.get(1)?.label).toBe('restore');
         expect(restored.reconstructContent(tree, tree.currentId)).toBe('new text');
+    });
+
+    it.each([
+        ['big.custom', 'a'.repeat(1_000_001), 'size'],
+        ['binary.md', 'text\0binary', 'binary'],
+    ])('explains why %s is not tracked and does not create history', (name, content, reason) => {
+        const vscode = require('vscode');
+        vscode.workspace.getConfiguration = jest.fn(() => ({ get: () => undefined }));
+        const manager = new UndoTreeManager();
+        try {
+            const provider = new UndoTreeProvider({} as any, manager);
+            const document = makeDocument(content, `file:///${name}`);
+            vscode.window.activeTextEditor = { document };
+            vscode.workspace.textDocuments = [document];
+            const view = makeView();
+            provider.resolveWebviewView(view);
+            expect(view.webview.html).toContain(`notTrackedReason: "${reason}"`);
+            expect(manager.hasTree(document.uri)).toBe(false);
+            if (reason === 'size') {
+                expect(view.webview.html).toContain('Track this file until closed');
+                void view.receiveMessage({ command: 'trackLargeFile' });
+                expect(vscode.commands.executeCommand).toHaveBeenCalledWith('undotree.trackLargeFileForSession');
+            }
+        } finally { manager.dispose(); }
     });
 
     it('shows the not-tracked screen for files outside enabledExtensions', () => {

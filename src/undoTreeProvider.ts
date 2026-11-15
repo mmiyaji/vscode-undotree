@@ -5,7 +5,8 @@ import { randomBytes } from 'crypto';
 import { format as formatDate } from 'date-fns';
 import { UndoNode, UndoTreeManager } from './undoTreeManager';
 import { t as tr } from './runtimeL10n';
-import { DEFAULT_ENABLED_EXTENSIONS, DEFAULT_ENABLED_FILE_NAMES, DEFAULT_EXCLUDE_PATTERNS, getTrackingStatus as evaluateTrackingStatus, TrackingStatus } from './tracking';
+import { TrackingStatus } from './tracking';
+import { evaluateDocumentTracking, readTrackingSettings } from './documentTracking';
 
 // The webview only needs presentation metadata, never document contents or diffs.
 type DisplayNode = Pick<UndoNode, 'id' | 'parents' | 'children' | 'timestamp' | 'label'
@@ -15,7 +16,7 @@ type DisplayNode = Pick<UndoNode, 'id' | 'parents' | 'children' | 'timestamp' | 
     isEmpty: boolean;
 };
 
-type NotTrackedReason = '' | 'extension' | 'excludePattern' | 'scheme';
+type NotTrackedReason = TrackingStatus['reason'];
 
 function getNonce(): string {
     return randomBytes(16).toString('hex');
@@ -190,6 +191,12 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
                         break;
                     case 'openSettings':
                         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:mmiyaji.vscode-undotree');
+                        break;
+                    case 'trackLargeFile':
+                        await vscode.commands.executeCommand('undotree.trackLargeFileForSession');
+                        break;
+                    case 'openSizeSettings':
+                        await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree.maxTrackedFileChars');
                         break;
                     case 'openExcludeSettings':
                         await vscode.commands.executeCommand('workbench.action.openSettings', 'undotree.excludePatterns');
@@ -609,28 +616,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
 
     private getTrackingStatus(document: vscode.TextDocument): TrackingStatus {
         const config = vscode.workspace.getConfiguration('undotree', document.uri);
-        const hasConfiguredValue = (key: string): boolean => {
-            const inspected = config.inspect?.<unknown>(key);
-            return !!inspected && (inspected.globalValue !== undefined || inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined);
-        };
         const folder = vscode.workspace.getWorkspaceFolder?.(document.uri);
         const documentPath = document.uri.fsPath || document.fileName || document.uri.toString();
         const relativePath = folder ? require('path').relative(folder.uri.fsPath, documentPath) : documentPath;
-        const extensionSetting = config.get<string[]>('enabledExtensions', DEFAULT_ENABLED_EXTENSIONS);
-        const fileNameSetting = config.get<string[]>('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES);
-        const excludeSetting = config.get<string[]>('excludePatterns', DEFAULT_EXCLUDE_PATTERNS);
-        const status = evaluateTrackingStatus({
-            scheme: document.uri.scheme,
-            fileName: document.uri.scheme === 'file' ? documentPath : document.fileName || documentPath,
-            relativePath,
-        }, {
-            enabledExtensions: Array.isArray(extensionSetting) ? extensionSetting : DEFAULT_ENABLED_EXTENSIONS,
-            enabledFileNames: Array.isArray(fileNameSetting) ? fileNameSetting : DEFAULT_ENABLED_FILE_NAMES,
-            excludePatterns: Array.isArray(excludeSetting) ? excludeSetting : DEFAULT_EXCLUDE_PATTERNS,
-            extensionsExplicit: hasConfiguredValue('enabledExtensions'),
-            fileNamesExplicit: hasConfiguredValue('enabledFileNames'),
-        });
-        return status;
+        return evaluateDocumentTracking(document, relativePath, readTrackingSettings(config));
     }
 
     private formatTimestamp(
@@ -1026,6 +1015,11 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     notTrackedHintGeneric: ${serializeForInlineScript(tr('To enable tracking for this file, click the status bar item or open Settings.'))},
     enableTrackingWithExt: ${serializeForInlineScript(tr('Enable tracking for {0}', '{ext}'))},
     enableTrackingGeneric: ${serializeForInlineScript(tr('Enable tracking for this file'))},
+    trackLargeFile: ${serializeForInlineScript(tr('Track this file until closed'))},
+    largeFileWarning: ${serializeForInlineScript(tr('Large files can slow editing and persistence.'))},
+    tooLarge: ${serializeForInlineScript(tr('Undo Tree: this file exceeds the tracking size limit'))},
+    tooLargeHint: ${serializeForInlineScript(tr('Adjust undotree.maxTrackedFileChars to track larger text files.'))},
+    binaryFile: ${serializeForInlineScript(tr('Binary files are not tracked.'))},
     excludedByPattern: ${serializeForInlineScript(tr('Undo Tree: this file is excluded by a pattern'))},
     excludedByPatternHint: ${serializeForInlineScript(tr('This file matches undotree.excludePatterns. Edit that setting to track it.'))},
     editExcludePatterns: ${serializeForInlineScript(tr('Edit exclude patterns'))},
@@ -1849,6 +1843,14 @@ ${mode === 'diff' ? `<div class="diff-badge">${tr('Diff mode - select a node to 
     const pinnedEl = document.getElementById('pinned');
     if (pinnedEl) { pinnedEl.innerHTML = ''; }
     treeEl.classList.add('plain-view');
+    if (reason === 'size' || reason === 'binary') {
+      treeEl.innerHTML = '<div class="msg">' + escHtml(reason === 'size' ? i18n.tooLarge : i18n.binaryFile) + '</div>' +
+        (reason === 'size' ? '<div class="hint">' + escHtml(i18n.largeFileWarning) + '</div><button class="btn" id="track-large-file-btn">' + escHtml(i18n.trackLargeFile) + '</button><div class="hint">' + escHtml(i18n.tooLargeHint) + '</div><button class="btn" id="open-size-settings-btn">' + escHtml(i18n.openSettings) + '</button>' : '');
+      document.getElementById('track-large-file-btn')?.addEventListener('click', () => send('trackLargeFile'));
+      document.getElementById('open-size-settings-btn')?.addEventListener('click', () => send('openSizeSettings'));
+      nodeEls = []; nodeIds = []; treeMap = {};
+      return;
+    }
     if (reason === 'excludePattern') {
       treeEl.innerHTML =
         '<div class="msg">' + escHtml(i18n.excludedByPattern) + '</div>' +

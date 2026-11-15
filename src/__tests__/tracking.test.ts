@@ -19,12 +19,45 @@ describe('tracking defaults and overrides', () => {
         expect(properties['undotree.enabledExtensions'].default).toEqual(DEFAULT_ENABLED_EXTENSIONS);
         expect(properties['undotree.enabledFileNames'].default).toEqual(DEFAULT_ENABLED_FILE_NAMES);
         expect(properties['undotree.excludePatterns'].default).toEqual(DEFAULT_EXCLUDE_PATTERNS);
+        expect(properties['undotree.trackingMode'].default).toBe('auto');
+        expect(properties['undotree.maxTrackedFileChars'].default).toBe(1_000_000);
     });
 
     it('tracks common source and documentation extensions by default', () => {
         expect(evaluate('src/app.ts').tracked).toBe(true);
         expect(evaluate('src/main.py').tracked).toBe(true);
         expect(evaluate('notes.mdx').tracked).toBe(true);
+    });
+
+    it.each(['data.csv', 'script.custom-language', 'scratch', '.customrc', 'notes.log', 'notebook.ipynb'])('tracks unknown text file %s by default', name => {
+        expect(evaluate(name).matchedBy).toBe('text');
+    });
+
+    it('supports explicit text and listed modes and filename-only legacy settings', () => {
+        expect(evaluate('notes.unknown', { ...baseSettings, trackingMode: 'listed' }).tracked).toBe(false);
+        expect(evaluate('notes.unknown', { ...baseSettings, trackingMode: 'text', extensionsExplicit: true }).tracked).toBe(true);
+        expect(evaluate('notes.unknown', { ...baseSettings, fileNamesExplicit: true }).tracked).toBe(false);
+    });
+
+    it.each(['picture.PNG', 'archive.zip', 'app.wasm', 'font.woff2', 'document.pdf', 'data.sqlite'])('rejects known binary %s even if explicitly listed', name => {
+        expect(evaluate(name, { ...baseSettings, enabledFileNames: [name], fileNamesExplicit: true }).reason).toBe('binary');
+    });
+
+    it('rejects binary content samples but allows Unicode and normal whitespace', () => {
+        const input = { scheme: 'file', fileName: 'text.custom' };
+        expect(getTrackingStatus({ ...input, textSample: 'abc\0xyz' }, baseSettings).reason).toBe('binary');
+        expect(getTrackingStatus({ ...input, textSample: '\u0001\u0002data' }, baseSettings).reason).toBe('binary');
+        expect(getTrackingStatus({ ...input, textSample: '日本語😀\t\r\n\ud800' }, baseSettings).tracked).toBe(true);
+    });
+
+    it('enforces the size limit in every mode, permits its boundary and supports opting out', () => {
+        for (const trackingMode of ['auto', 'text', 'listed'] as const) {
+            const input = { scheme: 'file', fileName: 'notes.md' };
+            const settings = { ...baseSettings, trackingMode };
+            expect(getTrackingStatus({ ...input, characterCount: 1_000_000 }, settings).tracked).toBe(true);
+            expect(getTrackingStatus({ ...input, characterCount: 1_000_001 }, settings).reason).toBe('size');
+            expect(getTrackingStatus({ ...input, characterCount: 1_000_001 }, { ...settings, maxTrackedFileChars: 0 }).tracked).toBe(true);
+        }
     });
 
     it('tracks exact extensionless names and dotfiles case insensitively', () => {

@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { gunzipSync } from 'zlib';
 import type { SerializedUndoTree } from '../undoTreeManager';
 import { UndoTreeManager } from '../undoTreeManager';
+import { decodeCheckpointContent, hashContent } from '../checkpointContent';
 
 jest.mock('vscode');
 
@@ -45,6 +46,98 @@ describe('persisted storage integration', () => {
 
     afterEach(async () => {
         await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('defaults to automatic persistence while respecting an explicit manual setting', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const vscode = require('vscode');
+        const declared = require('../../package.json').contributes.configuration
+            .find((section: { properties: Record<string, unknown> }) => section.properties['undotree.persistenceMode'])
+            .properties['undotree.persistenceMode'];
+        expect(declared.default).toBe('auto');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const manager = new UndoTreeManager();
+        const uri = { toString: () => 'file:///default-mode.md' } as any;
+        manager.onDidSaveTextDocument({ uri, getText: () => 'first' } as any);
+        manager.onDidSaveTextDocument({ uri, getText: () => 'second' } as any);
+        extension.__test__.setManagerForTest(manager);
+        try {
+            expect(extension.__test__.getPersistenceMode()).toBe('manual');
+            await extension.__test__.flushPersistState(context);
+            expect(await extension.__test__.loadPersistedTreeFromDisk(context, uri)).toBeUndefined();
+            // A missing setting also exercises the runtime fallback, rather than
+            // relying only on VS Code supplying the manifest's default value.
+            vscode.workspace.getConfiguration.mockImplementation(() => ({ get: () => undefined }));
+            expect(extension.__test__.getPersistenceMode()).toBe('auto');
+            await extension.__test__.flushPersistState(context);
+            const loaded = await extension.__test__.loadPersistedTreeFromDisk(context, uri);
+            expect(loaded!.tree.nodes).toHaveLength(2);
+            expect(manager.getDirtyUris().size).toBe(0);
+        } finally {
+            extension.__test__.setManagerForTest(undefined);
+            manager.dispose();
+        }
+    });
+
+    it('automatically writes history after the debounce when no persistence mode is configured', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        require('vscode').workspace.getConfiguration.mockImplementation(() => ({ get: () => undefined }));
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const uri = { toString: () => 'file:///automatic-default.md' } as any;
+        const manager = new UndoTreeManager();
+        extension.__test__.setManagerForTest(manager);
+        manager.onRefresh = () => extension.__test__.schedulePersistState(context);
+        try {
+            manager.onDidSaveTextDocument({ uri, getText: () => 'first' } as any);
+            manager.onDidSaveTextDocument({ uri, getText: () => 'second' } as any);
+            expect(await extension.__test__.loadPersistedTreeFromDisk(context, uri)).toBeUndefined();
+            const deadline = Date.now() + 5000;
+            let loaded: Awaited<ReturnType<typeof extension.__test__.loadPersistedTreeFromDisk>>;
+            do {
+                await new Promise(resolve => setTimeout(resolve, 25));
+                loaded = await extension.__test__.loadPersistedTreeFromDisk(context, uri);
+            } while (!loaded && Date.now() < deadline);
+            expect(loaded!.tree.nodes).toHaveLength(2);
+        } finally {
+            manager.onRefresh = undefined;
+            try { await extension.__test__.flushPersistState(context); }
+            finally {
+                extension.__test__.setManagerForTest(undefined);
+                manager.dispose();
+            }
+        }
+    });
+
+    it('persists isolated surrogates without colliding with legacy replacement-character blobs', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const uri = { toString: () => 'file:///surrogates.md' } as any;
+        const content = 'a'.repeat(1_100_000) + '\ud800';
+        const legacyHash = hash(content);
+        // Legacy inline nodes retain their node identity, but need a lossless blob key.
+        const tree = makeTree([{
+            id: 0, parents: [], children: [1], timestamp: 1, label: 'save',
+            hash: legacyHash, storage: { kind: 'full', content },
+        }, {
+            id: 1, parents: [0], children: [], timestamp: 2, label: 'save',
+            hash: hash('next'), storage: { kind: 'full', content: 'next' },
+        }], 1);
+        const contentDir = path.join(tempDir, 'undo-trees', 'content');
+        await fs.mkdir(contentDir, { recursive: true });
+        await fs.writeFile(path.join(contentDir, legacyHash), Buffer.from(content));
+        const manager = new UndoTreeManager();
+        try {
+            await extension.__test__.persistStateToDisk(context, { nextId: 2, trees: { [uri.toString()]: tree } }, false);
+            const loaded = await extension.__test__.loadPersistedTreeFromDisk(context, uri);
+            expect(loaded!.tree.nodes[0].hash).toBe(legacyHash);
+            expect(loaded!.tree.nodes[0].storage).toEqual({ kind: 'checkpoint', contentHash: hashContent(content) });
+            manager.importTree(uri.toString(), loaded!.tree);
+            manager.contentResolver = key => decodeCheckpointContent(gunzipSync(require('fs').readFileSync(path.join(contentDir, key))));
+            manager.asyncContentResolver = async key => decodeCheckpointContent(gunzipSync(await fs.readFile(path.join(contentDir, key))));
+            const restored = manager.getTree(uri);
+            expect(manager.reconstructContent(restored, 0)).toBe(content);
+            expect(await manager.reconstructContentAsync(restored, 0)).toBe(content);
+        } finally { manager.dispose(); }
     });
 
     it('bounds cold checkpoint decoding while persisting and reloads every snapshot', async () => {

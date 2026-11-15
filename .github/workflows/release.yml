@@ -33,7 +33,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: "20.x"
+          node-version: "22.x"
           cache: "npm"
 
       - name: Install dependencies
@@ -50,7 +50,7 @@ jobs:
           echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
 
       - name: Sync extension version with release tag
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Test
         run: npm test
@@ -60,19 +60,26 @@ jobs:
           npm install -g @vscode/vsce
           vsce package --out vscode-undotree-${{ env.RELEASE_VERSION }}.vsix
 
+      - name: Prepare release notes
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/);
+          const start = lines.indexOf(`## ${process.env.RELEASE_VERSION}`);
+          if (start < 0) throw new Error('Missing changelog entry for release version');
+          let end = start + 1;
+          while (end < lines.length && !lines[end].startsWith('## ')) end++;
+          const notes = lines.slice(start, end).join('\n').trim();
+          fs.writeFileSync('release-notes.md', notes + '\n\n### Installation\n\nDownload the attached VSIX and run **Extensions: Install from VSIX...** in VS Code.\n');
+          NODE
+
       # softprops/action-gh-release v2
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
         with:
           tag_name: ${{ inputs.tag }}
           name: Release ${{ inputs.tag }}
-          body: |
-            ## vscode-undotree ${{ inputs.tag }}
-
-            ### インストール方法
-            1. `.vsix` ファイルをダウンロード
-            2. VS Code でコマンドパレット → `Extensions: Install from VSIX...`
-            3. ダウンロードした `.vsix` を選択
+          body_path: release-notes.md
           files: vscode-undotree-${{ env.RELEASE_VERSION }}.vsix
           draft: false
           prerelease: ${{ contains(inputs.tag, '-') }}

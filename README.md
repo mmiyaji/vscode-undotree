@@ -136,7 +136,9 @@ The menu includes:
 
 Persisted history is stored in the extension storage directory, not in the workspace by default.
 
-The default `persistenceMode` is `manual`: history is recorded in memory, and you must use **Save Persisted State** to persist it. Set `undotree.persistenceMode` to `auto` to save history automatically after changes. The default 30-second `autosaveInterval` creates periodic history checkpoints; it does not enable VS Code's file Auto Save setting. Setting it to `0` disables periodic checkpoints, while ordinary file saves still record history.
+The default `persistenceMode` is `auto`: history is recorded in memory and saved to disk after history changes, with a one-second debounce to combine writes. Pending history is also saved during normal extension shutdown. An explicit `manual` setting is respected; in that mode, use **Save Persisted State** to save history to disk. The default 30-second `autosaveInterval` creates periodic history checkpoints; it does not enable VS Code's file Auto Save setting. Setting it to `0` disables periodic checkpoints, while ordinary file saves still record history.
+
+History contains previous file contents, including states captured by periodic checkpoints before a file save. It remains in the extension storage directory after restarting VS Code. Use **Reset All State** to delete the extension's saved history. `hardCompactAfterDays` defaults to `0`, disabling the Hard Compact command. A positive value sets the command's age threshold; it does not schedule automatic deletion.
 
 Saved data is split per tracked file:
 
@@ -155,6 +157,14 @@ Behavior:
 - `manifest.json.bak` is used as a fallback if the main manifest cannot be read
 - Persisted files are written through temporary files first to avoid leaving zero-byte history files behind on interrupted writes
 - Broken persisted tree topology is repaired on load when possible so content can be recovered without dropping the entire history
+
+### Storage maintenance
+
+Routine scheduled cleanup is not required for normal use. Saves update changed trees and leave unloaded histories unread; the shared manifest and tree-directory listing still grow with the number of tracked files. Very long individual histories also increase serialization, merging and reconstruction costs. The document size limit does not cap history length or total disk usage.
+
+Use **Compact History** to simplify a long history. To discard older eligible history, set `hardCompactAfterDays` and review **Hard Compact Preview** before running the command. These commands reorganize or remove history nodes; they do not guarantee all old checkpoint blobs are deleted immediately.
+
+Checkpoint content blobs are retained during saves because another window can still need them. If disk usage becomes significant, inspect Diagnostics and use **Prune Orphan Files** to remove unreferenced files. The cleanup verifies references and skips content deletion while a live history lock exists. Close other windows using this history and allow their locks to expire before retrying. Referenced history is retained. Diagnostics and cleanup perform a full storage scan, so run them when needed rather than on every save.
 
 ## Compaction
 
@@ -246,25 +256,29 @@ The defaults below describe this checkout's [configuration definitions](./packag
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `undotree.trackingMode` | `"auto"` | Text files by default; respects explicitly configured lists. `text` always detects text; `listed` uses the lists |
+| `undotree.maxTrackedFileChars` | `1000000` | Maximum document length in UTF-16 code units; `0` removes the limit |
 | `undotree.enabledExtensions` | Common code, web, configuration, and text extensions | Extensions to track; an explicit list replaces the defaults |
 | `undotree.enabledFileNames` | `Dockerfile`, `Makefile`, `README`, `.gitignore`, and common extensionless files | Exact file names to track, case-insensitively. If `enabledExtensions` has a custom value, these defaults are ignored; set this option explicitly to opt file names back in |
 | `undotree.excludePatterns` | Common generated, dependency, cache, lock, minified, and private-key paths/files | Exclusions always win. Slashless patterns match any basename as before. Path patterns match workspace-relative paths; `*` and `?` stay within one segment and `**` spans directories. Examples: `generated/**`, `**/cache/**`, `*.min.*` |
-| `undotree.persistenceMode` | `"manual"` | `manual` saves only when requested; `auto` saves automatically after history changes |
+| `undotree.persistenceMode` | `"auto"` | `manual` saves only when requested; `auto` saves automatically after history changes |
 | `undotree.autosaveInterval` | `30` | Autosave checkpoint interval in seconds (`0` disables it) |
 | `undotree.hardCompactAfterDays` | `0` | Age threshold for `Hard Compact`; `0` disables it |
 | `undotree.warnOnMultiWindowConflict` | `true` | Show warnings in `auto` mode when the same tracked file appears active in another VS Code window |
 | `undotree.language` | `"auto"` | Runtime sidebar language: `auto`, `en`, or `ja` |
 
-The default extension list covers common programming languages, web files, configuration formats, and text documents. Exact names such as `Dockerfile`, `Makefile`, `README`, and `.gitignore` are enabled too. If you set `enabledExtensions` yourself, that list replaces its defaults and the default exact-name list is suppressed; set `enabledFileNames` explicitly to enable chosen names alongside your extension list. An explicit empty `enabledExtensions` list therefore leaves tracking off unless you also configure file names.
+The default `trackingMode: auto` tracks opened text documents, including unknown extensions and extensionless files. Explicit `enabledExtensions` or `enabledFileNames` settings preserve list-based tracking. Select `text` to track text regardless of those lists, or `listed` to always use the lists. In list-based tracking, a custom extension array replaces its defaults and suppresses the default file-name list; configure `enabledFileNames` explicitly if needed.
 
-Default exclusions cover version-control metadata, dependency and generated directories, caches, minified files and source maps, common lockfiles, `.env` files, and private-key names/extensions. Exclusions always win. Slashless patterns such as `*.min.*` match a basename anywhere. Patterns with slashes match paths relative to each document's workspace folder: `generated/**` excludes only a top-level `generated` directory, while `**/cache/**` excludes `cache` directories at any depth. Backslashes in patterns are normalized to `/`. If a file is outside a workspace, path patterns are matched against its normalized absolute path. The three tracking settings support workspace-folder scope in multi-root workspaces.
+All modes apply exclusions, known binary extensions and a bounded content heuristic, and the document length limit. The binary heuristic samples at most 4096 UTF-16 code units from the beginning and end; it is not a complete file-format detector. The default limit is one million UTF-16 code units (about 2 MB of UTF-16 text; characters such as emoji occupy two units). Oversized documents are rejected before requesting their contents or recording history. Choose **Track this file until closed** in the sidebar to temporarily lift the size limit for that document only, or change `maxTrackedFileChars`. The temporary override still respects exclusions and binary detection; existing history is retained. In text mode, disabling tracking adds the extension or file name to exclusions; edit the matching exclusion to resume tracking.
+
+Default exclusions cover version-control metadata, dependency and generated directories, caches, minified files and source maps, common lockfiles, `.env` files, and private-key names/extensions. Exclusions always win. Slashless patterns such as `*.min.*` match a basename anywhere. Patterns with slashes match paths relative to each document's workspace folder: `generated/**` excludes only a top-level `generated` directory, while `**/cache/**` excludes `cache` directories at any depth. Backslashes in patterns are normalized to `/`. If a file is outside a workspace, path patterns are matched against its normalized absolute path. The tracking settings support workspace-folder scope in multi-root workspaces.
 
 An explicit `excludePatterns` array also replaces its default list. Keep any default exclusions you still need when customizing it. Tracking applies to local `file:` documents; untitled buffers and other URI schemes are not tracked.
 
 <details>
 <summary>Full default tracking lists</summary>
 
-These are defaults, not an additional configuration example. Change only the settings you need.
+These are the list-mode presets and default exclusions. Copying enabledExtensions or enabledFileNames into your settings makes auto mode use list-based tracking. Change only the settings you need.
 
 ```json
 {

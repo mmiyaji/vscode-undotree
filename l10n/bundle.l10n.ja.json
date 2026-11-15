@@ -1,4 +1,11 @@
 {
+  "Track this file until closed": "このファイルを閉じるまで追跡",
+  "Large files can slow editing and persistence.": "大きなファイルは編集・永続化が重くなる場合があります。",
+  "File exceeds the tracking size limit. Click to adjust the limit.": "文書が追跡サイズ上限を超えています。クリックして上限を変更します。",
+  "Binary files are not tracked.": "バイナリファイルは追跡しません。",
+  "Tracking text files, subject to exclusions and size limit.": "除外設定とサイズ上限の範囲でテキストを追跡します。",
+  "Undo Tree: this file exceeds the tracking size limit": "Undo Tree: この文書は追跡サイズ上限を超えています",
+  "Adjust undotree.maxTrackedFileChars to track larger text files.": "大きなテキストを追跡するには undotree.maxTrackedFileChars を変更してください。",
   "Tracking for this file is enabled by an overlapping setting. Edit tracking settings to change it.": "このファイルは重複する設定によって追跡されています。変更するには追跡設定を編集してください。",
   "Enable or disable tracking for the current file extension or exact file name": "現在のファイルの拡張子または完全一致するファイル名の追跡を切り替えます",
   "Enabled file names: {0}": "追跡するファイル名: {0}",

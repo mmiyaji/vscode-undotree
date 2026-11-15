@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const automatic = process.argv.includes('--auto');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'undotree-tracking-'));
 const workspace = path.join(root, 'workspace');
 const otherWorkspace = path.join(root, 'other-workspace');
@@ -17,7 +18,7 @@ await fs.writeFile(workspaceFile, JSON.stringify({ folders: [{ path: workspace }
 await fs.mkdir(path.join(userData, 'User'), { recursive: true });
 await fs.mkdir(path.join(root, 'extensions'), { recursive: true });
 await fs.writeFile(path.join(userData, 'User', 'settings.json'), JSON.stringify({
-    'undotree.persistenceMode': 'manual',
+    ...(!automatic ? { 'undotree.persistenceMode': 'manual' } : {}),
     'undotree.autosaveInterval': 0,
     'undotree.language': 'en',
     'workbench.startupEditor': 'none',
@@ -36,7 +37,7 @@ const child = spawn(executable, [
     '--extensions-dir', path.join(root, 'extensions'), '--skip-welcome',
     '--skip-release-notes', '--disable-workspace-trust',
     `--extensionDevelopmentPath=${repo}`,
-    `--extensionTestsPath=${path.join(repo, 'scripts', 'vscode-tracking-tests.cjs')}`,
+    `--extensionTestsPath=${path.join(repo, 'scripts', automatic ? 'vscode-auto-tracking-tests.cjs' : 'vscode-tracking-tests.cjs')}`,
 ], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 child.stdout.pipe(log, { end: false });
 child.stderr.pipe(log, { end: false });

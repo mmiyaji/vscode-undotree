@@ -2,7 +2,7 @@
   "name": "vscode-undotree",
   "displayName": "UndoTree History",
   "description": "Visualize and navigate undo history as a tree",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "license": "MIT",
   "publisher": "mmiyaji",
   "repository": {
@@ -34,6 +34,10 @@
       {
         "command": "undotree.redo",
         "title": "%commands.redo.title%"
+      },
+      {
+        "command": "undotree.trackLargeFileForSession",
+        "title": "%commands.trackLargeFileForSession.title%"
       },
       {
         "command": "undotree.toggleTracking",
@@ -93,6 +97,26 @@
       {
         "title": "%config.general.title%",
         "properties": {
+          "undotree.trackingMode": {
+            "type": "string",
+            "scope": "resource",
+            "enum": [
+              "auto",
+              "text",
+              "listed"
+            ],
+            "default": "auto",
+            "order": 1,
+            "markdownDescription": "%config.trackingMode.description%"
+          },
+          "undotree.maxTrackedFileChars": {
+            "type": "integer",
+            "scope": "resource",
+            "default": 1000000,
+            "minimum": 0,
+            "order": 5,
+            "markdownDescription": "%config.maxTrackedFileChars.description%"
+          },
           "undotree.enabledExtensions": {
             "type": "array",
             "scope": "resource",
@@ -300,7 +324,7 @@
               "manual",
               "auto"
             ],
-            "default": "manual",
+            "default": "auto",
             "order": 30,
             "markdownDescription": "%config.persistenceMode.description%"
           },
@@ -477,6 +501,7 @@
     "test:e2e": "npm run compile && node scripts/run-playwright-sidebar-context.mjs",
     "test:e2e:history": "npm run compile && node scripts/run-vscode-history.mjs",
     "test:e2e:tracking": "npm run compile && node scripts/run-vscode-tracking.mjs",
+    "test:e2e:tracking:auto": "npm run compile && node scripts/run-vscode-tracking.mjs --auto",
     "test:e2e:ui": "node scripts/verify-priority-ui.cjs",
     "test:perf": "jest --testPathPatterns=\"perf\\.test\\.ts$\"",
     "report": "jest --json --outputFile=test-report.json && node scripts/generate-report.js",

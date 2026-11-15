@@ -60,10 +60,10 @@ exports.run = async function () {
             await expectTracked(name, false);
         }
     });
-    await run('data and binary extensions are not included by default', async () => {
-        for (const name of ['defaults/data.csv', 'defaults/output.log', 'defaults/image.png']) {
-            await expectTracked(name, false);
-        }
+    await run('text data is included and known binary extensions are excluded by default', async () => {
+        await expectTracked('defaults/data.csv', true);
+        await expectTracked('defaults/output.log', true);
+        await expectTracked('defaults/image.png', false);
     });
     await run('virtual text documents are not recorded even with a supported extension', async () => {
         const registration = vscode.workspace.registerTextDocumentContentProvider('tracking-test', {
@@ -135,7 +135,7 @@ exports.run = async function () {
         await expectTracked('first-toggle/source.js', true);
         await command('toggleTracking');
         await sleep(250);
-        assert.ok(!config().get('enabledExtensions').includes('.js'));
+        assert.ok(config().get('excludePatterns').includes('*.js'));
         await expectTracked('first-toggle-after/source.js', false);
         await expectTracked('first-toggle-after/Dockerfile', true);
         await expectTracked('first-toggle-after/.gitignore', true);

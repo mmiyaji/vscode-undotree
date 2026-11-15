@@ -41,6 +41,72 @@ afterEach(() => {
 });
 
 describe('history integrity regressions', () => {
+    it('resynchronizes a file that crossed the size limit and later became small enough again', () => {
+        const manager = createManager();
+        const before = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(before));
+        manager.invalidateTrackingBaseline(makeUri()); // Oversized change was ignored.
+        const after = 'b'.repeat(100);
+        manager.onDidChangeTextDocument({ document: makeDocument(after), contentChanges: [
+            { rangeOffset: 100, rangeLength: 1_000_000, text: '' },
+        ] } as any);
+        manager.onDidSaveTextDocument(makeDocument(after));
+        const tree = manager.getTree(makeUri());
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(after);
+    });
+    it('records a full snapshot after tracking settings invalidate the baseline', () => {
+        const manager = createManager();
+        const uri = 'file:///integrity.md';
+        const before = 'a'.repeat(100);
+        manager.onDidSaveTextDocument(makeDocument(before));
+        // B was inserted while tracking was disabled.
+        manager.invalidateTrackingBaselines();
+        manager.onDidChangeTextDocument(makeChangeEvent(before + 'BC', uri, 101, 'C'));
+        manager.onDidSaveTextDocument(makeDocument(before + 'BC'));
+        const tree = manager.getTree(makeUri());
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(before + 'BC');
+    });
+
+    it('retains queued save contents and leaves subsequent unsaved diffs intact', () => {
+        const manager = createManager();
+        const uri = 'file:///integrity.md';
+        const before = 'a'.repeat(100);
+        let content = before;
+        const document = { ...makeDocument(content), getText: () => content };
+        manager.onDidSaveTextDocument(document);
+        const capture = (text: string) => {
+            manager.onDidChangeTextDocument(makeChangeEvent(content + text, uri, content.length, text));
+            content += text;
+            return manager.captureSave(document)!;
+        };
+        const first = capture('B');
+        const second = capture('C');
+        manager.onDidChangeTextDocument(makeChangeEvent(content + 'D', uri, content.length, 'D'));
+        content += 'D';
+        expect(manager.hasPendingDiffs(makeUri())).toBe(true);
+        first.record();
+        second.record();
+        manager.onDidSaveTextDocument(document);
+        const tree = manager.getTree(makeUri());
+        expect([...tree.nodes.keys()].map(id => manager.reconstructContent(tree, id)))
+            .toEqual([before, before + 'B', before + 'BC', before + 'BCD']);
+        expect(manager.hasPendingDiffs(makeUri())).toBe(false);
+    });
+
+    it('uses a full snapshot when lazy loading changed the captured baseline', () => {
+        const manager = createManager();
+        const before = 'a'.repeat(100);
+        const save = manager.captureSave(makeDocument(before + 'B'))!;
+        manager.syncDocumentState(makeUri(), before + 'B');
+        save.record();
+        manager.onDidChangeTextDocument(makeChangeEvent(before + 'BC', 'file:///integrity.md', 101, 'C'));
+        manager.onDidSaveTextDocument(makeDocument(before + 'BC'));
+        const tree = manager.getTree(makeUri());
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(before + 'BC');
+    });
+
     it('replaces only the changed span when navigating a large document', async () => {
         const manager = createManager();
         const prefix = 'あ😀\r\n'.repeat(40_000);

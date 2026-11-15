@@ -14,6 +14,8 @@ import { UndoTreeProvider } from './undoTreeProvider';
 import { CompactPreviewItem, CompactPreviewResult, SerializedUndoTree, UndoTreeManager, mergeSerializedTrees } from './undoTreeManager';
 import { initializeRuntimeL10n, t as tr } from './runtimeL10n';
 import { isValidContentHash } from './contentHash';
+import { readTrackingSettings, evaluateDocumentTracking, allowLargeDocumentForSession, forgetDocumentTracking, forgetClosedDocumentTracking } from './documentTracking';
+import { encodeCheckpointContent, decodeCheckpointContent, checkpointHash } from './checkpointContent';
 import {
     DEFAULT_ENABLED_EXTENSIONS,
     DEFAULT_ENABLED_FILE_NAMES,
@@ -21,6 +23,7 @@ import {
     getTrackingStatus,
     isExcluded as matchesTrackingExclude,
     TrackingStatus,
+    usesTextTracking,
 } from './tracking';
 
 // バーチャルドキュメント（差分表示用）
@@ -933,7 +936,7 @@ function getPersistedContentHashes(
 
     tree.nodes
         .filter((node) => node.storage.kind === 'full' && node.storage.content !== '')
-        .forEach((node) => hashes.add(requireValidContentHash(node.hash)));
+        .forEach((node) => hashes.add(requireValidContentHash(node.storage.kind === 'full' ? checkpointHash(node.storage.content, node.hash) : node.hash)));
     return hashes;
 }
 
@@ -991,13 +994,13 @@ async function writeGenerationConflictSnapshot(
         if (content === undefined) {
             const buffer = await readFileWithWriteBackupFallback(path.join(contentDir, hash));
             const isGzip = buffer[0] === 0x1f && buffer[1] === 0x8b;
-            content = isGzip ? (await gunzip(buffer)).toString('utf8') : buffer.toString('utf8');
+            content = decodeCheckpointContent(isGzip ? await gunzip(buffer) : buffer);
         }
         const mainContentPath = path.join(contentDir, hash);
         try {
             await fs.access(mainContentPath);
         } catch {
-            await writeFileSafely(mainContentPath, await gzip(Buffer.from(content, 'utf8')));
+            await writeFileSafely(mainContentPath, await gzip(encodeCheckpointContent(content)));
         }
         return {
             ...node,
@@ -1453,7 +1456,6 @@ async function persistStateToDiskUnderLock(
     const compressionThreshold = getCompressionThresholdBytes();
     const checkpointThreshold = getCheckpointThresholdBytes();
     const allEntries = Object.entries(state.trees);
-    const referencedContentHashes = new Set<string>();
     const persistedContentHashesByUri = new Map<string, Set<string>>();
 
     // メモリにないツリーを既存 manifest から保持（上書き保存で消えないようにする）
@@ -1659,9 +1661,6 @@ async function persistStateToDiskUnderLock(
         preparedWriteEntries.push([uri, treeToWrite]);
         persistedDestructiveGenerationsByUri.set(uri, destructiveGenerationToWrite);
         persistOutcomes.push({ uri, action, nodes: treeToWrite.nodes.length, ...(details ? { details } : {}) });
-        for (const hash of getPersistedContentHashes(treeToWrite, checkpointThreshold)) {
-            referencedContentHashes.add(hash);
-        }
     }
 
     for (const [uri, tree] of preparedWriteEntries) {
@@ -1686,19 +1685,9 @@ async function persistStateToDiskUnderLock(
         ],
     };
 
-    let canPruneTreeFiles = existingManifestResult.status !== 'backup';
-    let canPruneContentFiles = existingManifestResult.status !== 'backup';
-    const writtenUris = new Set(preparedWriteEntries.map(([uri]) => uri));
-    const diskBackedFinalEntries = manifest.trees.filter((entry) => !writtenUris.has(entry.uri));
-    await Promise.all(diskBackedFinalEntries.map(async (entry) => {
-        try {
-            for (const hash of await readPersistedContentHashesFromTreeFile(treesDir, entry.file)) {
-                referencedContentHashes.add(hash);
-            }
-        } catch {
-            canPruneContentFiles = false;
-        }
-    }));
+    const canPruneTreeFiles = existingManifestResult.status !== 'backup';
+    // Content cleanup is an explicit diagnostics operation. Do not decode every
+    // unloaded history on the save path just to collect unused blob references.
 
     for (const [uri, tree] of preparedWriteEntries) {
         const contentHashes = getPersistedContentHashes(tree, checkpointThreshold);
@@ -1715,17 +1704,17 @@ async function persistStateToDiskUnderLock(
         // チェックポイントモード: fullコンテンツを別ファイルに分離
         const serializedNodes = useCheckpoint
             ? tree.nodes.map((node) => {
-                if (node.storage.kind !== 'full' || !contentHashes.has(node.hash)) {
+                if (node.storage.kind !== 'full' || !contentHashes.has(checkpointHash(node.storage.content, node.hash))) {
                     return node;
                 }
-                return { ...node, storage: { kind: 'checkpoint' as const, contentHash: node.hash } };
+                return { ...node, storage: { kind: 'checkpoint' as const, contentHash: checkpointHash(node.storage.content, node.hash) } };
             })
             : tree.nodes;
 
         // コンテンツファイルの書き込み（既存ならスキップ、gzip圧縮）
         if (useCheckpoint) {
             const fullContents = new Map(tree.nodes.flatMap(node =>
-                node.storage.kind === 'full' ? [[node.hash, node.storage.content] as const] : []));
+                node.storage.kind === 'full' ? [[checkpointHash(node.storage.content, node.hash), node.storage.content] as const] : []));
             const hashes = Array.from(contentHashes);
             const writeContent = async (hash: string) => {
                 const filePath = path.join(contentDir, hash);
@@ -1738,7 +1727,7 @@ async function persistStateToDiskUnderLock(
                     if (content === undefined) {
                         throw new Error(`Missing checkpoint content for hash ${hash}`);
                     }
-                    const compressed = await gzip(Buffer.from(content, 'utf8'));
+                    const compressed = await gzip(encodeCheckpointContent(content));
                     await writeFileSafely(filePath, compressed);
                 }
             };
@@ -1787,7 +1776,6 @@ async function persistStateToDiskUnderLock(
     // Another window may still hold a checkpoint that was removed from the main
     // tree by compaction. Diagnostics > Prune Orphan Files remains the explicit,
     // coordinated cleanup path once no window needs those recovery blobs.
-    void canPruneContentFiles;
 
     manager?.debugLog?.(
         `[persist] treeCount=${allEntries.length} persistedCount=${persistedEntries.length} writtenCount=${writeEntries.length} paused=${paused}`
@@ -2620,21 +2608,7 @@ async function rebuildPersistedManifestFromTreeFiles(
 }
 
 function getTrackingConfiguration(document: vscode.TextDocument) {
-    const config = vscode.workspace.getConfiguration('undotree', document.uri);
-    const extensions = config.get<string[]>('enabledExtensions', DEFAULT_ENABLED_EXTENSIONS);
-    const fileNames = config.get<string[]>('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES);
-    const exclusions = config.get<string[]>('excludePatterns', DEFAULT_EXCLUDE_PATTERNS);
-    const hasConfiguredValue = (key: string): boolean => {
-        const inspected = config.inspect<unknown>(key);
-        return !!inspected && (inspected.globalValue !== undefined || inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined);
-    };
-    return {
-        enabledExtensions: Array.isArray(extensions) ? extensions : DEFAULT_ENABLED_EXTENSIONS,
-        enabledFileNames: Array.isArray(fileNames) ? fileNames : DEFAULT_ENABLED_FILE_NAMES,
-        excludePatterns: Array.isArray(exclusions) ? exclusions : DEFAULT_EXCLUDE_PATTERNS,
-        extensionsExplicit: hasConfiguredValue('enabledExtensions'),
-        fileNamesExplicit: hasConfiguredValue('enabledFileNames'),
-    };
+    return readTrackingSettings(vscode.workspace.getConfiguration('undotree', document.uri));
 }
 
 function getDocumentRelativePath(document: vscode.TextDocument): string {
@@ -2643,20 +2617,21 @@ function getDocumentRelativePath(document: vscode.TextDocument): string {
 }
 
 function getDocumentTrackingStatus(document: vscode.TextDocument): TrackingStatus {
-    return getTrackingStatus({
-        scheme: document.uri.scheme,
-        fileName: document.uri.scheme === 'file' ? document.uri.fsPath : document.fileName,
-        relativePath: getDocumentRelativePath(document),
-    }, getTrackingConfiguration(document));
+    return evaluateDocumentTracking(document, getDocumentRelativePath(document), getTrackingConfiguration(document));
 }
 
-function getTrackingConfigTarget(config: vscode.WorkspaceConfiguration): vscode.ConfigurationTarget {
+function getTrackingConfigTarget(config: vscode.WorkspaceConfiguration, preferredKey?: string): vscode.ConfigurationTarget {
+    const preferred = preferredKey ? config.inspect<unknown>(preferredKey) : undefined;
+    if (preferred?.workspaceFolderValue !== undefined) { return vscode.ConfigurationTarget.WorkspaceFolder; }
+    if (preferred?.workspaceValue !== undefined) { return vscode.ConfigurationTarget.Workspace; }
+    if (preferred?.globalValue !== undefined) { return vscode.ConfigurationTarget.Global; }
     const extensionScope = config.inspect<string[]>('enabledExtensions');
     const fileNameScope = config.inspect<string[]>('enabledFileNames');
-    if (extensionScope?.workspaceFolderValue !== undefined || fileNameScope?.workspaceFolderValue !== undefined) {
+    const modeScope = config.inspect<string>('trackingMode');
+    if (extensionScope?.workspaceFolderValue !== undefined || fileNameScope?.workspaceFolderValue !== undefined || modeScope?.workspaceFolderValue !== undefined) {
         return vscode.ConfigurationTarget.WorkspaceFolder;
     }
-    if (extensionScope?.workspaceValue !== undefined || fileNameScope?.workspaceValue !== undefined) {
+    if (extensionScope?.workspaceValue !== undefined || fileNameScope?.workspaceValue !== undefined || modeScope?.workspaceValue !== undefined) {
         return vscode.ConfigurationTarget.Workspace;
     }
     return vscode.ConfigurationTarget.Global;
@@ -2671,7 +2646,7 @@ function getPersistenceMode(): 'manual' | 'auto' {
     const value = vscode.workspace
         .getConfiguration('undotree')
         .get<string>('persistenceMode');
-    return value === 'auto' ? 'auto' : 'manual';
+    return value === 'manual' ? 'manual' : 'auto';
 }
 
 function getWarnOnMultiWindowConflict(): boolean {
@@ -3107,15 +3082,19 @@ function updateStatusBar(editor: vscode.TextEditor | undefined) {
         ? tr('$(history) Undo Tree: ON')
         : tr('$(circle-slash) Undo Tree: OFF');
     statusBarItem.tooltip = [
-        excluded
+        trackingStatus.reason === 'size' ? tr('File exceeds the tracking size limit. Click to adjust the limit.')
+            : trackingStatus.reason === 'binary' ? tr('Binary files are not tracked.')
+            : excluded
             ? tr('Excluded by pattern. Click to edit exclude patterns.')
             : tracked
             ? tr('Tracking {0}. Click to disable.', ext)
             : tr('Not tracking {0}. Click to enable.', ext),
-        tr('Enabled: {0}', enabled.join(', ') || '(none)'),
-        enabledFileNames.length > 0 ? tr('Enabled file names: {0}', enabledFileNames.join(', ')) : '',
+        usesTextTracking(trackingConfig) ? tr('Tracking text files, subject to exclusions and size limit.') : tr('Enabled: {0}', enabled.join(', ') || '(none)'),
+        !usesTextTracking(trackingConfig) && enabledFileNames.length > 0 ? tr('Enabled file names: {0}', enabledFileNames.join(', ')) : '',
     ].filter(Boolean).join('\n');
-    statusBarItem.command = excluded
+    statusBarItem.command = trackingStatus.reason === 'binary' ? undefined : trackingStatus.reason === 'size'
+        ? { command: 'workbench.action.openSettings', title: tr('Open Settings'), arguments: [getSettingSearchQuery('undotree.maxTrackedFileChars')] }
+        : excluded
         ? {
             command: 'workbench.action.openSettings',
             title: tr('Open Exclude Settings'),
@@ -3250,7 +3229,7 @@ export async function activate(context: vscode.ExtensionContext) {
     manager.contentResolver = (hash) => {
         const contentPath = path.join(treesDir, 'content', requireValidContentHash(hash));
         try {
-            return readCheckpointContentBuffer(contentPath).toString('utf8');
+            return decodeCheckpointContent(readCheckpointContentBuffer(contentPath));
         } catch (error) {
             throw new Error(`Failed to load checkpoint content ${hash}: ${String(error)}`);
         }
@@ -3260,7 +3239,7 @@ export async function activate(context: vscode.ExtensionContext) {
         try {
             const buf = await fs.readFile(contentPath);
             const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
-            return isGzip ? (await gunzip(buf)).toString('utf8') : buf.toString('utf8');
+            return decodeCheckpointContent(isGzip ? await gunzip(buf) : buf);
         } catch (error) {
             throw new Error(`Failed to load checkpoint content ${hash}: ${String(error)}`);
         }
@@ -3793,6 +3772,19 @@ export async function activate(context: vscode.ExtensionContext) {
             await vscode.commands.executeCommand(picked.command);
         }),
 
+        vscode.commands.registerCommand('undotree.trackLargeFileForSession', async () => {
+            const document = vscode.window.activeTextEditor?.document;
+            const treeManager = manager;
+            if (resetInProgress || !document || !treeManager || getDocumentTrackingStatus(document).reason !== 'size') { return; }
+            allowLargeDocumentForSession(document);
+            treeManager.invalidateTrackingBaseline(document.uri);
+            if (isTracked(document)) {
+                await enqueueDocumentTask(document.uri, () => ensureTreeLoaded(context, treeManager, document));
+            }
+            provider.refresh();
+            updateStatusBar(vscode.window.activeTextEditor);
+        }),
+
         vscode.commands.registerCommand('undotree.toggleTracking', async () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor || editor.document.isUntitled || editor.document.uri.scheme !== 'file') {
@@ -3807,6 +3799,25 @@ export async function activate(context: vscode.ExtensionContext) {
             }
             const config = vscode.workspace.getConfiguration('undotree', editor.document.uri);
             const status = getDocumentTrackingStatus(editor.document);
+            if (status.reason === 'size' || status.reason === 'binary') {
+                if (status.reason === 'binary') { vscode.window.showInformationMessage(tr('Binary files are not tracked.')); }
+                else { await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.maxTrackedFileChars')); }
+                return;
+            }
+            if (status.tracked && usesTextTracking(getTrackingConfiguration(editor.document))) {
+                const name = path.basename(editor.document.fileName);
+                if (/[?*]/.test(name)) {
+                    await vscode.commands.executeCommand('workbench.action.openSettings', getSettingSearchQuery('undotree.excludePatterns'));
+                    return;
+                }
+                const pattern = status.extension ? `*${status.extension}` : name;
+                const patterns = getTrackingConfiguration(editor.document).excludePatterns;
+                await config.update('excludePatterns', [...patterns, pattern], getTrackingConfigTarget(config, 'excludePatterns'));
+                vscode.window.showInformationMessage(tr('Undo Tree: disabled for {0}', status.extension || name));
+                updateStatusBar(editor);
+                return;
+            }
+
             const currentExtensions = config.get<string[]>('enabledExtensions', DEFAULT_ENABLED_EXTENSIONS);
             const currentFileNames = config.get<string[]>('enabledFileNames', DEFAULT_ENABLED_FILE_NAMES);
             const fileName = path.basename(editor.document.fileName);
@@ -4046,8 +4057,9 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.workspace.onDidChangeTextDocument((e) => {
-            if (!resetInProgress && isTracked(e.document)) {
-                manager?.onDidChangeTextDocument(e);
+            if (!resetInProgress && manager) {
+                if (isTracked(e.document)) { manager.onDidChangeTextDocument(e); }
+                else { manager.invalidateTrackingBaseline(e.document.uri); }
             }
         }),
 
@@ -4055,17 +4067,21 @@ export async function activate(context: vscode.ExtensionContext) {
             const treeManager = manager;
             const saveTaskEpoch = documentTaskEpoch;
             if (!resetInProgress && isTracked(doc) && treeManager) {
+                const save = treeManager.captureSave(doc);
+                if (!save) { return; }
                 void enqueueDocumentTask(doc.uri, async () => {
-                    if (manager !== treeManager) {
-                        return;
-                    }
-                    // Save All can include background documents whose persisted
-                    // tree has not been lazily loaded yet. Load first so saving
-                    // cannot replace it with a fresh one-node tree.
-                    await ensureTreeLoaded(context, treeManager, doc);
-                    if (manager === treeManager && saveTaskEpoch === documentTaskEpoch) {
-                        treeManager.onDidSaveTextDocument(doc);
-                    }
+                    try {
+                        if (manager !== treeManager) {
+                            return;
+                        }
+                        // Save All can include background documents whose persisted
+                        // tree has not been lazily loaded yet. Load first so saving
+                        // cannot replace it with a fresh one-node tree.
+                        await ensureTreeLoaded(context, treeManager, save.document);
+                        if (manager === treeManager && saveTaskEpoch === documentTaskEpoch) {
+                            save.record();
+                        }
+                    } finally { save.dispose(); }
                 });
             }
         }),
@@ -4080,7 +4096,25 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }),
 
+        vscode.window.tabGroups.onDidChangeTabs(event => {
+            if (event.closed.length === 0) { return; }
+            const tabUris = (tab: vscode.Tab): string[] => {
+                if (tab.input instanceof vscode.TabInputText) { return [tab.input.uri.toString()]; }
+                if (tab.input instanceof vscode.TabInputTextDiff) { return [tab.input.original.toString(), tab.input.modified.toString()]; }
+                return [];
+            };
+            const closedUris = new Set(event.closed.flatMap(tabUris));
+            const openUris = new Set(vscode.window.tabGroups.all.flatMap(group => group.tabs.flatMap(tabUris)));
+            // VS Code may keep a TextDocument alive after its last tab closes.
+            for (const document of forgetClosedDocumentTracking(vscode.workspace.textDocuments, closedUris, openUris)) {
+                manager?.invalidateTrackingBaseline(document.uri);
+            }
+            provider.refresh();
+            updateStatusBar(vscode.window.activeTextEditor);
+        }),
+
         vscode.workspace.onDidCloseTextDocument((doc) => {
+            forgetDocumentTracking(doc);
             const treeManager = manager;
             const closeGeneration = bumpDocumentLifecycle(doc.uri);
             treeManager?.debugLog?.(`[closeTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${treeManager.hasTree(doc.uri)}`);
@@ -4132,6 +4166,13 @@ export async function activate(context: vscode.ExtensionContext) {
             if (resetInProgress) {
                 return;
             }
+            // Preserve the opening state while disk history loads. Reading the
+            // live document later can absorb the first save into a root-only
+            // tree, which is intentionally not persisted.
+            const openingContent = isTracked(doc) ? doc.getText() : undefined;
+            const openingDocument = openingContent === undefined ? doc : {
+                uri: doc.uri, getText: () => openingContent,
+            } as vscode.TextDocument;
             void enqueueDocumentTask(doc.uri, async () => {
                 if (
                     isTracked(doc) &&
@@ -4141,7 +4182,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 ) {
                     provider.rememberDocument(doc);
                     const wasResident = treeManager.hasTree(doc.uri);
-                    await ensureTreeLoaded(context, treeManager, doc);
+                    await ensureTreeLoaded(context, treeManager, openingDocument);
                     if (openTaskEpoch !== documentTaskEpoch || manager !== treeManager) {
                         return;
                     }
@@ -4149,7 +4190,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         // A closed document may have changed on disk. Only a
                         // genuine reopen reconciles a resident tree; changing
                         // editor focus or saving must keep its delta buffer.
-                        treeManager.syncDocumentState(doc.uri, doc.getText());
+                        treeManager.syncDocumentState(doc.uri, openingDocument.getText());
                     }
                     await acquireMultiWindowLock(context, doc, outputChannel);
                     provider.captureWindowContext();
@@ -4191,6 +4232,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (
+                e.affectsConfiguration('undotree.trackingMode') ||
+                e.affectsConfiguration('undotree.maxTrackedFileChars') ||
                 e.affectsConfiguration('undotree.enabledExtensions') ||
                 e.affectsConfiguration('undotree.enabledFileNames') ||
                 e.affectsConfiguration('undotree.excludePatterns') ||
@@ -4211,6 +4254,10 @@ export async function activate(context: vscode.ExtensionContext) {
                 e.affectsConfiguration('undotree.memoryCheckpointThresholdKB') ||
                 e.affectsConfiguration('undotree.contentCacheMaxKB')
             ) {
+                if (['trackingMode', 'maxTrackedFileChars', 'enabledExtensions', 'enabledFileNames', 'excludePatterns'].some(key =>
+                    e.affectsConfiguration(`undotree.${key}`))) {
+                    manager?.invalidateTrackingBaselines();
+                }
                 if (e.affectsConfiguration('undotree.persistenceMode')) {
                     schedulePersistState(context);
                 }
@@ -4357,6 +4404,9 @@ export async function deactivate() {
 
 export const __test__ = {
     persistStateToDisk,
+    getPersistenceMode,
+    schedulePersistState,
+    flushPersistState,
     enqueuePersistOperation,
     withPersistStorageLock,
     simulateExternalStorageReset: (context: vscode.ExtensionContext) =>

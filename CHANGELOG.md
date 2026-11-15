@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.10
+
+### Defaults and settings
+
+- History now persists automatically by default. Explicit `persistenceMode: manual` settings remain unchanged.
+- Added `trackingMode` with `auto`, `text`, and `listed` options. The default `auto` tracks text documents, including unknown extensions and extensionless files, while respecting explicitly configured extension and file-name lists.
+- Added a default limit of one million UTF-16 code units per document. Oversized documents show their exclusion reason and can be enabled individually until their last tab closes. Binary detection and existing generated-file, environment-file, and private-key exclusions apply in every mode.
+
+### Fixes
+
+- Capture each save's content, timestamp, and edits before asynchronous history loading so consecutive saves retain their intermediate states.
+- Preserve the opening document state so a quick first save is not absorbed into an unpersisted initial node.
+- Record a full snapshot when tracking resumes after ignored edits, including documents that cross the size limit and later shrink.
+- Preserve isolated UTF-16 surrogates in checkpoint content and distinguish them from replacement characters in content hashes. Existing UTF-8 checkpoint files remain readable; the new lossless payloads require this version or later.
+- Revoke per-document large-file overrides when their last tab closes, even if VS Code retains the document internally.
+
+### Performance and validation
+
+- Removed unnecessary reads and decoding of unloaded history files on each save. A local five-sample benchmark with 1,000 closed histories and 3,000 retained content files reduced median single-file persistence time from 596 ms to 51 ms.
+- Added coverage for queued saves, Unicode checkpoint encoding, tracking limits, background compression, accumulated storage, and manual versus automatic persistence.
+- Verified automatic tracking and persistence in actual VS Code across 53 checks, including dummy environment files, UTF-16 text, intermediate saves, size boundaries, periodic checkpoints, and multi-root settings.
+- Updated the English/Japanese documentation and website settings guide with automatic persistence defaults, tracking modes, size limits, and storage maintenance guidance.
+
 ## 0.3.9
 
 ### Improvements

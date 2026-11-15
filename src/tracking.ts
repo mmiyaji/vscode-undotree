@@ -31,7 +31,33 @@ export const DEFAULT_EXCLUDE_PATTERNS = [
     '.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
 ];
 
+export const DEFAULT_MAX_TRACKED_FILE_CHARS = 1_000_000;
+const BINARY_EXTENSIONS = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.bmp', '.tif', '.tiff', '.heic',
+    '.pdf', '.zip', '.gz', '.bz2', '.xz', '.7z', '.rar', '.tar', '.zst',
+    '.exe', '.dll', '.so', '.dylib', '.o', '.obj', '.a', '.lib', '.class', '.jar', '.wasm',
+    '.woff', '.woff2', '.ttf', '.otf', '.eot', '.mp3', '.mp4', '.wav', '.ogg', '.flac', '.webm', '.mov',
+    '.sqlite', '.sqlite3', '.db', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.bin',
+]);
+
+export function usesTextTracking(settings: TrackingSettings): boolean {
+    return settings.trackingMode === 'text' || (settings.trackingMode !== 'listed'
+        && !settings.extensionsExplicit && !settings.fileNamesExplicit);
+}
+
+export function looksBinary(sample: string): boolean {
+    let controls = 0;
+    for (let i = 0; i < sample.length; i++) {
+        const code = sample.charCodeAt(i);
+        if (code === 0) { return true; }
+        if ((code < 32 && ![9, 10, 12, 13].includes(code)) || code === 127) { controls++; }
+    }
+    return controls > 0 && controls / sample.length > 0.01;
+}
+
 export interface TrackingSettings {
+    trackingMode?: 'auto' | 'text' | 'listed';
+    maxTrackedFileChars?: number;
     enabledExtensions: string[];
     enabledFileNames: string[];
     excludePatterns: string[];
@@ -45,9 +71,11 @@ export interface TrackingInput {
     scheme: string;
     fileName: string;
     relativePath?: string;
+    characterCount?: number;
+    textSample?: string;
 }
 
-export type TrackingStatus = { tracked: boolean; reason: '' | 'extension' | 'excludePattern' | 'scheme'; extension: string; fileName: string; matchedBy: '' | 'fileName' | 'extension' };
+export type TrackingStatus = { tracked: boolean; reason: '' | 'extension' | 'excludePattern' | 'scheme' | 'binary' | 'size'; extension: string; fileName: string; matchedBy: '' | 'fileName' | 'extension' | 'text' };
 
 export function getTrackingStatus(input: TrackingInput, settings: TrackingSettings): TrackingStatus {
     const fileName = basename(input.fileName);
@@ -59,6 +87,17 @@ export function getTrackingStatus(input: TrackingInput, settings: TrackingSettin
     const relativePath = normalizePath(input.relativePath || fileName);
     if (settings.excludePatterns.some(pattern => matchesExcludePattern(input.fileName, relativePath, pattern))) {
         return { tracked: false, reason: 'excludePattern', extension, fileName, matchedBy: '' };
+    }
+
+    if (BINARY_EXTENSIONS.has(extension) || (input.textSample !== undefined && looksBinary(input.textSample))) {
+        return { tracked: false, reason: 'binary', extension, fileName, matchedBy: '' };
+    }
+    const limit = settings.maxTrackedFileChars ?? DEFAULT_MAX_TRACKED_FILE_CHARS;
+    if (limit > 0 && input.characterCount !== undefined && input.characterCount > limit) {
+        return { tracked: false, reason: 'size', extension, fileName, matchedBy: '' };
+    }
+    if (usesTextTracking(settings)) {
+        return { tracked: true, reason: '', extension, fileName, matchedBy: 'text' };
     }
 
     const filenameSettings = settings.fileNamesExplicit || !settings.extensionsExplicit
