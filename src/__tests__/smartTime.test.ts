@@ -7,7 +7,7 @@ describe('smart history timestamps', () => {
     const manager = new UndoTreeManager();
     const provider = new UndoTreeProvider({} as any, manager) as any;
     afterAll(() => manager.dispose());
-    const stamp = (date: Date) => provider.formatTimestamp(date.getTime(), 'smart', '');
+    const stamp = (date: Date) => provider.createTimestampFormatter('smart', '')(date.getTime());
     beforeEach(() => jest.setSystemTime(new Date(2026, 10, 15, 0, 5)));
 
     it('shows only hours and minutes today, and a day indicator yesterday', () => {

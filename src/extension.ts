@@ -1248,9 +1248,14 @@ async function persistStateToDiskUnderLock(
             manifestInvalid: true as const,
         };
     }
-    const existingUris = new Set((existingManifest?.trees ?? []).map((entry) => entry.uri));
+    const manifestEntries = new Map<string, PersistedManifest['trees'][number]>();
+    for (const entry of existingManifest?.trees ?? []) {
+        if (!manifestEntries.has(entry.uri)) {
+            manifestEntries.set(entry.uri, entry);
+        }
+    }
     const persistedEntries = allEntries.filter(([uri, tree]) =>
-        existingUris.has(uri) || tree.nodes.length > 1
+        manifestEntries.has(uri) || tree.nodes.length > 1
     );
 
     // dirty なエントリのみ書き込む（undefined は persist 対象の全件）
@@ -1258,11 +1263,7 @@ async function persistStateToDiskUnderLock(
         ? persistedEntries.filter(([uri]) => dirtyUris.has(uri))
         : persistedEntries;
 
-    const inMemoryUris = new Set(allEntries.map(([uri]) => uri));
-    const preservedEntries = (existingManifest?.trees ?? []).filter(e => !inMemoryUris.has(e.uri));
-
     const preparedWriteEntries: Array<[string, NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>]> = [];
-    const skippedDestructiveUris = new Set<string>();
     // nextId is storage-global. Even a request that skips every tree because of
     // a generation conflict must never roll it back below the durable manifest.
     let persistedNextId = Math.max(state.nextId, existingManifest?.nextId ?? 1);
@@ -1280,9 +1281,9 @@ async function persistStateToDiskUnderLock(
         const expectedDestructiveGeneration = expectedDestructiveGenerations.get(uri) ?? 0;
         let destructiveGenerationToWrite = expectedDestructiveGeneration;
         const destructiveChange = destructiveChanges.get(uri);
-        if (destructiveChange && !existingUris.has(uri) && destructiveChange.baseRevision !== null) {
+        const existingEntry = manifestEntries.get(uri);
+        if (destructiveChange && !existingEntry && destructiveChange.baseRevision !== null) {
             unpersistedUris.add(uri);
-            skippedDestructiveUris.add(uri);
             persistOutcomes.push({
                 uri,
                 action: 'preserved-existing',
@@ -1291,9 +1292,9 @@ async function persistStateToDiskUnderLock(
             });
             continue;
         }
-        if (existingUris.has(uri)) {
+        if (existingEntry && existingManifest) {
             try {
-                const existing = await loadPersistedTreeFromDisk(context, vscode.Uri.parse(uri));
+                const existing = await readPersistedTreeFile(context, existingEntry, existingManifest.nextId);
                 if (!existing?.tree) {
                     unpersistedUris.add(uri);
                     persistOutcomes.push({
@@ -1307,7 +1308,8 @@ async function persistStateToDiskUnderLock(
                 if (existing?.tree) {
                     const existingRootHash = getSerializedRootHash(existing.tree);
                     const incomingRootHash = getSerializedRootHash(tree);
-                    const existingRevision = getSerializedTreeRevision(existing.tree);
+                    let existingRevision: string | undefined;
+                    const getExistingRevision = () => existingRevision ??= getSerializedTreeRevision(existing.tree);
                     destructiveGenerationToWrite = existing.destructiveGeneration;
                     if (expectedDestructiveGeneration !== existing.destructiveGeneration) {
                         unpersistedUris.add(uri);
@@ -1320,7 +1322,7 @@ async function persistStateToDiskUnderLock(
                             state.nextId,
                             expectedDestructiveGeneration,
                             existing.destructiveGeneration,
-                            existingRevision
+                            getExistingRevision()
                         );
                         conflictPersistedPathsByUri.set(uri, conflict.filePath);
                         persistedContentHashesByUri.set(uri, conflict.checkpointHashes);
@@ -1331,15 +1333,15 @@ async function persistStateToDiskUnderLock(
                             details: `stale-destructive-generation expected=${expectedDestructiveGeneration} actual=${existing.destructiveGeneration}`,
                         });
                         continue;
-                    } else if (destructiveChange && destructiveChange.baseRevision === existingRevision) {
+                    } else if (destructiveChange && destructiveChange.baseRevision === getExistingRevision()) {
                         treeToWrite = tree;
                         destructiveGenerationToWrite = existing.destructiveGeneration + 1;
                         persistedNextId = Math.max(persistedNextId, existing.nextId);
                         action = 'replaced';
-                        details = `existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} revision=${existingRevision}`;
+                        details = `existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} revision=${getExistingRevision()}`;
                         persistRootMismatchWarnedUris.delete(uri);
                         manager?.debugLog?.(
-                            `[persist-merge] uri=${uri} mode=replace-cas existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} revision=${existingRevision}`
+                            `[persist-merge] uri=${uri} mode=replace-cas existingNodes=${existing.tree.nodes.length} incomingNodes=${tree.nodes.length} revision=${getExistingRevision()}`
                         );
                     } else if (destructiveChange) {
                         if (existingRootHash && incomingRootHash && existingRootHash === incomingRootHash) {
@@ -1355,9 +1357,9 @@ async function persistStateToDiskUnderLock(
                             treeToWrite = merged.tree;
                             persistedNextId = Math.max(persistedNextId, merged.nextId);
                             action = 'merged';
-                            details = `destructive-cas-abandoned expected=${destructiveChange.baseRevision ?? 'missing'} actual=${existingRevision}`;
+                            details = `destructive-cas-abandoned expected=${destructiveChange.baseRevision ?? 'missing'} actual=${getExistingRevision()}`;
                             manager?.debugLog?.(
-                                `[persist-merge] uri=${uri} mode=merge reason=destructive-cas-abandoned expected=${destructiveChange.baseRevision ?? 'missing'} actual=${existingRevision}`
+                                `[persist-merge] uri=${uri} mode=merge reason=destructive-cas-abandoned expected=${destructiveChange.baseRevision ?? 'missing'} actual=${getExistingRevision()}`
                             );
                             if (!persistRootMismatchWarnedUris.has(uri)) {
                                 persistRootMismatchWarnedUris.add(uri);
@@ -1423,7 +1425,7 @@ async function persistStateToDiskUnderLock(
                 continue;
             }
         }
-        if (!existingUris.has(uri) && (destructiveChange || replaceUris.has(uri))) {
+        if (!existingEntry && (destructiveChange || replaceUris.has(uri))) {
             destructiveGenerationToWrite = expectedDestructiveGeneration + 1;
         }
         preparedWriteEntries.push([uri, treeToWrite]);
@@ -1435,9 +1437,11 @@ async function persistStateToDiskUnderLock(
         const revision = getSerializedTreeRevision(tree);
         persistedTreeRevisionsByUri.set(uri, revision);
         const incoming = state.trees[uri];
-        if (incoming && getSerializedTreeRevision(incoming) === revision && !unpersistedUris.has(uri)) {
+        if (!unpersistedUris.has(uri) && incoming &&
+            (incoming === tree || getSerializedTreeRevision(incoming) === revision)) {
             snapshotCompatibleUris.add(uri);
         }
+        manifestEntries.set(uri, { uri, file: makeTreeFileName(uri) });
     }
 
     const manifest: PersistedManifest = {
@@ -1445,12 +1449,7 @@ async function persistStateToDiskUnderLock(
         savedAt: Date.now(),
         nextId: persistedNextId,
         paused,
-        trees: [
-            ...persistedEntries
-                .filter(([uri]) => !skippedDestructiveUris.has(uri))
-                .map(([uri]) => ({ uri, file: makeTreeFileName(uri) })),
-            ...preservedEntries,
-        ],
+        trees: Array.from(manifestEntries.values()),
     };
 
     // Content cleanup is an explicit diagnostics operation. Do not decode every
@@ -1723,22 +1722,20 @@ async function readPersistedManifest(
 async function loadPersistedTreeFromDisk(
     context: vscode.ExtensionContext,
     uri: vscode.Uri
-): Promise<{
-    nextId: number;
-    destructiveGeneration: number;
-    tree: NonNullable<ReturnType<UndoTreeManager['exportState']>['trees'][string]>;
-} | undefined> {
-    const manifestResult = await readPersistedManifest(context);
-    const manifest = manifestResult.manifest;
+) {
+    const { manifest } = await readPersistedManifest(context);
     if (!manifest) {
         return undefined;
     }
-
     const entry = manifest.trees.find((treeEntry) => treeEntry.uri === uri.toString());
-    if (!entry) {
-        return undefined;
-    }
+    return entry && readPersistedTreeFile(context, entry, manifest.nextId);
+}
 
+async function readPersistedTreeFile(
+    context: vscode.ExtensionContext,
+    entry: PersistedManifest['trees'][number],
+    nextId: number
+) {
     const treePath = path.join(context.globalStorageUri.fsPath, 'undo-trees', entry.file);
     try {
         const buf = await readFileWithWriteBackupFallback(treePath);
@@ -1754,11 +1751,11 @@ async function loadPersistedTreeFromDisk(
         }
 
         manager?.debugLog?.(
-            `[load] uri=${uri.toString()} file=${entry.file} nodes=${parsed.tree.nodes.length} currentId=${parsed.tree.currentId} rootId=${parsed.tree.rootId}`
+            `[load] uri=${entry.uri} file=${entry.file} nodes=${parsed.tree.nodes.length} currentId=${parsed.tree.currentId} rootId=${parsed.tree.rootId}`
         );
 
         return {
-            nextId: manifest.nextId,
+            nextId,
             destructiveGeneration: Number.isSafeInteger(parsed.destructiveGeneration) &&
                 (parsed.destructiveGeneration as number) >= 0
                 ? parsed.destructiveGeneration as number
@@ -1778,7 +1775,8 @@ async function ensureTreeLoadedOnce(
     context: vscode.ExtensionContext,
     treeManager: UndoTreeManager,
     document: vscode.TextDocument,
-    expectedTaskEpoch: number
+    expectedTaskEpoch: number,
+    fromCapturedSnapshot: boolean,
 ) {
     // Loading must not checkpoint a resident document. Saves and autosave own
     // that operation, including the pause check and accumulated delta buffer.
@@ -1816,7 +1814,9 @@ async function ensureTreeLoadedOnce(
             const beforeSyncNodeCount = persisted.tree.nodes.length;
             try {
                 treeManager.importTree(document.uri.toString(), persisted.tree, persisted.nextId);
-                const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+                const syncedTree = treeManager.syncLoadedDocumentState(
+                    document.uri, document.getText(), fromCapturedSnapshot
+                );
                 knownPersistedTreeRevisions.set(
                     document.uri.toString(),
                     getSerializedTreeRevision(persisted.tree)
@@ -1850,7 +1850,7 @@ async function ensureTreeLoadedOnce(
         return;
     }
 
-    const syncedTree = treeManager.syncDocumentState(document.uri, document.getText());
+    const syncedTree = treeManager.syncLoadedDocumentState(document.uri, document.getText(), fromCapturedSnapshot);
     treeManager.debugLog?.(
         `[ensureTreeLoaded] uri=${document.uri.toString()} source=fresh beforeNodes=${treeManager.hasTree(document.uri) ? syncedTree.nodes.size : 0} afterNodes=${syncedTree.nodes.size} currentId=${syncedTree.currentId}`
     );
@@ -1859,7 +1859,8 @@ async function ensureTreeLoadedOnce(
 async function ensureTreeLoaded(
     context: vscode.ExtensionContext,
     treeManager: UndoTreeManager,
-    document: vscode.TextDocument
+    document: vscode.TextDocument,
+    fromCapturedSnapshot = false,
 ): Promise<void> {
     const key = document.uri.toString();
     const pending = treeLoadPromises.get(key);
@@ -1869,7 +1870,7 @@ async function ensureTreeLoaded(
     }
 
     const expectedTaskEpoch = documentTaskEpoch;
-    const load = ensureTreeLoadedOnce(context, treeManager, document, expectedTaskEpoch);
+    const load = ensureTreeLoadedOnce(context, treeManager, document, expectedTaskEpoch, fromCapturedSnapshot);
     treeLoadPromises.set(key, load);
     try {
         await load;
@@ -2495,9 +2496,9 @@ async function captureDestructiveBaseRevision(
 
 function capturePersistRequest(
     treeManager: UndoTreeManager,
-    dirtyUris = treeManager.getDirtyUris()
+    dirtyUris = treeManager.getDirtyUris(),
+    state = treeManager.exportState(dirtyUris)
 ): PersistRequestSnapshot {
-    const state = treeManager.exportState();
     const dirtyGenerations = treeManager.getDirtyGenerations(dirtyUris);
     const replaceGenerations = new Map<string, number>();
     const destructiveChanges = new Map<string, DestructivePersistChange>();
@@ -2522,7 +2523,7 @@ function capturePersistRequest(
 }
 
 function captureFullPersistRequest(treeManager: UndoTreeManager): PersistRequestSnapshot {
-    const request = capturePersistRequest(treeManager);
+    const request = capturePersistRequest(treeManager, treeManager.getDirtyUris(), treeManager.exportState());
     for (const [uri, generation] of destructivePersistGenerations) {
         if (request.state.trees[uri]) {
             request.replaceGenerations.set(uri, generation);
@@ -3902,7 +3903,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         // Save All can include background documents whose persisted
                         // tree has not been lazily loaded yet. Load first so saving
                         // cannot replace it with a fresh one-node tree.
-                        await ensureTreeLoaded(context, treeManager, save.document);
+                        await ensureTreeLoaded(context, treeManager, save.document, true);
                         if (manager === treeManager && saveTaskEpoch === documentTaskEpoch) {
                             save.record();
                         }
@@ -3942,6 +3943,11 @@ export async function activate(context: vscode.ExtensionContext) {
             forgetDocumentTracking(doc);
             const treeManager = manager;
             const closeGeneration = bumpDocumentLifecycle(doc.uri);
+            // Clear the closed document's buffer before edits can arrive for a
+            // reopened document. Captured saves own their detached buffers.
+            if (!resetInProgress && !pendingRenameOldUris.has(doc.uri.toString())) {
+                treeManager?.onDidCloseTextDocument(doc);
+            }
             treeManager?.debugLog?.(`[closeTextDocument] uri=${doc.uri.toString()} tracked=${isTracked(doc)} hasTree=${treeManager.hasTree(doc.uri)}`);
             contentProvider.releaseByPrefix(getDiffKeyBase(doc.uri));
             multiWindowLockUris.delete(doc.uri.toString());
@@ -3951,7 +3957,6 @@ export async function activate(context: vscode.ExtensionContext) {
                 if (!treeManager || manager !== treeManager) {
                     return;
                 }
-                treeManager.onDidCloseTextDocument(doc);
                 if (!isTracked(doc)) {
                     return;
                 }
@@ -4007,15 +4012,16 @@ export async function activate(context: vscode.ExtensionContext) {
                 ) {
                     provider.rememberDocument(doc);
                     const wasResident = treeManager.hasTree(doc.uri);
-                    await ensureTreeLoaded(context, treeManager, openingDocument);
-                    if (openTaskEpoch !== documentTaskEpoch || manager !== treeManager) {
+                    await ensureTreeLoaded(context, treeManager, openingDocument, openingContent !== undefined);
+                    if (openTaskEpoch !== documentTaskEpoch || manager !== treeManager ||
+                        documentLifecycleGenerations.get(doc.uri.toString()) !== openGeneration) {
                         return;
                     }
                     if (wasResident && !treeManager.paused) {
                         // A closed document may have changed on disk. Only a
                         // genuine reopen reconciles a resident tree; changing
                         // editor focus or saving must keep its delta buffer.
-                        treeManager.syncDocumentState(doc.uri, openingDocument.getText());
+                        treeManager.syncLoadedDocumentState(doc.uri, openingDocument.getText(), openingContent !== undefined);
                     }
                     await acquireMultiWindowLock(context, doc, outputChannel);
                     provider.captureWindowContext();

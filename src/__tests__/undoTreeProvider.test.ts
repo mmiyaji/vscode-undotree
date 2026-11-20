@@ -53,9 +53,14 @@ describe('UndoTreeProvider initialization', () => {
 
     function makeView() {
         let receiveMessage: ((message: any) => Promise<void>) | undefined;
+        let changeVisibility: (() => void) | undefined;
         return {
             visible: true,
-            onDidChangeVisibility: jest.fn(),
+            onDidChangeVisibility: jest.fn((callback) => { changeVisibility = callback; }),
+            setVisible(visible: boolean) {
+                this.visible = visible;
+                changeVisibility?.();
+            },
             receiveMessage: (message: any) => receiveMessage?.(message),
             webview: {
                 options: {},
@@ -198,24 +203,22 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'dateTime', 'YYYY-MM-DD HH:mm:ss', 'none', 'current', false);
 
-        expect((provider as any).formatTimestamp(
-            new Date('2026-03-18T09:41:22').getTime(),
+        expect((provider as any).createTimestampFormatter(
             'dateTime',
             'yyyy-MM-dd HH:mm:ss'
-        )).toBe('2026-03-18 09:41:22');
+        )(new Date('2026-03-18T09:41:22').getTime())).toBe('2026-03-18 09:41:22');
         expect(html).toContain('let timeFormatCustom = "YYYY-MM-DD HH:mm:ss";');
     });
 
     it('supports relative timestamp formatting', () => {
-        jest.setSystemTime(new Date('2026-03-20T12:00:00Z'));
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        expect((provider as any).formatTimestamp(
-            new Date('2026-03-20T11:55:00Z').getTime(),
+        expect((provider as any).createTimestampFormatter(
             'relative',
-            'yyyy-MM-dd HH:mm:ss'
-        )).toBe('5m ago');
+            'yyyy-MM-dd HH:mm:ss',
+            new Date('2026-03-20T12:00:00Z')
+        )(new Date('2026-03-20T11:55:00Z').getTime())).toBe('5m ago');
     });
 
     it('renders auto color theme styles for theme-aware accents', () => {
@@ -237,11 +240,10 @@ describe('UndoTreeProvider initialization', () => {
 
         const html = (provider as any).buildHtml([], 0, false, 'navigate', 'custom', 'DD/MM/YYYY HH:mm', 'none', 'current', false);
 
-        expect((provider as any).formatTimestamp(
-            new Date('2026-03-18T09:41:22').getTime(),
+        expect((provider as any).createTimestampFormatter(
             'custom',
             'dd/MM/yyyy HH:mm'
-        )).toBe('18/03/2026 09:41');
+        )(new Date('2026-03-18T09:41:22').getTime())).toBe('18/03/2026 09:41');
         expect(html).toContain('let timeFormatCustom = "DD/MM/YYYY HH:mm";');
     });
 
@@ -249,11 +251,10 @@ describe('UndoTreeProvider initialization', () => {
         const manager = new UndoTreeManager();
         const provider = new UndoTreeProvider({} as any, manager);
 
-        expect((provider as any).formatTimestamp(
-            new Date('2026-03-18T09:41:22').getTime(),
+        expect((provider as any).createTimestampFormatter(
             'custom',
             'invalid ['
-        )).toBe('2026-03-18 09:41:22');
+        )(new Date('2026-03-18T09:41:22').getTime())).toBe('2026-03-18 09:41:22');
     });
 
     it('embeds nodeSizeMetric in the HTML', () => {
@@ -783,6 +784,97 @@ describe('UndoTreeProvider initialization', () => {
         expect(view.webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
             command: 'renderState',
         }));
+    });
+
+    it('skips history work while hidden and renders the latest tree when shown again', () => {
+        const vscode = require('vscode');
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const document = makeDocument('original');
+        const tree = manager.getTree(document.uri, document.getText());
+        vscode.window.activeTextEditor = { document };
+        vscode.workspace.textDocuments = [document];
+        const view = makeView();
+        provider.resolveWebviewView(view);
+        const initialHtml = view.webview.html;
+        const peekTree = jest.spyOn(manager, 'peekTree');
+        manager.onRefresh = () => provider.refresh();
+
+        view.setVisible(false);
+        manager.syncDocumentState(document.uri, 'changed');
+        provider.showCheckpointLoading();
+        expect(peekTree).not.toHaveBeenCalled();
+        expect(view.webview.postMessage).not.toHaveBeenCalled();
+
+        view.setVisible(true);
+        expect(peekTree).toHaveBeenCalledTimes(1);
+        expect(view.webview.html).toBe(initialHtml);
+        expect(view.webview.postMessage).toHaveBeenLastCalledWith({
+            command: 'renderState',
+            state: expect.objectContaining({
+                sourceUri: document.uri.toString(),
+                currentId: tree.currentId,
+                nodes: expect.arrayContaining([expect.objectContaining({ id: tree.currentId })]),
+            }),
+        });
+        manager.dispose();
+    });
+
+    it('defers rebuilding a reset shell until the view becomes visible', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const view = makeView();
+        provider.resolveWebviewView(view);
+        const initialHtml = view.webview.html;
+
+        view.setVisible(false);
+        provider.resetShell();
+        expect(view.webview.html).toBe(initialHtml);
+
+        view.setVisible(true);
+        expect(view.webview.html).not.toBe(initialHtml);
+        expect(view.webview.postMessage).not.toHaveBeenCalled();
+        manager.dispose();
+    });
+
+    it('reuses smart timestamps until the timestamp or local day changes', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const node = { timestamp: new Date('2026-03-20T12:00:00').getTime() };
+        const realFormatter = (provider as any).createTimestampFormatter.bind(provider);
+        const formatTimestamp = jest.fn(realFormatter('smart', '', new Date('2026-03-20T16:00:00')));
+        const factory = jest.spyOn(provider as any, 'createTimestampFormatter')
+            .mockReturnValue(formatTimestamp);
+        jest.setSystemTime(new Date('2026-03-20T16:00:00'));
+        const format = () => (provider as any).getNodeTimestampFormatter('smart', '')(node);
+
+        expect(format()).toBe('12:00');
+        expect(format()).toBe('12:00');
+        expect(formatTimestamp).toHaveBeenCalledTimes(1);
+
+        node.timestamp = new Date('2026-03-20T13:00:00').getTime();
+        expect(format()).toBe('13:00');
+        expect(formatTimestamp).toHaveBeenCalledTimes(2);
+
+        factory.mockRestore();
+        jest.setSystemTime(new Date('2026-03-21T01:00:00'));
+        expect(format()).toBe('Yesterday 13:00');
+        manager.dispose();
+    });
+
+    it('does not reuse formatted timestamps after switching custom patterns or for relative timestamps', () => {
+        const manager = new UndoTreeManager();
+        const provider = new UndoTreeProvider({} as any, manager);
+        const node = { timestamp: new Date('2026-03-20T12:00:00').getTime() };
+        const format = (format: string, pattern = '') => (provider as any).getNodeTimestampFormatter(format, pattern)(node);
+        jest.setSystemTime(new Date('2026-03-20T12:05:00'));
+
+        expect(format('custom', 'HH:mm')).toBe('12:00');
+        expect(format('custom', 'yyyy-MM-dd')).toBe('2026-03-20');
+        expect(format('relative')).toBe('5m ago');
+        jest.setSystemTime(new Date('2026-03-20T12:06:00'));
+        expect(format('relative')).toBe('6m ago');
+        manager.dispose();
     });
 
     it('renders the note edit button with a stable HTML entity icon', () => {

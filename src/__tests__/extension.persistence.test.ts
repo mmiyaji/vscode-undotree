@@ -107,6 +107,63 @@ describe('persisted storage integration', () => {
         expect(await fs.readFile(backup, 'utf8')).toBe('recoverable');
     });
 
+    it('snapshots only dirty histories and preserves the manifest path for untouched histories', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        require('vscode').workspace.getConfiguration.mockImplementation(() => ({ get: () => undefined }));
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        const clean = 'file:///clean.md';
+        const active = 'file:///active.md';
+        const uri = (value: string) => ({ toString: () => value }) as any;
+        const tree = makeTree([
+            { id: 0, parents: [], children: [1], timestamp: 1, label: 'initial', hash: hash('base'), storage: { kind: 'full', content: 'base' } },
+            { id: 1, parents: [0], children: [], timestamp: 2, label: 'save', hash: hash('saved'), storage: { kind: 'full', content: 'saved' } },
+        ], 1);
+        const file = 'recovered-clean.json';
+        const payload = JSON.stringify({ uri: clean, tree });
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, file), payload);
+        await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ nextId: 2, trees: [{ uri: clean, file }] }));
+
+        const manager = new UndoTreeManager();
+        const exportState = jest.spyOn(manager, 'exportState');
+        extension.__test__.setManagerForTest(manager);
+        try {
+            manager.importTree(clean, tree, 2);
+            manager.onDidSaveTextDocument({ uri: uri(active), getText: () => 'one' } as any);
+            manager.onDidSaveTextDocument({ uri: uri(active), getText: () => 'two' } as any);
+            await extension.__test__.flushPersistState(context);
+            expect(exportState).toHaveBeenCalledWith(new Set([active]));
+            expect(await fs.readFile(path.join(dir, file), 'utf8')).toBe(payload);
+            expect((await extension.__test__.loadPersistedTreeFromDisk(context, uri(clean)))?.tree).toEqual(tree);
+            expect((await extension.__test__.loadPersistedTreeFromDisk(context, uri(active)))?.tree.nodes).toHaveLength(2);
+            expect(manager.getDirtyUris().size).toBe(0);
+        } finally {
+            extension.__test__.setManagerForTest(undefined);
+            manager.dispose();
+        }
+    });
+
+    it('preserves a recovered manifest entry when its selected history cannot be parsed', async () => {
+        const extension = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        const uri = 'file:///history.md';
+        const file = 'recovered-history.json';
+        const tree = makeTree([
+            { id: 0, parents: [], children: [], timestamp: 1, label: 'initial', hash: hash('base'), storage: { kind: 'full', content: 'base' } },
+        ], 0);
+        await fs.mkdir(dir, { recursive: true });
+        await fs.writeFile(path.join(dir, file), '{');
+        await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ trees: [{ uri, file }] }));
+
+        const result = await extension.__test__.persistStateToDisk(context, { nextId: 1, trees: { [uri]: tree } }, false, new Set([uri]));
+
+        expect(result.unpersistedUris.has(uri)).toBe(true);
+        expect((await extension.__test__.readPersistedManifest(context)).manifest?.trees).toEqual([{ uri, file }]);
+        expect(await fs.readFile(path.join(dir, file), 'utf8')).toBe('{');
+    });
+
     it('rebuilds each tree once and recovers an interrupted write backup', async () => {
         const extension = require('../extension') as typeof import('../extension');
         const context = { globalStorageUri: { fsPath: tempDir } } as any;

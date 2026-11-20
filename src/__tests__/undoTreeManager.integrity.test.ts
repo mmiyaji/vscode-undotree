@@ -791,6 +791,58 @@ describe('history integrity regressions', () => {
         expect((manager as any).jumpSuppressedHashes.get(uri)).toBe(tree.nodes.get(0)!.hash);
     });
 
+    it.each([
+        { target: 'retained', historyIndex: 2 },
+        { target: 'removed', historyIndex: 1 },
+    ])('handles a $target jump target when compaction runs during checkpoint loading', async ({ target, historyIndex }) => {
+        const manager = createManager();
+        const uri = 'file:///compact-during-jump.md';
+        const base = 'a'.repeat(1000);
+        const tree = manager.getTree(makeUri(uri), base);
+        const ids: number[] = [];
+        let content = base;
+        for (const inserted of ['B', 'C', 'D']) {
+            const nextContent = content + inserted;
+            manager.onDidChangeTextDocument(makeChangeEvent(nextContent, uri, content.length, inserted));
+            manager.onDidSaveTextDocument(makeDocument(nextContent, uri));
+            ids.push(tree.currentId);
+            content = nextContent;
+        }
+        const root = tree.nodes.get(tree.rootId)!;
+        root.storage = { kind: 'checkpoint', contentHash: root.hash };
+        tree.currentId = root.id;
+
+        let signalCheckpointStarted!: () => void;
+        let resolveCheckpoint!: (value: string) => void;
+        const checkpointStarted = new Promise<void>((resolve) => { signalCheckpointStarted = resolve; });
+        const checkpointContent = new Promise<string>((resolve) => { resolveCheckpoint = resolve; });
+        manager.asyncContentResolver = async () => {
+            signalCheckpointStarted();
+            return checkpointContent;
+        };
+        const replace = jest.fn();
+        const edit = jest.fn(async (callback: (builder: { replace: jest.Mock }) => void) => {
+            callback({ replace });
+            return true;
+        });
+        const editor = { document: makeDocument(base, uri), edit } as any;
+
+        const jump = manager.jumpToNode(ids[historyIndex], editor, tree);
+        await checkpointStarted;
+        expect(manager.compact(tree)).toBe(1);
+        expect(tree.nodes.has(ids[1])).toBe(false);
+        resolveCheckpoint(base);
+        await jump;
+
+        if (target === 'retained') {
+            expect(replace).toHaveBeenCalledWith(expect.anything(), base + 'BCD');
+            expect(tree.currentId).toBe(ids[historyIndex]);
+        } else {
+            expect(edit).not.toHaveBeenCalled();
+            expect(tree.currentId).toBe(root.id);
+        }
+    });
+
     it('suppresses restore changes only for the URI being jumped', async () => {
         const manager = createManager();
         const jumpUri = 'file:///jump-uri-a.md';
@@ -1128,6 +1180,37 @@ describe('history integrity regressions', () => {
         expect(overrideResult).toEqual({ removed: 0, skipped: 1 });
         expect(tree.nodes.has(oldParentId)).toBe(true);
         expect(tree.nodes.has(recentChildId)).toBe(true);
+    });
+
+    it('keeps buffered edits when a lazy reopen selects an existing ancestor', () => {
+        const uri = 'file:///buffered-reopen.md';
+        const base = 'a'.repeat(1000);
+        const original = createManager();
+        original.getTree(makeUri(uri), base);
+        original.onDidSaveTextDocument(makeDocument(base + 'old', uri));
+        const exported = original.exportState();
+
+        const manager = createManager();
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'X', uri, base.length, 'X'));
+        manager.importTree(uri, exported.trees[uri], exported.nextId);
+        const tree = manager.syncLoadedDocumentState(makeUri(uri), base, true);
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'XY', uri, base.length + 1, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(base + 'XY', uri));
+
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('delta');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(base + 'XY');
+    });
+
+    it('does not replay buffered edits already included when loading a live document', () => {
+        const uri = 'file:///buffered-live-load.md';
+        const base = 'a'.repeat(1000);
+        const manager = createManager();
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'X', uri, base.length, 'X'));
+        const tree = manager.syncLoadedDocumentState(makeUri(uri), base + 'X');
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'XY', uri, base.length + 1, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(base + 'XY', uri));
+
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(base + 'XY');
     });
 
     it('raises nextId above every imported node even when the supplied hint is stale', () => {
