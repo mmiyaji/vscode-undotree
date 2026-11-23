@@ -144,6 +144,39 @@ describe('persisted storage integration', () => {
         }
     });
 
+    it('keeps both recovered files for one URI across idle and dirty saves', async () => {
+        const { __test__ } = require('../extension') as typeof import('../extension');
+        const context = { globalStorageUri: { fsPath: tempDir } } as any;
+        const dir = path.join(tempDir, 'undo-trees');
+        const uri = 'file:///recovered.md';
+        const selectedFile = '!first.json';
+        const otherFile = `${hash(uri)}.json`;
+        const manager = new UndoTreeManager();
+        const document = (content: string) => ({ uri: { toString: () => uri }, getText: () => content }) as any;
+        try {
+            manager.onDidSaveTextDocument(document('independent root'));
+            const otherPayload = JSON.stringify({ uri, tree: manager.exportState().trees[uri] });
+            manager.resetAll();
+            manager.onDidSaveTextDocument(document('first root'));
+            manager.onDidSaveTextDocument(document('saved'));
+            const firstTree = manager.exportState().trees[uri];
+
+            await fs.mkdir(dir);
+            await fs.writeFile(path.join(dir, selectedFile), JSON.stringify({ uri, tree: firstTree }));
+            await fs.writeFile(path.join(dir, otherFile), otherPayload);
+            await __test__.rebuildPersistedManifestFromTreeFiles(context, false);
+            manager.onDidSaveTextDocument(document('latest'));
+            for (const dirty of [new Set<string>(), new Set([uri]), new Set([uri])]) {
+                await __test__.persistStateToDisk(context, manager.exportState(dirty), false, dirty);
+                const entries = (await __test__.readPersistedManifest(context)).manifest!.trees;
+                expect(entries).toEqual([{ uri, file: selectedFile }, { uri, file: otherFile }]);
+                expect(await fs.readFile(path.join(dir, otherFile), 'utf8')).toBe(otherPayload);
+                const stored = await __test__.loadPersistedTreeFromDisk(context, document('').uri);
+                expect(stored!.tree.nodes).toHaveLength(dirty.size ? 3 : 2);
+            }
+        } finally { manager.dispose(); }
+    });
+
     it('preserves a recovered manifest entry when its selected history cannot be parsed', async () => {
         const extension = require('../extension') as typeof import('../extension');
         const context = { globalStorageUri: { fsPath: tempDir } } as any;

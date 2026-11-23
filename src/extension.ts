@@ -1248,8 +1248,11 @@ async function persistStateToDiskUnderLock(
             manifestInvalid: true as const,
         };
     }
+    // Recovery can index several files for one URI. Update the same first
+    // entry that lazy loading selects and keep every other file referenced.
+    const manifestTrees = [...existingManifest?.trees ?? []];
     const manifestEntries = new Map<string, PersistedManifest['trees'][number]>();
-    for (const entry of existingManifest?.trees ?? []) {
+    for (const entry of manifestTrees) {
         if (!manifestEntries.has(entry.uri)) {
             manifestEntries.set(entry.uri, entry);
         }
@@ -1441,7 +1444,11 @@ async function persistStateToDiskUnderLock(
             (incoming === tree || getSerializedTreeRevision(incoming) === revision)) {
             snapshotCompatibleUris.add(uri);
         }
-        manifestEntries.set(uri, { uri, file: makeTreeFileName(uri) });
+        if (!manifestEntries.has(uri)) {
+            const entry = { uri, file: makeTreeFileName(uri) };
+            manifestEntries.set(uri, entry);
+            manifestTrees.push(entry);
+        }
     }
 
     const manifest: PersistedManifest = {
@@ -1449,7 +1456,7 @@ async function persistStateToDiskUnderLock(
         savedAt: Date.now(),
         nextId: persistedNextId,
         paused,
-        trees: Array.from(manifestEntries.values()),
+        trees: manifestTrees,
     };
 
     // Content cleanup is an explicit diagnostics operation. Do not decode every
@@ -1512,7 +1519,7 @@ async function persistStateToDiskUnderLock(
             destructiveGeneration: persistedDestructiveGenerationsByUri.get(uri) ?? 0,
             tree: { ...tree, nodes: serializedNodes },
         }, null, 2);
-        const filePath = path.join(treesDir, makeTreeFileName(uri));
+        const filePath = path.join(treesDir, manifestEntries.get(uri)!.file);
 
         if (useCompression) {
             const compressed = await gzip(Buffer.from(json, 'utf8'));
@@ -1736,6 +1743,10 @@ async function readPersistedTreeFile(
     entry: PersistedManifest['trees'][number],
     nextId: number
 ) {
+    if (path.win32.basename(entry.file) !== entry.file || !entry.file.toLowerCase().endsWith('.json') ||
+        entry.file.toLowerCase() === 'manifest.json' || entry.file.includes(':')) {
+        throw new Error(`Invalid history filename: ${entry.file}`);
+    }
     const treePath = path.join(context.globalStorageUri.fsPath, 'undo-trees', entry.file);
     try {
         const buf = await readFileWithWriteBackupFallback(treePath);
@@ -3330,6 +3341,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('undotree.savePersistedState', async () => {
             if (resetInProgress || !manager) {
+                return;
+            }
+            const epoch = documentTaskEpoch;
+            await drainDocumentTasks();
+            if (resetInProgress || epoch !== documentTaskEpoch || !manager) {
                 return;
             }
             const request = captureFullPersistRequest(manager);

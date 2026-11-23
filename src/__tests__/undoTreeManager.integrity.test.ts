@@ -198,6 +198,27 @@ describe('history integrity regressions', () => {
         expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
         expect(manager.reconstructContent(tree, tree.currentId)).toBe(after);
     });
+    it('resumes with a full snapshot if an oversized edit was skipped during lazy loading', () => {
+        const manager = createManager();
+        const uri = makeUri();
+        const opening = 'a'.repeat(1000);
+        // Appending 100 characters exceeded the limit. Removing 99 brings the
+        // document back into scope, but that removal has no recorded insertion.
+        manager.invalidateTrackingBaseline(uri);
+        const saved = makeDocument(opening + 'X');
+        manager.onDidChangeTextDocument({ document: saved, contentChanges: [
+            { rangeOffset: 1001, rangeLength: 99, text: '' },
+        ] } as any);
+        const tree = manager.syncLoadedDocumentState(uri, opening, true);
+        manager.onDidSaveTextDocument(saved);
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(saved.getText());
+        manager.onDidChangeTextDocument(makeChangeEvent(opening + 'XY', uri.toString(), 1001, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(opening + 'XY'));
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('delta');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(opening + 'XY');
+    });
+
     it('records a full snapshot after tracking settings invalidate the baseline', () => {
         const manager = createManager();
         const uri = 'file:///integrity.md';
@@ -1211,6 +1232,27 @@ describe('history integrity regressions', () => {
         manager.onDidSaveTextDocument(makeDocument(base + 'XY', uri));
 
         expect(manager.reconstructContent(tree, tree.currentId)).toBe(base + 'XY');
+    });
+
+    it('merges and imports large histories without an argument per node', () => {
+        const count = 140_000;
+        const nodes = Array.from({ length: count }, (_, id) => ({
+            id, parents: id ? [id - 1] : [], children: id + 1 < count ? [id + 1] : [],
+            timestamp: id, label: 'save', hash: String(id), storage: { kind: 'full' as const, content: String(id) },
+        }));
+        const tree = serializedTree(nodes, count - 1);
+        expect(mergeSerializedTrees(undefined, tree).nextId).toBe(count);
+        const merged = mergeSerializedTrees(tree, tree);
+        expect(merged.nextId).toBe(count);
+        expect(merged.tree.nodes).toHaveLength(count);
+        const manager = createManager();
+        const uri = makeUri();
+        manager.importTree(uri.toString(), merged.tree);
+        manager.onDidSaveTextDocument(makeDocument('after importTree'));
+        expect(manager.getTree(uri).currentId).toBe(count);
+        manager.importState({ nextId: 1, trees: { [uri.toString()]: tree } });
+        manager.onDidSaveTextDocument(makeDocument('after importState'));
+        expect(manager.getTree(uri).currentId).toBe(count);
     });
 
     it('raises nextId above every imported node even when the supplied hint is stale', () => {

@@ -74,6 +74,14 @@ function uniqueIds(values: number[]): number[] {
     return Array.from(new Set(values));
 }
 
+function nextIdAfterNodes(nodes: Iterable<{ id: number }>, hint: number): number {
+    let nextId = Math.max(1, hint);
+    for (const node of nodes) {
+        nextId = Math.max(nextId, node.id + 1);
+    }
+    return nextId;
+}
+
 function mergeMutableMetadata(existing: SerializedUndoNode, incoming: SerializedUndoNode): void {
     if (existing.noteUpdatedAt === undefined && incoming.noteUpdatedAt === undefined) {
         // Legacy snapshots have no tombstone, so preserve an existing note when
@@ -128,7 +136,7 @@ export function mergeSerializedTrees(
                 currentId: incoming.currentId,
                 rootId: incoming.rootId,
             },
-            nextId: Math.max(nextIdHint, ...incoming.nodes.map((node) => node.id + 1), 1),
+            nextId: nextIdAfterNodes(incoming.nodes, nextIdHint),
         };
     }
 
@@ -144,12 +152,8 @@ export function mergeSerializedTrees(
     );
     const idRemap = new Map<number, number>();
     const sameHashCollisions: SerializedUndoNode[] = [];
-    let nextId = Math.max(
-        nextIdHint,
-        ...Array.from(mergedNodes.keys()).map((id) => id + 1),
-        ...incoming.nodes.map((node) => node.id + 1),
-        1
-    );
+    const baseNextId = nextIdAfterNodes(base.nodes, nextIdHint);
+    let nextId = nextIdAfterNodes(incoming.nodes, baseNextId);
 
     for (const node of incoming.nodes) {
         const existing = mergedNodes.get(node.id);
@@ -315,7 +319,7 @@ export function mergeSerializedTrees(
     mergedTree.hashMap = rebuildSerializedHashMap(mergedTree);
 
     // IDs tentatively allocated above may have been reused instead.
-    return { tree: mergedTree, nextId: Math.max(nextIdHint, ...Array.from(mergedNodes.keys(), id => id + 1), 1) };
+    return { tree: mergedTree, nextId: nextIdAfterNodes(mergedTree.nodes, nextIdHint) };
 }
 
 export type CompactPreviewItem = {
@@ -977,7 +981,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
     invalidateTrackingBaseline(uri: vscode.Uri): void {
         const key = uri.toString();
-        if (!this.trees.has(key)) { return; }
+        // A captured opening snapshot can still be loading when tracking stops.
         this.diffBuffer.delete(key);
         this.forceFullSnapshotUris.add(key);
     }
@@ -1059,6 +1063,7 @@ export class UndoTreeManager implements vscode.Disposable {
     onDidCloseTextDocument(document: vscode.TextDocument) {
         const key = document.uri.toString();
         this.diffBuffer.delete(key);
+        if (!this.trees.has(key)) { this.forceFullSnapshotUris.delete(key); }
         this.jumpSuppressedHashes.delete(key);
     }
 
@@ -2038,19 +2043,16 @@ export class UndoTreeManager implements vscode.Disposable {
         this.lastMetadataRevision = 0;
         this.evictCache(0);
 
+        this.nextId = Math.max(1, state.nextId);
         for (const [key, tree] of Object.entries(state.trees)) {
             const importedTree = this.deserializeTree(tree);
+            this.nextId = nextIdAfterNodes(importedTree.nodes.values(), this.nextId);
             this.trees.set(key, importedTree);
             this.observeMetadataRevisions(importedTree);
             this.lastAccessAt.set(key, Date.now());
         }
         this.pruneCompressedCheckpoints();
 
-        this.nextId = Math.max(
-            state.nextId,
-            ...Array.from(this.trees.values()).flatMap((tree) => Array.from(tree.nodes.keys()).map((id) => id + 1)),
-            1
-        );
         this.onRefresh?.();
     }
 
@@ -2061,15 +2063,8 @@ export class UndoTreeManager implements vscode.Disposable {
         this.observeMetadataRevisions(importedTree);
         this.lastAccessAt.set(uri, Date.now());
 
-        const importedNextId = Math.max(
-            1,
-            ...Array.from(importedTree.nodes.keys()).map((id) => id + 1)
-        );
-        this.nextId = Math.max(
-            this.nextId,
-            importedNextId,
-            typeof nextId === 'number' && Number.isFinite(nextId) ? nextId : 1
-        );
+        const hint = typeof nextId === 'number' && Number.isFinite(nextId) ? nextId : 1;
+        this.nextId = nextIdAfterNodes(importedTree.nodes.values(), Math.max(this.nextId, hint));
         this.onRefresh?.();
     }
 

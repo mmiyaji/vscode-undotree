@@ -42,7 +42,6 @@ exports.run = async function () {
         await sleep(300);
     }
     async function snapshot(uri) {
-        await sleep(200);
         await command('savePersistedState');
         const manifest = JSON.parse(await fs.readFile(path.join(storage, 'manifest.json'), 'utf8'));
         const entry = manifest.trees.find(entry => entry.uri === uri.toString());
@@ -60,7 +59,6 @@ exports.run = async function () {
             for (let round = 0; round < 2; round++) {
                 const doc = await vscode.workspace.openTextDocument(uri);
                 await vscode.window.showTextDocument(doc);
-                await sleep(500);
                 assert.equal(doc.getText(), base + 'saved');
                 const tree = await snapshot(uri);
                 assert.equal(tree.currentId, expected.savedId);
