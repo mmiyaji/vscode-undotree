@@ -74,6 +74,14 @@ function uniqueIds(values: number[]): number[] {
     return Array.from(new Set(values));
 }
 
+function nextIdAfterNodes(nodes: Iterable<{ id: number }>, hint: number): number {
+    let nextId = Math.max(1, hint);
+    for (const node of nodes) {
+        nextId = Math.max(nextId, node.id + 1);
+    }
+    return nextId;
+}
+
 function mergeMutableMetadata(existing: SerializedUndoNode, incoming: SerializedUndoNode): void {
     if (existing.noteUpdatedAt === undefined && incoming.noteUpdatedAt === undefined) {
         // Legacy snapshots have no tombstone, so preserve an existing note when
@@ -128,7 +136,7 @@ export function mergeSerializedTrees(
                 currentId: incoming.currentId,
                 rootId: incoming.rootId,
             },
-            nextId: Math.max(nextIdHint, ...incoming.nodes.map((node) => node.id + 1), 1),
+            nextId: nextIdAfterNodes(incoming.nodes, nextIdHint),
         };
     }
 
@@ -144,12 +152,8 @@ export function mergeSerializedTrees(
     );
     const idRemap = new Map<number, number>();
     const sameHashCollisions: SerializedUndoNode[] = [];
-    let nextId = Math.max(
-        nextIdHint,
-        ...Array.from(mergedNodes.keys()).map((id) => id + 1),
-        ...incoming.nodes.map((node) => node.id + 1),
-        1
-    );
+    const baseNextId = nextIdAfterNodes(base.nodes, nextIdHint);
+    let nextId = nextIdAfterNodes(incoming.nodes, baseNextId);
 
     for (const node of incoming.nodes) {
         const existing = mergedNodes.get(node.id);
@@ -315,7 +319,7 @@ export function mergeSerializedTrees(
     mergedTree.hashMap = rebuildSerializedHashMap(mergedTree);
 
     // IDs tentatively allocated above may have been reused instead.
-    return { tree: mergedTree, nextId: Math.max(nextIdHint, ...Array.from(mergedNodes.keys(), id => id + 1), 1) };
+    return { tree: mergedTree, nextId: nextIdAfterNodes(mergedTree.nodes, nextIdHint) };
 }
 
 export type CompactPreviewItem = {
@@ -493,30 +497,31 @@ export class UndoTreeManager implements vscode.Disposable {
     }
 
     async reconstructContentAsync(tree: UndoTree, targetId: number): Promise<string> {
-        const path: number[] = [];
+        // Capture storage before loading a checkpoint. Compaction can replace
+        // delta storage and remove its ancestors while the load is pending.
+        const path: UndoNodeStorage[] = [];
         const visited = new Set<number>();
         let id: number | undefined = targetId;
 
         while (id !== undefined) {
             if (visited.has(id)) { break; }
             visited.add(id);
-            path.push(id);
             const node = tree.nodes.get(id);
-            if (!node || node.storage.kind === 'full' || node.storage.kind === 'checkpoint') { break; }
+            if (!node) { return ''; }
+            path.push(node.storage);
+            if (node.storage.kind !== 'delta') { break; }
             id = node.parents.length > 0 ? node.parents[node.parents.length - 1] : undefined;
         }
 
         let content = '';
         const diffs: Diff[][] = [];
-        for (const nodeId of path.reverse()) {
-            const node = tree.nodes.get(nodeId);
-            if (!node) { break; }
-            if (node.storage.kind === 'full') {
-                content = node.storage.content;
-            } else if (node.storage.kind === 'checkpoint') {
-                content = await this.getOrLoadContentAsync(node.storage.contentHash);
+        for (const storage of path.reverse()) {
+            if (storage.kind === 'full') {
+                content = storage.content;
+            } else if (storage.kind === 'checkpoint') {
+                content = await this.getOrLoadContentAsync(storage.contentHash);
             } else {
-                for (const event of node.storage.diffs) { diffs.push(event); }
+                for (const event of storage.diffs) { diffs.push(event); }
             }
         }
         return this.applyDiffs(content, diffs);
@@ -976,7 +981,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
     invalidateTrackingBaseline(uri: vscode.Uri): void {
         const key = uri.toString();
-        if (!this.trees.has(key)) { return; }
+        // A captured opening snapshot can still be loading when tracking stops.
         this.diffBuffer.delete(key);
         this.forceFullSnapshotUris.add(key);
     }
@@ -1058,6 +1063,7 @@ export class UndoTreeManager implements vscode.Disposable {
     onDidCloseTextDocument(document: vscode.TextDocument) {
         const key = document.uri.toString();
         this.diffBuffer.delete(key);
+        if (!this.trees.has(key)) { this.forceFullSnapshotUris.delete(key); }
         this.jumpSuppressedHashes.delete(key);
     }
 
@@ -1115,6 +1121,7 @@ export class UndoTreeManager implements vscode.Disposable {
 
         const isCurrentEmptyRoot =
             currentNode.parents.length === 0 &&
+            currentNode.children.length === 0 &&
             currentNode.storage.kind === 'full' &&
             currentNode.storage.content === '';
 
@@ -1411,6 +1418,7 @@ export class UndoTreeManager implements vscode.Disposable {
             this.jumpGenerations.get(t) !== jumpGeneration
             || this.managerEpoch !== operationEpoch
             || this.trees.get(uriStr) !== t
+            || t.nodes.get(nodeId) !== node
         ) {
             return;
         }
@@ -1620,9 +1628,11 @@ export class UndoTreeManager implements vscode.Disposable {
         };
     }
 
-    exportState(): SerializedUndoTreeState {
+    exportState(uris: Iterable<string> = this.trees.keys()): SerializedUndoTreeState {
         const trees: Record<string, SerializedUndoTree> = {};
-        for (const [key, tree] of this.trees) {
+        for (const key of uris) {
+            const tree = this.trees.get(key);
+            if (!tree) { continue; }
             trees[key] = {
                 nodes: Array.from(tree.nodes.values()).map((node) => ({
                     id: node.id,
@@ -2033,19 +2043,16 @@ export class UndoTreeManager implements vscode.Disposable {
         this.lastMetadataRevision = 0;
         this.evictCache(0);
 
+        this.nextId = Math.max(1, state.nextId);
         for (const [key, tree] of Object.entries(state.trees)) {
             const importedTree = this.deserializeTree(tree);
+            this.nextId = nextIdAfterNodes(importedTree.nodes.values(), this.nextId);
             this.trees.set(key, importedTree);
             this.observeMetadataRevisions(importedTree);
             this.lastAccessAt.set(key, Date.now());
         }
         this.pruneCompressedCheckpoints();
 
-        this.nextId = Math.max(
-            state.nextId,
-            ...Array.from(this.trees.values()).flatMap((tree) => Array.from(tree.nodes.keys()).map((id) => id + 1)),
-            1
-        );
         this.onRefresh?.();
     }
 
@@ -2056,15 +2063,8 @@ export class UndoTreeManager implements vscode.Disposable {
         this.observeMetadataRevisions(importedTree);
         this.lastAccessAt.set(uri, Date.now());
 
-        const importedNextId = Math.max(
-            1,
-            ...Array.from(importedTree.nodes.keys()).map((id) => id + 1)
-        );
-        this.nextId = Math.max(
-            this.nextId,
-            importedNextId,
-            typeof nextId === 'number' && Number.isFinite(nextId) ? nextId : 1
-        );
+        const hint = typeof nextId === 'number' && Number.isFinite(nextId) ? nextId : 1;
+        this.nextId = nextIdAfterNodes(importedTree.nodes.values(), Math.max(this.nextId, hint));
         this.onRefresh?.();
     }
 
@@ -2147,9 +2147,27 @@ export class UndoTreeManager implements vscode.Disposable {
         }
     }
 
-    syncDocumentState(uri: vscode.Uri, content: string, label = 'restore', preserveRoot = false, diffs?: Diff[][]): UndoTree {
-        if (this.pendingSaves.has(uri.toString())) { this.forceFullSnapshotUris.add(uri.toString()); }
-        const tree = preserveRoot ? this.trees.get(uri.toString()) ?? this.getTree(uri, content) : this.getTree(uri, content);
+    syncLoadedDocumentState(uri: vscode.Uri, content: string, fromCapturedSnapshot = false): UndoTree {
+        const key = uri.toString();
+        // A live document already includes changes received during loading.
+        // Captured open/save snapshots predate the changes still in the buffer.
+        if (!fromCapturedSnapshot && this.diffBuffer.delete(key)) {
+            this.forceFullSnapshotUris.add(key);
+        }
+        return this.syncDocumentState(uri, content, 'restore', false, undefined, fromCapturedSnapshot);
+    }
+
+    syncDocumentState(
+        uri: vscode.Uri,
+        content: string,
+        label = 'restore',
+        preserveRoot = false,
+        diffs?: Diff[][],
+        preserveBufferedChanges = false,
+    ): UndoTree {
+        const key = uri.toString();
+        if (this.pendingSaves.has(key)) { this.forceFullSnapshotUris.add(key); }
+        const tree = preserveRoot ? this.trees.get(key) ?? this.getTree(uri, content) : this.getTree(uri, content);
         const currentContent = this.reconstructContent(tree, tree.currentId);
         if (currentContent === content) {
             return tree;
@@ -2159,14 +2177,13 @@ export class UndoTreeManager implements vscode.Disposable {
         if (reusableId !== undefined) {
             if (tree.currentId !== reusableId) {
                 tree.currentId = reusableId;
-                this.markDirtyKey(uri.toString());
+                this.markDirtyKey(key);
             }
-            this.diffBuffer.delete(uri.toString());
+            if (!preserveBufferedChanges) { this.diffBuffer.delete(key); }
             this.onRefresh?.();
             return tree;
         }
 
-        const key = uri.toString();
         const currentNode = tree.nodes.get(tree.currentId)!;
         const newId = this.nextId++;
         const node: UndoNode = {
@@ -2191,7 +2208,7 @@ export class UndoTreeManager implements vscode.Disposable {
         } else if (currentNode.storage.kind === 'full' && currentNode.storage.content.length >= MIN_COMPRESSED_SNAPSHOT_CHARS) {
             this.upgradeStorage(tree, currentNode.id, currentNode.storage.content, key, generation);
         }
-        this.diffBuffer.delete(key);
+        if (!preserveBufferedChanges) { this.diffBuffer.delete(key); }
         this.onRefresh?.();
         return tree;
     }

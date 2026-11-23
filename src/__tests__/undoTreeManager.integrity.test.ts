@@ -198,6 +198,27 @@ describe('history integrity regressions', () => {
         expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
         expect(manager.reconstructContent(tree, tree.currentId)).toBe(after);
     });
+    it('resumes with a full snapshot if an oversized edit was skipped during lazy loading', () => {
+        const manager = createManager();
+        const uri = makeUri();
+        const opening = 'a'.repeat(1000);
+        // Appending 100 characters exceeded the limit. Removing 99 brings the
+        // document back into scope, but that removal has no recorded insertion.
+        manager.invalidateTrackingBaseline(uri);
+        const saved = makeDocument(opening + 'X');
+        manager.onDidChangeTextDocument({ document: saved, contentChanges: [
+            { rangeOffset: 1001, rangeLength: 99, text: '' },
+        ] } as any);
+        const tree = manager.syncLoadedDocumentState(uri, opening, true);
+        manager.onDidSaveTextDocument(saved);
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('full');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(saved.getText());
+        manager.onDidChangeTextDocument(makeChangeEvent(opening + 'XY', uri.toString(), 1001, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(opening + 'XY'));
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('delta');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(opening + 'XY');
+    });
+
     it('records a full snapshot after tracking settings invalidate the baseline', () => {
         const manager = createManager();
         const uri = 'file:///integrity.md';
@@ -791,6 +812,58 @@ describe('history integrity regressions', () => {
         expect((manager as any).jumpSuppressedHashes.get(uri)).toBe(tree.nodes.get(0)!.hash);
     });
 
+    it.each([
+        { target: 'retained', historyIndex: 2 },
+        { target: 'removed', historyIndex: 1 },
+    ])('handles a $target jump target when compaction runs during checkpoint loading', async ({ target, historyIndex }) => {
+        const manager = createManager();
+        const uri = 'file:///compact-during-jump.md';
+        const base = 'a'.repeat(1000);
+        const tree = manager.getTree(makeUri(uri), base);
+        const ids: number[] = [];
+        let content = base;
+        for (const inserted of ['B', 'C', 'D']) {
+            const nextContent = content + inserted;
+            manager.onDidChangeTextDocument(makeChangeEvent(nextContent, uri, content.length, inserted));
+            manager.onDidSaveTextDocument(makeDocument(nextContent, uri));
+            ids.push(tree.currentId);
+            content = nextContent;
+        }
+        const root = tree.nodes.get(tree.rootId)!;
+        root.storage = { kind: 'checkpoint', contentHash: root.hash };
+        tree.currentId = root.id;
+
+        let signalCheckpointStarted!: () => void;
+        let resolveCheckpoint!: (value: string) => void;
+        const checkpointStarted = new Promise<void>((resolve) => { signalCheckpointStarted = resolve; });
+        const checkpointContent = new Promise<string>((resolve) => { resolveCheckpoint = resolve; });
+        manager.asyncContentResolver = async () => {
+            signalCheckpointStarted();
+            return checkpointContent;
+        };
+        const replace = jest.fn();
+        const edit = jest.fn(async (callback: (builder: { replace: jest.Mock }) => void) => {
+            callback({ replace });
+            return true;
+        });
+        const editor = { document: makeDocument(base, uri), edit } as any;
+
+        const jump = manager.jumpToNode(ids[historyIndex], editor, tree);
+        await checkpointStarted;
+        expect(manager.compact(tree)).toBe(1);
+        expect(tree.nodes.has(ids[1])).toBe(false);
+        resolveCheckpoint(base);
+        await jump;
+
+        if (target === 'retained') {
+            expect(replace).toHaveBeenCalledWith(expect.anything(), base + 'BCD');
+            expect(tree.currentId).toBe(ids[historyIndex]);
+        } else {
+            expect(edit).not.toHaveBeenCalled();
+            expect(tree.currentId).toBe(root.id);
+        }
+    });
+
     it('suppresses restore changes only for the URI being jumped', async () => {
         const manager = createManager();
         const jumpUri = 'file:///jump-uri-a.md';
@@ -1128,6 +1201,58 @@ describe('history integrity regressions', () => {
         expect(overrideResult).toEqual({ removed: 0, skipped: 1 });
         expect(tree.nodes.has(oldParentId)).toBe(true);
         expect(tree.nodes.has(recentChildId)).toBe(true);
+    });
+
+    it('keeps buffered edits when a lazy reopen selects an existing ancestor', () => {
+        const uri = 'file:///buffered-reopen.md';
+        const base = 'a'.repeat(1000);
+        const original = createManager();
+        original.getTree(makeUri(uri), base);
+        original.onDidSaveTextDocument(makeDocument(base + 'old', uri));
+        const exported = original.exportState();
+
+        const manager = createManager();
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'X', uri, base.length, 'X'));
+        manager.importTree(uri, exported.trees[uri], exported.nextId);
+        const tree = manager.syncLoadedDocumentState(makeUri(uri), base, true);
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'XY', uri, base.length + 1, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(base + 'XY', uri));
+
+        expect(tree.nodes.get(tree.currentId)!.storage.kind).toBe('delta');
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(base + 'XY');
+    });
+
+    it('does not replay buffered edits already included when loading a live document', () => {
+        const uri = 'file:///buffered-live-load.md';
+        const base = 'a'.repeat(1000);
+        const manager = createManager();
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'X', uri, base.length, 'X'));
+        const tree = manager.syncLoadedDocumentState(makeUri(uri), base + 'X');
+        manager.onDidChangeTextDocument(makeChangeEvent(base + 'XY', uri, base.length + 1, 'Y'));
+        manager.onDidSaveTextDocument(makeDocument(base + 'XY', uri));
+
+        expect(manager.reconstructContent(tree, tree.currentId)).toBe(base + 'XY');
+    });
+
+    it('merges and imports large histories without an argument per node', () => {
+        const count = 140_000;
+        const nodes = Array.from({ length: count }, (_, id) => ({
+            id, parents: id ? [id - 1] : [], children: id + 1 < count ? [id + 1] : [],
+            timestamp: id, label: 'save', hash: String(id), storage: { kind: 'full' as const, content: String(id) },
+        }));
+        const tree = serializedTree(nodes, count - 1);
+        expect(mergeSerializedTrees(undefined, tree).nextId).toBe(count);
+        const merged = mergeSerializedTrees(tree, tree);
+        expect(merged.nextId).toBe(count);
+        expect(merged.tree.nodes).toHaveLength(count);
+        const manager = createManager();
+        const uri = makeUri();
+        manager.importTree(uri.toString(), merged.tree);
+        manager.onDidSaveTextDocument(makeDocument('after importTree'));
+        expect(manager.getTree(uri).currentId).toBe(count);
+        manager.importState({ nextId: 1, trees: { [uri.toString()]: tree } });
+        manager.onDidSaveTextDocument(makeDocument('after importState'));
+        expect(manager.getTree(uri).currentId).toBe(count);
     });
 
     it('raises nextId above every imported node even when the supplied hint is stale', () => {

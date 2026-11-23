@@ -2,7 +2,7 @@
 
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
-import { format as formatDate } from 'date-fns';
+import { format as formatDate, lightFormat } from 'date-fns';
 import { UndoNode, UndoTreeManager } from './undoTreeManager';
 import { t as tr } from './runtimeL10n';
 import { TrackingStatus } from './tracking';
@@ -17,6 +17,7 @@ type DisplayNode = Pick<UndoNode, 'id' | 'parents' | 'children' | 'timestamp' | 
 };
 
 type NotTrackedReason = TrackingStatus['reason'];
+type TimeFormat = 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom';
 
 function getNonce(): string {
     return randomBytes(16).toString('hex');
@@ -39,6 +40,10 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private loadingRequest?: { uri: string; token: number };
     private loadingToken = 0;
     private webviewInitialized = false;
+    private timestampCache?: {
+        key: string;
+        values: WeakMap<UndoNode, { timestamp: number; formatted: string }>;
+    };
 
     setActiveEditor(editor: vscode.TextEditor | undefined) {
         const nextContextEditor = editor && this.isSidebarContextDocument(editor.document) ? editor : undefined;
@@ -101,11 +106,14 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     }
 
     showCheckpointLoading() {
-        this.view?.webview.postMessage({ command: 'showJumpLoading' });
+        if (this.view?.visible) {
+            void this.view.webview.postMessage({ command: 'showJumpLoading' });
+        }
     }
 
     resetShell() {
         this.webviewInitialized = false;
+        this.timestampCache = undefined;
         this.render();
     }
 
@@ -137,7 +145,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         this.webviewInitialized = false;
         webviewView.webview.options = { enableScripts: true };
         webviewView.onDidChangeVisibility(() => {
-            if (!webviewView.visible) {
+            if (this.view !== webviewView || !webviewView.visible) {
                 return;
             }
             this.captureWindowContext();
@@ -266,13 +274,11 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     }
 
     refresh() {
-        if (this.view) {
-            this.render();
-        }
+        this.render();
     }
 
     private render() {
-        if (!this.view) {
+        if (!this.view?.visible) {
             return;
         }
         const document = this.getContextDocument();
@@ -326,7 +332,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
     private getRenderState(
         document: vscode.TextDocument | undefined,
         isLoadingCurrentEditor: boolean,
-        timeFormat: 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom',
+        timeFormat: TimeFormat,
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',
@@ -395,7 +401,8 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             };
         }
         const tree = residentTree!;
-        const displayNodes = Array.from(tree.nodes.values()).map((node) => ({
+        const formatTime = this.getNodeTimestampFormatter(timeFormat, timeFormatCustom);
+        const displayNodes = Array.from(tree.nodes.values(), (node) => ({
             id: node.id,
             parents: node.parents,
             children: node.children,
@@ -406,7 +413,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
             lineCount: node.lineCount,
             byteCount: node.byteCount,
             storage: { kind: node.storage.kind },
-            formattedTime: this.formatTimestamp(node.timestamp, timeFormat, timeFormatCustom),
+            formattedTime: formatTime(node),
             isEmpty: this.manager.isNodeEmpty(tree, node.id),
         }));
         return {
@@ -561,7 +568,7 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return scheme === 'file' || document.isUntitled;
     }
 
-    private getTimeFormat(): 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom' {
+    private getTimeFormat(): TimeFormat {
         const value = vscode.workspace.getConfiguration('undotree').get<string>('timeFormat');
         if (value === 'time' || value === 'smart' || value === 'none' || value === 'dateTime' || value === 'relative' || value === 'custom') {
             return value;
@@ -623,39 +630,65 @@ export class UndoTreeProvider implements vscode.WebviewViewProvider {
         return evaluateDocumentTracking(document, relativePath, readTrackingSettings(config));
     }
 
-    private formatTimestamp(
-        timestamp: number,
-        timeFormat: 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom',
-        timeFormatCustom: string
-    ): string {
-        if (timeFormat === 'smart') {
-            const date = new Date(timestamp);
-            const today = new Date();
-            const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-            const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-            if (sameDay(date, today)) { return formatDate(date, 'HH:mm'); }
-            if (sameDay(date, yesterday)) { return tr('Yesterday {0}', formatDate(date, 'HH:mm')); }
-            return formatDate(date, date.getFullYear() === today.getFullYear() ? 'MM/dd HH:mm' : 'yyyy/MM/dd');
-        }
-        if (timeFormat === 'none') { return ''; }
-        if (timeFormat === 'relative') {
-            return this.formatRelativeTimestamp(timestamp);
-        }
-        const pattern = timeFormat === 'time'
-            ? 'HH:mm:ss'
-            : timeFormat === 'dateTime'
-                ? 'yyyy-MM-dd HH:mm:ss'
-                : timeFormatCustom;
+    private getNodeTimestampFormatter(timeFormat: TimeFormat, timeFormatCustom: string): (node: UndoNode) => string {
+        if (timeFormat === 'none') { return () => ''; }
+        const now = new Date();
+        const formatTimestamp = this.createTimestampFormatter(timeFormat, timeFormatCustom, now);
+        if (timeFormat === 'relative') { return (node) => formatTimestamp(node.timestamp); }
 
-        try {
-            return formatDate(new Date(timestamp), pattern);
-        } catch {
-            return formatDate(new Date(timestamp), 'yyyy-MM-dd HH:mm:ss');
+        const key = JSON.stringify([
+            timeFormat,
+            timeFormat === 'custom' ? timeFormatCustom : '',
+            new Intl.DateTimeFormat().resolvedOptions().timeZone,
+            timeFormat === 'smart' ? now.toDateString() : '',
+        ]);
+        if (this.timestampCache?.key !== key) {
+            this.timestampCache = { key, values: new WeakMap() };
         }
+        const { values } = this.timestampCache;
+        return (node) => {
+            const cached = values.get(node);
+            if (cached?.timestamp === node.timestamp) {
+                return cached.formatted;
+            }
+            const formatted = formatTimestamp(node.timestamp);
+            values.set(node, { timestamp: node.timestamp, formatted });
+            return formatted;
+        };
     }
 
-    private formatRelativeTimestamp(timestamp: number): string {
-        const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+    private createTimestampFormatter(
+        timeFormat: Exclude<TimeFormat, 'none'>,
+        timeFormatCustom: string,
+        today = new Date()
+    ): (timestamp: number) => string {
+        if (timeFormat === 'smart') {
+            const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+            const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+            return (timestamp) => {
+                const date = new Date(timestamp);
+                if (sameDay(date, today)) { return lightFormat(date, 'HH:mm'); }
+                if (sameDay(date, yesterday)) { return tr('Yesterday {0}', lightFormat(date, 'HH:mm')); }
+                return lightFormat(date, date.getFullYear() === today.getFullYear() ? 'MM/dd HH:mm' : 'yyyy/MM/dd');
+            };
+        }
+        if (timeFormat === 'relative') {
+            const now = today.getTime();
+            return (timestamp) => this.formatRelativeTimestamp(timestamp, now);
+        }
+        if (timeFormat === 'time') { return (timestamp) => lightFormat(timestamp, 'HH:mm:ss'); }
+        if (timeFormat === 'dateTime') { return (timestamp) => lightFormat(timestamp, 'yyyy-MM-dd HH:mm:ss'); }
+        return (timestamp) => {
+            try {
+                return formatDate(timestamp, timeFormatCustom);
+            } catch {
+                return lightFormat(timestamp, 'yyyy-MM-dd HH:mm:ss');
+            }
+        };
+    }
+
+    private formatRelativeTimestamp(timestamp: number, now: number): string {
+        const deltaSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
         if (deltaSeconds < 5) {
             return tr('just now');
         }
@@ -718,7 +751,7 @@ document.getElementById('legacy-open-settings')?.addEventListener('click', () =>
         currentId: number,
         paused: boolean,
         mode: 'navigate' | 'diff',
-        timeFormat: 'none' | 'smart' | 'time' | 'dateTime' | 'relative' | 'custom',
+        timeFormat: TimeFormat,
         timeFormatCustom: string,
         nodeSizeMetric: 'none' | 'lines' | 'bytes',
         nodeSizeMetricBase: 'current' | 'initial' | 'parent',

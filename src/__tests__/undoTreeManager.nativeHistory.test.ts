@@ -183,13 +183,21 @@ describe('native Undo/Redo with save checkpoints', () => {
         expect(current()).toBe(base + 'BD');
     });
 
-    it('preserves an empty root when capturing the pre-undo state', () => {
+    it('preserves an empty root when saving a new branch after native undo', () => {
         manager.resetAll();
-        manager.getTree(uri, '');
+        const tree = manager.getTree(uri, '');
         change('', 'B');
         change('B', '', vscode.TextDocumentChangeReason.Undo);
         expect(contents()).toEqual(['', 'B']);
         expect(current()).toBe('');
+        const abandonedId = tree.nodes.get(tree.rootId)!.children[0];
+
+        change('', 'C');
+        manager.onDidSaveTextDocument(doc('C'));
+
+        expect(contents()).toEqual(['', 'B', 'C']);
+        expect(tree.nodes.get(tree.rootId)!.children).toEqual([abandonedId, tree.currentId]);
+        expect(current()).toBe('C');
     });
 
     it('reopens at a saved ancestor without duplicate restores or losing its unsaved future', () => {

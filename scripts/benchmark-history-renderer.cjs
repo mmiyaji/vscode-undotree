@@ -63,7 +63,7 @@ async function main() {
                     showStorageKind, colorTheme, sourceUri, rootId, paused: false }));
                 await page.locator('.pinned-link').click();
                 assert.equal(await page.evaluate(() => focusedIndex), 1);
-                assert.equal(await page.locator('.node.focused .note-text').innerText(), '日本語 <note>');
+                assert.equal(await page.locator('.node.focused .node-label').innerText(), '日本語 <note>');
                 assert.equal(await page.evaluate(() => window.messages.at(-1).command), 'jumpToNode');
                 await page.evaluate(() => renderState({ view: 'tree', nodes, currentId, mode: 'diff', timeFormat,
                     timeFormatCustom, nodeSizeMetric, nodeSizeMetricBase, showStorageKind, colorTheme, sourceUri, rootId, paused: false }));
@@ -95,7 +95,9 @@ async function main() {
                 });
                 assert.deepEqual(await page.evaluate(() => nodeIds), [41, 42, 43, 44, 45]);
                 assert.equal(await page.locator('.node').count(), 5);
-                assert.equal(await page.locator('.node').first().locator('.graph').count(), 0, 'non-zero root has no connector');
+                const rootRow = page.locator('.node[data-node-id="41"]');
+                assert.equal(await rootRow.locator('.graph-dot').count(), 1, 'non-zero root has a graph dot');
+                assert.equal(await rootRow.locator('.graph-segment path[d$=" 0V11"]').count(), 0, 'non-zero root has no incoming connector');
                 assert.deepEqual(errors, [], 'pin, diff and branch interactions must not throw');
             }
         } finally { await browser.close(); }

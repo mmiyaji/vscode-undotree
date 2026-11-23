@@ -45,9 +45,16 @@ async function measure(root, scenario) {
     await fsp.mkdir(directory, { recursive: true });
     const file = path.join(directory, 'file.md');
     const uri = { scheme: 'file', toString: () => pathToFileURL(file).toString() };
-    const config = { enabledExtensions: ['.md'], excludePatterns: [], persistenceMode: 'manual', compressionThresholdKB: 100, checkpointThresholdKB: 1000 };
+    const config = {
+        trackingMode: 'listed', maxTrackedFileChars: 0, enabledExtensions: ['.md'], excludePatterns: [],
+        persistenceMode: 'manual', compressionThresholdKB: 100, checkpointThresholdKB: 1000,
+    };
     const vscode = {
-        workspace: { textDocuments: [], getConfiguration: () => ({ get: (key, fallback) => config[key] ?? fallback }) },
+        workspace: {
+            textDocuments: [],
+            getConfiguration: () => ({ get: (key, fallback) => config[key] ?? fallback, inspect: () => undefined }),
+        },
+        TextDocumentChangeReason: { Undo: 1, Redo: 2 },
         window: { showWarningMessage: () => Promise.resolve(), visibleTextEditors: [], tabGroups: { activeTabGroup: {} } },
         env: { language: 'en' }, l10n: { t: text => text },
         EventEmitter: class { constructor() { this.event = () => ({ dispose() {} }); } fire() {} },
@@ -85,6 +92,7 @@ async function measure(root, scenario) {
     if (reconstructAsync.value !== content) { throw new Error('Async content reconstruction failed'); }
     const provider = new UndoTreeProvider({}, manager);
     const display = timed(() => provider.getRenderState(document, false, 'time', 'yyyy-MM-dd HH:mm:ss', 'lines', 'parent', false, 'blue'));
+    if (display.value.nodes.length !== tree.nodes.size) { throw new Error('Display state omitted history nodes'); }
     const payload = timed(() => JSON.stringify(display.value));
     const html = timed(() => provider.buildHtml(display.value.nodes, tree.currentId, false, 'navigate', 'time', 'yyyy-MM-dd HH:mm:ss', 'lines', 'parent', false, 'blue', 'tree', '', '', uri.toString(), tree.rootId));
     await fsp.writeFile(path.join(directory, 'view.html'), html.value);
