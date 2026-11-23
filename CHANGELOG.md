@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1
+
+### Fixes
+
+- Keep all recovered history files for a document when saving. If recovery finds several files for the same document, subsequent saves update only the selected history.
+- Wait for pending history loads and document edits to be processed before saving history manually. This preserves the selected checkpoint when saving immediately after a restart.
+- Preserve edits made while history is loading, including edits that take a document over the tracking size limit and back under it.
+- Keep checkpoint navigation consistent when history is compacted during a jump, and preserve an empty starting checkpoint when saving a new branch after Undo.
+- Fix a failure when merging or importing very large histories. Regression tests cover a history of 140,000 checkpoints.
+
+### Performance
+
+- Snapshot only changed histories for automatic persistence. Skip sidebar rendering while the view is hidden and reuse formatted timestamps when their display value is still current.
+
 ## 0.4.0
 
 ### History and navigation
